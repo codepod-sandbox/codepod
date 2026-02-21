@@ -87,4 +87,20 @@ path = "src/bin/env.rs"
 name = "printf"
 path = "src/bin/printf.rs"
 
+[[bin]]
+name = "find"
+path = "src/bin/find.rs"
+
+[[bin]]
+name = "sed"
+path = "src/bin/sed.rs"
+
+[[bin]]
+name = "awk"
+path = "src/bin/awk.rs"
+
+[[bin]]
+name = "jq"
+path = "src/bin/jq.rs"
+
 [dependencies]
