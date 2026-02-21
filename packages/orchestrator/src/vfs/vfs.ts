@@ -13,6 +13,7 @@ import {
   createFileInode,
   createSymlinkInode,
 } from './inode.js';
+import { deepCloneRoot } from './snapshot.js';
 
 const MAX_SYMLINK_DEPTH = 40;
 
@@ -43,10 +44,21 @@ function parsePath(path: string): string[] {
 
 export class VFS {
   private root: DirInode;
+  private snapshots: Map<string, DirInode> = new Map();
+  private nextSnapId = 1;
 
   constructor() {
     this.root = createDirInode();
     this.initDefaultLayout();
+  }
+
+  /** Create a VFS from an already-populated root (used by cowClone). */
+  private static fromRoot(root: DirInode): VFS {
+    const vfs = Object.create(VFS.prototype) as VFS;
+    vfs.root = root;
+    vfs.snapshots = new Map();
+    vfs.nextSnapId = 1;
+    return vfs;
   }
 
   /** Populate the default directory tree. */
@@ -331,5 +343,39 @@ export class VFS {
     }
 
     return inode.target;
+  }
+
+  /**
+   * Capture a snapshot of the current filesystem state.
+   * Returns a snapshot ID that can be passed to restore().
+   */
+  snapshot(): string {
+    const id = String(this.nextSnapId++);
+    this.snapshots.set(id, deepCloneRoot(this.root));
+    return id;
+  }
+
+  /**
+   * Restore the filesystem to a previously captured snapshot.
+   * The snapshot remains available for future restores.
+   */
+  restore(id: string): void {
+    const saved = this.snapshots.get(id);
+    if (saved === undefined) {
+      throw new Error(`no such snapshot: ${id}`);
+    }
+    this.root = deepCloneRoot(saved);
+  }
+
+  /**
+   * Create an independent copy-on-write clone of this VFS.
+   *
+   * The clone shares file content by reference but has its own
+   * directory structure. Since writeFile replaces (rather than
+   * mutates) content arrays, writes in either VFS are invisible
+   * to the other — natural COW semantics.
+   */
+  cowClone(): VFS {
+    return VFS.fromRoot(deepCloneRoot(this.root));
   }
 }
