@@ -12,7 +12,10 @@ import type { PlatformAdapter } from '../platform/adapter.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { SpawnResult } from '../process/process.js';
 import type { VFS } from '../vfs/vfs.js';
+import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
+
+const PYTHON_COMMANDS = new Set(['python3', 'python']);
 
 // ---- AST types matching the Rust serde output ----
 
@@ -74,6 +77,7 @@ export class ShellRunner {
   private adapter: PlatformAdapter;
   private shellWasmPath: string;
   private shellModule: WebAssembly.Module | null = null;
+  private pythonRunner: PythonRunner | null = null;
   private env: Map<string, string> = new Map();
 
   constructor(
@@ -198,14 +202,10 @@ export class ShellRunner {
       }
     }
 
-    // Spawn the process
+    // Spawn the process (or delegate to PythonRunner)
     let result: SpawnResult;
     try {
-      result = await this.mgr.spawn(cmdName, {
-        args,
-        env: Object.fromEntries(this.env),
-        stdinData,
-      });
+      result = await this.spawnOrPython(cmdName, args, stdinData);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
@@ -274,11 +274,7 @@ export class ShellRunner {
         const args = expandedWords.slice(1);
 
         try {
-          const result = await this.mgr.spawn(cmdName, {
-            args,
-            env: Object.fromEntries(this.env),
-            stdinData,
-          });
+          const result = await this.spawnOrPython(cmdName, args, stdinData);
           lastResult = { ...result };
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -446,6 +442,28 @@ export class ShellRunner {
       return '';
     }
     return '';
+  }
+
+  private async spawnOrPython(
+    cmdName: string,
+    args: string[],
+    stdinData: Uint8Array | undefined,
+  ): Promise<SpawnResult> {
+    if (PYTHON_COMMANDS.has(cmdName)) {
+      if (!this.pythonRunner) {
+        this.pythonRunner = new PythonRunner(this.vfs);
+      }
+      return this.pythonRunner.run({
+        args,
+        env: Object.fromEntries(this.env),
+        stdinData,
+      });
+    }
+    return this.mgr.spawn(cmdName, {
+      args,
+      env: Object.fromEntries(this.env),
+      stdinData,
+    });
   }
 
   private tryReadFile(path: string): Uint8Array {
