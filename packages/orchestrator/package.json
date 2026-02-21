@@ -9,8 +9,11 @@
     "build": "tsup"
   },
   "devDependencies": {
+    "tsup": "^8.0",
     "typescript": "^5.7",
-    "vitest": "^3.0",
-    "tsup": "^8.0"
+    "vitest": "^3.0"
+  },
+  "dependencies": {
+    "@pydantic/monty": "^0.0.7"
   }
 }
