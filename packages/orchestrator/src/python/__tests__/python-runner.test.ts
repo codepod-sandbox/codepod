@@ -55,4 +55,78 @@ describe('PythonRunner', () => {
       expect(result.stderr).toContain('SyntaxError');
     });
   });
+
+  describe('script file execution', () => {
+    it('runs a .py script from VFS', async () => {
+      vfs.writeFile(
+        '/home/user/hello.py',
+        new TextEncoder().encode('print("hello from script")'),
+      );
+      const result = await runner.run({
+        args: ['/home/user/hello.py'],
+        env: {},
+      });
+      expect(result.stdout).toBe('hello from script\n');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('returns error for missing script', async () => {
+      const result = await runner.run({
+        args: ['/home/user/missing.py'],
+        env: {},
+      });
+      expect(result.exitCode).not.toBe(0);
+    });
+  });
+
+  describe('VFS file I/O via external functions', () => {
+    it('reads a file from VFS', async () => {
+      vfs.writeFile(
+        '/home/user/data.txt',
+        new TextEncoder().encode('file content'),
+      );
+      const result = await runner.run({
+        args: ['-c', 'content = read_file("/home/user/data.txt")\nprint(content)'],
+        env: {},
+      });
+      expect(result.stdout).toBe('file content\n');
+    });
+
+    it('writes a file to VFS', async () => {
+      const result = await runner.run({
+        args: ['-c', 'write_file("/home/user/out.txt", "from python")'],
+        env: {},
+      });
+      expect(result.exitCode).toBe(0);
+      expect(new TextDecoder().decode(vfs.readFile('/home/user/out.txt'))).toBe(
+        'from python',
+      );
+    });
+
+    it('lists directory contents', async () => {
+      vfs.writeFile('/home/user/a.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode(''));
+      const result = await runner.run({
+        args: [
+          '-c',
+          'items = list_dir("/home/user")\nfor f in items:\n  print(f)',
+        ],
+        env: {},
+      });
+      expect(result.stdout).toContain('a.txt');
+      expect(result.stdout).toContain('b.txt');
+    });
+
+    it('checks file existence', async () => {
+      vfs.writeFile('/home/user/exists.txt', new TextEncoder().encode(''));
+      const result = await runner.run({
+        args: [
+          '-c',
+          'print(file_exists("/home/user/exists.txt"))\nprint(file_exists("/home/user/nope.txt"))',
+        ],
+        env: {},
+      });
+      expect(result.stdout).toBe('True\nFalse\n');
+    });
+  });
 });

@@ -1,6 +1,19 @@
-import { Monty, MontySyntaxError, MontyRuntimeError } from '@pydantic/monty';
+import {
+  Monty,
+  MontySnapshot,
+  MontySyntaxError,
+  MontyRuntimeError,
+} from '@pydantic/monty';
 import type { VFS } from '../vfs/vfs.js';
 import type { SpawnOptions, SpawnResult } from '../process/process.js';
+
+const EXTERNAL_FUNCTIONS = [
+  'read_file',
+  'write_file',
+  'list_dir',
+  'file_exists',
+  'read_stdin',
+];
 
 export class PythonRunner {
   private vfs: VFS;
@@ -35,8 +48,23 @@ export class PythonRunner {
     };
 
     try {
-      const monty = new Monty(code);
-      monty.run({ printCallback });
+      const monty = new Monty(code, { externalFunctions: EXTERNAL_FUNCTIONS });
+      let progress = monty.start({ printCallback });
+
+      while (progress instanceof MontySnapshot) {
+        const fnName = progress.functionName;
+        const fnArgs = progress.args;
+
+        try {
+          const returnValue = this.handleExternalCall(fnName, fnArgs, opts);
+          progress = progress.resume({ returnValue });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          progress = progress.resume({
+            exception: { type: 'OSError', message: msg },
+          });
+        }
+      }
 
       return {
         exitCode: 0,
@@ -68,6 +96,47 @@ export class PythonRunner {
         stderr: msg + '\n',
         executionTimeMs: performance.now() - startTime,
       };
+    }
+  }
+
+  private handleExternalCall(
+    name: string,
+    args: unknown[],
+    opts: SpawnOptions,
+  ): unknown {
+    switch (name) {
+      case 'read_file': {
+        const path = String(args[0]);
+        const data = this.vfs.readFile(path);
+        return new TextDecoder().decode(data);
+      }
+      case 'write_file': {
+        const path = String(args[0]);
+        const content = String(args[1]);
+        this.vfs.writeFile(path, new TextEncoder().encode(content));
+        return null;
+      }
+      case 'list_dir': {
+        const path = String(args[0]);
+        return this.vfs.readdir(path);
+      }
+      case 'file_exists': {
+        const path = String(args[0]);
+        try {
+          this.vfs.stat(path);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      case 'read_stdin': {
+        if (opts.stdinData) {
+          return new TextDecoder().decode(opts.stdinData);
+        }
+        return '';
+      }
+      default:
+        throw new Error(`Unknown external function: ${name}`);
     }
   }
 
