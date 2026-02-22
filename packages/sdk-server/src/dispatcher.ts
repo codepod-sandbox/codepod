@@ -1,0 +1,189 @@
+/**
+ * JSON-RPC method dispatcher.
+ *
+ * Maps RPC method names to Sandbox method calls. The dispatcher is
+ * transport-agnostic — it receives a method name + params object and
+ * returns (or throws) the response payload.
+ */
+
+/** Minimal interface for a sandbox, matching the methods we call. */
+export interface SandboxLike {
+  run(command: string): Promise<{
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    executionTimeMs: number;
+  }>;
+  readFile(path: string): Uint8Array;
+  writeFile(path: string, data: Uint8Array): void;
+  readDir(path: string): Array<{ name: string; type: 'file' | 'dir' | 'symlink' }>;
+  mkdir(path: string): void;
+  stat(path: string): {
+    type: 'file' | 'dir' | 'symlink';
+    size: number;
+    permissions: number;
+    mtime: Date;
+    ctime: Date;
+    atime: Date;
+  };
+  rm(path: string): void;
+  setEnv(name: string, value: string): void;
+  getEnv(name: string): string | undefined;
+  destroy(): void;
+}
+
+export interface RpcError {
+  code: number;
+  message: string;
+}
+
+export class Dispatcher {
+  private sandbox: SandboxLike;
+  private killed = false;
+
+  constructor(sandbox: SandboxLike) {
+    this.sandbox = sandbox;
+  }
+
+  async dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
+    try {
+      switch (method) {
+        case 'run':
+          return await this.run(params);
+        case 'files.write':
+          return this.filesWrite(params);
+        case 'files.read':
+          return this.filesRead(params);
+        case 'files.list':
+          return this.filesList(params);
+        case 'files.mkdir':
+          return this.filesMkdir(params);
+        case 'files.rm':
+          return this.filesRm(params);
+        case 'files.stat':
+          return this.filesStat(params);
+        case 'env.set':
+          return this.envSet(params);
+        case 'env.get':
+          return this.envGet(params);
+        case 'kill':
+          return this.kill();
+        default:
+          throw this.rpcError(-32601, `Method not found: ${method}`);
+      }
+    } catch (err) {
+      // Re-throw RPC errors as-is
+      if (err && typeof err === 'object' && 'code' in err) {
+        throw err;
+      }
+      // Wrap sandbox/VFS errors with code 1
+      throw this.rpcError(1, (err as Error).message);
+    }
+  }
+
+  isKilled(): boolean {
+    return this.killed;
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────
+
+  private requireString(params: Record<string, unknown>, key: string): string {
+    const value = params[key];
+    if (typeof value !== 'string') {
+      throw this.rpcError(-32602, `Missing required param: ${key}`);
+    }
+    return value;
+  }
+
+  private rpcError(code: number, message: string): RpcError {
+    return { code, message };
+  }
+
+  /** Extract the basename from a path (last segment after '/'). */
+  private basename(path: string): string {
+    const parts = path.split('/');
+    return parts[parts.length - 1] || path;
+  }
+
+  // ── RPC method implementations ───────────────────────────────────
+
+  private async run(params: Record<string, unknown>) {
+    const command = this.requireString(params, 'command');
+    const result = await this.sandbox.run(command);
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      executionTimeMs: result.executionTimeMs,
+    };
+  }
+
+  private filesWrite(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    const data = this.requireString(params, 'data');
+    const bytes = Buffer.from(data, 'base64');
+    this.sandbox.writeFile(path, new Uint8Array(bytes));
+    return { ok: true };
+  }
+
+  private filesRead(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    const content = this.sandbox.readFile(path);
+    const encoded = Buffer.from(content).toString('base64');
+    return { data: encoded };
+  }
+
+  private filesList(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    const entries = this.sandbox.readDir(path);
+    const enriched = entries.map((entry) => {
+      const fullPath = path.endsWith('/')
+        ? `${path}${entry.name}`
+        : `${path}/${entry.name}`;
+      const st = this.sandbox.stat(fullPath);
+      return { name: entry.name, type: entry.type, size: st.size };
+    });
+    return { entries: enriched };
+  }
+
+  private filesMkdir(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    this.sandbox.mkdir(path);
+    return { ok: true };
+  }
+
+  private filesRm(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    this.sandbox.rm(path);
+    return { ok: true };
+  }
+
+  private filesStat(params: Record<string, unknown>) {
+    const path = this.requireString(params, 'path');
+    const st = this.sandbox.stat(path);
+    return {
+      name: this.basename(path),
+      type: st.type,
+      size: st.size,
+    };
+  }
+
+  private envSet(params: Record<string, unknown>) {
+    const name = this.requireString(params, 'name');
+    const value = this.requireString(params, 'value');
+    this.sandbox.setEnv(name, value);
+    return { ok: true };
+  }
+
+  private envGet(params: Record<string, unknown>) {
+    const name = this.requireString(params, 'name');
+    const value = this.sandbox.getEnv(name);
+    return { value: value ?? null };
+  }
+
+  private kill() {
+    this.sandbox.destroy();
+    this.killed = true;
+    return { ok: true };
+  }
+}

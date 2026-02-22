@@ -1,0 +1,21 @@
+{
+  "name": "@wasmsand/sdk-server",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "wasmsand-server": "dist/server.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsup src/server.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@wasmsand/orchestrator": "*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0",
+    "typescript": "^5.7",
+    "vitest": "^3.0"
+  }
+}
