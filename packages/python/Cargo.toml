@@ -1,0 +1,16 @@
+[package]
+name = "wasmsand-python"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "python3"
+path = "src/main.rs"
+
+[dependencies]
+rustpython = { git = "https://github.com/RustPython/RustPython", default-features = false, features = [
+  "freeze-stdlib",
+  "importlib",
+  "stdio",
+  "encodings",
+] }
