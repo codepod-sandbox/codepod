@@ -16,7 +16,7 @@ import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['which', 'chmod']);
+const SHELL_BUILTINS = new Set(['which', 'chmod', 'test', '[', 'pwd']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -291,6 +291,15 @@ export class ShellRunner {
     }
     if (cmdName === 'chmod') {
       return this.builtinChmod(args);
+    }
+    if (cmdName === 'test') {
+      return this.builtinTest(args, false);
+    }
+    if (cmdName === '[') {
+      return this.builtinTest(args, true);
+    }
+    if (cmdName === 'pwd') {
+      return this.builtinPwd();
     }
 
     // Handle stdin redirect
@@ -808,6 +817,88 @@ export class ShellRunner {
     } catch {
       return [];
     }
+  }
+
+  /** Builtin: pwd — print working directory. */
+  private builtinPwd(): RunResult {
+    const cwd = this.env.get('PWD') || '/';
+    return { exitCode: 0, stdout: cwd + '\n', stderr: '', executionTimeMs: 0 };
+  }
+
+  /** Builtin: test / [ — evaluate conditional expressions. */
+  private builtinTest(args: string[], isBracket: boolean): RunResult {
+    // If [ syntax, require and strip trailing ]
+    if (isBracket) {
+      if (args.length === 0 || args[args.length - 1] !== ']') {
+        return { exitCode: 2, stdout: '', stderr: '[: missing \']\'\n', executionTimeMs: 0 };
+      }
+      args = args.slice(0, -1);
+    }
+
+    const result = this.evalTest(args);
+    return { exitCode: result ? 0 : 1, stdout: '', stderr: '', executionTimeMs: 0 };
+  }
+
+  private evalTest(args: string[]): boolean {
+    if (args.length === 0) return false;
+
+    // Handle ! negation
+    if (args[0] === '!' && args.length > 1) {
+      return !this.evalTest(args.slice(1));
+    }
+
+    // Unary operators
+    if (args.length === 2) {
+      const [op, val] = args;
+      switch (op) {
+        case '-f': {
+          try { const s = this.vfs.stat(this.resolvePath(val)); return s.type === 'file'; }
+          catch { return false; }
+        }
+        case '-d': {
+          try { const s = this.vfs.stat(this.resolvePath(val)); return s.type === 'dir'; }
+          catch { return false; }
+        }
+        case '-e': {
+          try { this.vfs.stat(this.resolvePath(val)); return true; }
+          catch { return false; }
+        }
+        case '-s': {
+          try { const s = this.vfs.stat(this.resolvePath(val)); return s.size > 0; }
+          catch { return false; }
+        }
+        case '-r': case '-w': case '-x': {
+          try { this.vfs.stat(this.resolvePath(val)); return true; }
+          catch { return false; }
+        }
+        case '-z': return val.length === 0;
+        case '-n': return val.length > 0;
+        default: break;
+      }
+    }
+
+    // Single arg: true if non-empty string
+    if (args.length === 1) {
+      return args[0].length > 0;
+    }
+
+    // Binary operators
+    if (args.length === 3) {
+      const [left, op, right] = args;
+      switch (op) {
+        case '=': case '==': return left === right;
+        case '!=': return left !== right;
+        case '-eq': return parseInt(left) === parseInt(right);
+        case '-ne': return parseInt(left) !== parseInt(right);
+        case '-lt': return parseInt(left) < parseInt(right);
+        case '-le': return parseInt(left) <= parseInt(right);
+        case '-gt': return parseInt(left) > parseInt(right);
+        case '-ge': return parseInt(left) >= parseInt(right);
+        default: return false;
+      }
+    }
+
+    return false;
   }
 
   /** Builtin: which — locate a command by searching known tool names. */

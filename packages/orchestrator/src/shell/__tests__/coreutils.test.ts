@@ -797,6 +797,95 @@ describe('Coreutils Integration', () => {
     });
   });
 
+  describe('test / [ builtin', () => {
+    it('test -f on existing file', async () => {
+      vfs.writeFile('/tmp/exists.txt', new TextEncoder().encode('hi'));
+      const result = await runner.run('test -f /tmp/exists.txt && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test -f on missing file', async () => {
+      const result = await runner.run('test -f /tmp/nope.txt && echo yes || echo no');
+      expect(result.stdout.trim()).toBe('no');
+    });
+
+    it('test -d on directory', async () => {
+      const result = await runner.run('test -d /tmp && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test -e on existing path', async () => {
+      vfs.writeFile('/tmp/e.txt', new TextEncoder().encode(''));
+      const result = await runner.run('test -e /tmp/e.txt && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test -z on empty string', async () => {
+      const result = await runner.run('test -z "" && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test -n on non-empty string', async () => {
+      const result = await runner.run('test -n "hello" && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test string equality', async () => {
+      const result = await runner.run('test "abc" = "abc" && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test string inequality', async () => {
+      const result = await runner.run('test "abc" != "xyz" && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test integer -eq', async () => {
+      const result = await runner.run('test 5 -eq 5 && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test integer -gt', async () => {
+      const result = await runner.run('test 10 -gt 5 && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test integer -lt', async () => {
+      const result = await runner.run('test 3 -lt 7 && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('test ! negation', async () => {
+      const result = await runner.run('test ! -f /tmp/nope && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('[ ] bracket syntax', async () => {
+      vfs.writeFile('/tmp/b.txt', new TextEncoder().encode('hi'));
+      const result = await runner.run('[ -f /tmp/b.txt ] && echo yes');
+      expect(result.stdout.trim()).toBe('yes');
+    });
+
+    it('[ ] missing closing bracket fails', async () => {
+      const result = await runner.run('[ -f /tmp/b.txt && echo yes || echo no');
+      expect(result.stdout.trim()).toBe('no');
+    });
+  });
+
+  describe('pwd builtin', () => {
+    it('prints default cwd', async () => {
+      const result = await runner.run('pwd');
+      expect(result.stdout.trim()).toBe('/');
+    });
+
+    it('prints cwd when PWD is set', async () => {
+      vfs.mkdir('/tmp/mydir');
+      runner.setEnv('PWD', '/tmp/mydir');
+      const result = await runner.run('pwd');
+      expect(result.stdout.trim()).toBe('/tmp/mydir');
+    });
+  });
+
   describe('python stdlib', () => {
     it('import json', async () => {
       const result = await runner.run('python3 -c "import json; print(json.dumps({\'a\': 1}))"');
