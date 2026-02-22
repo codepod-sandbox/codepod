@@ -796,4 +796,111 @@ describe('Coreutils Integration', () => {
       expect(result.stdout.trim()).toBe('/nonexistent/*.xyz');
     });
   });
+
+  describe('python stdlib', () => {
+    it('import json', async () => {
+      const result = await runner.run('python3 -c "import json; print(json.dumps({\'a\': 1}))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('{"a": 1}');
+    });
+
+    it('import re', async () => {
+      const result = await runner.run('python3 -c "import re; print(re.findall(r\'\\d+\', \'abc123def456\'))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe("['123', '456']");
+    });
+
+    it('import math', async () => {
+      const result = await runner.run('python3 -c "import math; print(math.sqrt(144))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('12.0');
+    });
+
+    it('import collections', async () => {
+      const result = await runner.run('python3 -c "from collections import Counter; print(Counter(\'abracadabra\').most_common(1))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("'a'");
+      expect(result.stdout).toContain('5');
+    });
+
+    it('sys.argv with -c', async () => {
+      const result = await runner.run('python3 -c "import sys; print(sys.argv)"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('-c');
+    });
+
+    it('os.environ reads shell env', async () => {
+      runner.setEnv('MY_VAR', 'hello123');
+      const result = await runner.run('python3 -c "import os; print(os.environ.get(\'MY_VAR\', \'missing\'))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello123');
+    });
+
+    it('class definitions work', async () => {
+      const script = [
+        'class Point:',
+        '    def __init__(self, x, y):',
+        '        self.x = x',
+        '        self.y = y',
+        '    def __repr__(self):',
+        '        return f"Point({self.x}, {self.y})"',
+        'print(Point(3, 4))',
+      ].join('\n');
+      vfs.writeFile('/tmp/classes.py', new TextEncoder().encode(script));
+      const result = await runner.run('python3 /tmp/classes.py');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('Point(3, 4)');
+    });
+
+    it('file I/O via open()', async () => {
+      vfs.writeFile('/tmp/data.txt', new TextEncoder().encode('hello world'));
+      const script = [
+        'f = open("/tmp/data.txt")',
+        'print(f.read())',
+        'f.close()',
+      ].join('\n');
+      vfs.writeFile('/tmp/read_test.py', new TextEncoder().encode(script));
+      const result = await runner.run('python3 /tmp/read_test.py');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('hello world');
+    });
+
+    it('write file via open()', async () => {
+      const script = [
+        'f = open("/tmp/out.txt", "w")',
+        'f.write("written by python")',
+        'f.close()',
+      ].join('\n');
+      vfs.writeFile('/tmp/write_test.py', new TextEncoder().encode(script));
+      await runner.run('python3 /tmp/write_test.py');
+      const content = new TextDecoder().decode(vfs.readFile('/tmp/out.txt'));
+      expect(content).toBe('written by python');
+    });
+
+    it('stdin piping works', async () => {
+      vfs.writeFile('/tmp/input.txt', new TextEncoder().encode('line1\nline2\nline3\n'));
+      const result = await runner.run('cat /tmp/input.txt | python3 -c "import sys; print(len(sys.stdin.read().splitlines()))"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('3');
+    });
+
+    it('json parse pipeline', async () => {
+      vfs.writeFile('/tmp/data.json', new TextEncoder().encode('{"name": "Alice", "age": 30}'));
+      const result = await runner.run('cat /tmp/data.json | python3 -c "import sys, json; d = json.load(sys.stdin); print(d[\'name\'])"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('Alice');
+    });
+
+    it('ModuleNotFoundError for unavailable modules', async () => {
+      const result = await runner.run('python3 -c "import numpy"');
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('ModuleNotFoundError');
+    });
+
+    it('syntax error gives traceback', async () => {
+      const result = await runner.run('python3 -c "def f(:"');
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('SyntaxError');
+    });
+  });
 });
