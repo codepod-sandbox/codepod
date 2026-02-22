@@ -21,6 +21,7 @@ const TOOLS = [
   'find', 'sed', 'awk', 'jq',
   'true', 'false',
   'uname', 'whoami', 'id', 'printenv', 'yes', 'rmdir', 'sleep', 'seq',
+  'ln', 'readlink', 'realpath', 'mktemp', 'tac',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
@@ -958,6 +959,47 @@ describe('Coreutils Integration', () => {
     it('seq with step', async () => {
       const result = await runner.run('seq 2 2 8');
       expect(result.stdout).toBe('2\n4\n6\n8\n');
+    });
+  });
+
+  describe('file/path coreutils', () => {
+    it('ln creates a copy', async () => {
+      await runner.run('echo "content" > /tmp/orig.txt');
+      const result = await runner.run('ln /tmp/orig.txt /tmp/link.txt');
+      expect(result.exitCode).toBe(0);
+      const cat = await runner.run('cat /tmp/link.txt');
+      expect(cat.stdout).toContain('content');
+    });
+
+    it('readlink on non-link returns path', async () => {
+      await runner.run('echo hi > /tmp/rfile.txt');
+      const result = await runner.run('readlink -f /tmp/rfile.txt');
+      expect(result.stdout.trim()).toBe('/tmp/rfile.txt');
+    });
+
+    it('realpath resolves absolute path', async () => {
+      const result = await runner.run('realpath /tmp/../tmp/file.txt');
+      expect(result.stdout.trim()).toBe('/tmp/file.txt');
+    });
+
+    it('mktemp creates a temp file', async () => {
+      const result = await runner.run('mktemp');
+      expect(result.exitCode).toBe(0);
+      const path = result.stdout.trim();
+      expect(path).toMatch(/^\/tmp\//);
+      const check = await runner.run(`test -e ${path} && echo exists`);
+      expect(check.stdout.trim()).toBe('exists');
+    });
+
+    it('tac reverses lines', async () => {
+      await runner.run('printf "a\\nb\\nc\\n" > /tmp/lines.txt');
+      const result = await runner.run('tac /tmp/lines.txt');
+      expect(result.stdout).toBe('c\nb\na\n');
+    });
+
+    it('tac from stdin', async () => {
+      const result = await runner.run('printf "1\\n2\\n3\\n" | tac');
+      expect(result.stdout).toBe('3\n2\n1\n');
     });
   });
 

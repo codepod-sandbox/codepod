@@ -135,4 +135,24 @@ path = "src/bin/sleep.rs"
 name = "seq"
 path = "src/bin/seq.rs"
 
+[[bin]]
+name = "ln"
+path = "src/bin/ln.rs"
+
+[[bin]]
+name = "readlink"
+path = "src/bin/readlink.rs"
+
+[[bin]]
+name = "realpath"
+path = "src/bin/realpath.rs"
+
+[[bin]]
+name = "mktemp"
+path = "src/bin/mktemp.rs"
+
+[[bin]]
+name = "tac"
+path = "src/bin/tac.rs"
+
 [dependencies]
