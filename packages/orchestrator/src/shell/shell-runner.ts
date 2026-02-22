@@ -16,6 +16,10 @@ import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
+const SHELL_BUILTINS = new Set(['which', 'chmod']);
+
+/** Interpreter names that should be dispatched to PythonRunner. */
+const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
 
 // ---- AST types matching the Rust serde output ----
 
@@ -71,6 +75,8 @@ const EMPTY_RESULT: RunResult = {
   executionTimeMs: 0,
 };
 
+const MAX_SUBSTITUTION_DEPTH = 50;
+
 export class ShellRunner {
   private vfs: VFS;
   private mgr: ProcessManager;
@@ -79,6 +85,8 @@ export class ShellRunner {
   private shellModule: WebAssembly.Module | null = null;
   private pythonRunner: PythonRunner | null = null;
   private env: Map<string, string> = new Map();
+  /** Current command substitution nesting depth. */
+  private substitutionDepth = 0;
 
   constructor(
     vfs: VFS,
@@ -90,6 +98,30 @@ export class ShellRunner {
     this.mgr = mgr;
     this.adapter = adapter;
     this.shellWasmPath = shellWasmPath;
+
+    // Populate /bin with stubs for registered tools + python3 so that
+    // `ls /bin` and `which <tool>` work as expected.
+    this.populateBin();
+  }
+
+  /** Write executable stub files into /bin and /usr/bin for all registered tools + python. */
+  private populateBin(): void {
+    const encoder = new TextEncoder();
+    const dirs = ['/bin', '/usr/bin'];
+    const allTools = [
+      ...this.mgr.getRegisteredTools(),
+      ...PYTHON_COMMANDS,
+      ...SHELL_BUILTINS,
+    ];
+    for (const dir of dirs) {
+      for (const tool of allTools) {
+        const path = `${dir}/${tool}`;
+        try {
+          this.vfs.writeFile(path, encoder.encode(`#!/bin/wasmsand\n# ${tool}\n`));
+          this.vfs.chmod(path, 0o755);
+        } catch { /* ignore */ }
+      }
+    }
   }
 
   setEnv(name: string, value: string): void {
@@ -98,6 +130,58 @@ export class ShellRunner {
 
   getEnv(name: string): string | undefined {
     return this.env.get(name);
+  }
+
+  /** Resolve a path relative to PWD. Absolute paths pass through unchanged. */
+  private resolvePath(path: string): string {
+    if (path.startsWith('/')) return path;
+    const pwd = this.env.get('PWD') || '/';
+    return pwd === '/' ? '/' + path : pwd + '/' + path;
+  }
+
+  // Commands that default to "." when no directory arg is given.
+  private static readonly IMPLICIT_CWD_COMMANDS = new Set(['ls', 'find']);
+
+  /** Returns true if the command defaults to "." and no non-flag args were given. */
+  private needsDefaultDir(cmdName: string, args: string[]): boolean {
+    if (!ShellRunner.IMPLICIT_CWD_COMMANDS.has(cmdName)) return false;
+    return args.every(a => a.startsWith('-'));
+  }
+
+  // Commands whose non-flag args are NOT file paths and should not be resolved.
+  private static readonly PASSTHROUGH_ARGS = new Set([
+    'echo', 'printf', 'basename', 'dirname', 'env', 'true', 'false',
+  ]);
+
+  // Commands that always create files/dirs — resolve args unconditionally.
+  private static readonly CREATION_COMMANDS = new Set([
+    'mkdir', 'touch', 'cp', 'mv', 'tee',
+  ]);
+
+  /**
+   * Resolve a command arg to an absolute path if it looks like a relative
+   * file path. Flags (starting with -) and absolute paths pass through.
+   * Commands in PASSTHROUGH_ARGS never resolve their args.
+   *
+   * Uses VFS stat to disambiguate: only resolves if the resolved path
+   * exists in VFS (avoids mangling non-path args like grep patterns).
+   */
+  private resolveArgIfPath(cmdName: string, arg: string): string {
+    if (ShellRunner.PASSTHROUGH_ARGS.has(cmdName)) return arg;
+    if (arg.startsWith('-') || arg.startsWith('/')) return arg;
+    // Creation commands always resolve relative args
+    if (ShellRunner.CREATION_COMMANDS.has(cmdName)) {
+      return this.resolvePath(arg);
+    }
+    // For other commands, only resolve if the resolved path exists in VFS
+    // (avoids mangling non-path args like grep patterns)
+    const resolved = this.resolvePath(arg);
+    try {
+      this.vfs.stat(resolved);
+      return resolved;
+    } catch {
+      return arg;
+    }
   }
 
   /**
@@ -178,9 +262,10 @@ export class ShellRunner {
     redirects: Redirect[];
     assignments: Assignment[];
   }): Promise<RunResult> {
-    // Process assignments
+    // Process assignments (expand variables and command substitutions in values)
     for (const assignment of simple.assignments) {
-      this.env.set(assignment.name, assignment.value);
+      const value = await this.expandAssignmentValue(assignment.value);
+      this.env.set(assignment.name, value);
     }
 
     // If there are only assignments and no command words, it's a variable-setting command
@@ -188,17 +273,32 @@ export class ShellRunner {
       return { ...EMPTY_RESULT };
     }
 
-    // Expand words
-    const expandedWords = simple.words.map(w => this.expandWord(w));
+    // Expand words (async — may contain command substitutions)
+    const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
+    const expandedWords = this.expandGlobs(rawWords);
     const cmdName = expandedWords[0];
-    const args = expandedWords.slice(1);
+    let args = expandedWords.slice(1);
+
+    // Inject PWD for commands that default to "." when no path args given
+    const pwd = this.env.get('PWD');
+    if (pwd && this.needsDefaultDir(cmdName, args)) {
+      args = [...args, pwd];
+    }
+
+    // Handle shell builtins
+    if (cmdName === 'which') {
+      return this.builtinWhich(args);
+    }
+    if (cmdName === 'chmod') {
+      return this.builtinChmod(args);
+    }
 
     // Handle stdin redirect
     let stdinData: Uint8Array | undefined;
     for (const redirect of simple.redirects) {
       const rt = redirect.redirect_type;
       if (typeof rt === 'object' && 'StdinFrom' in rt) {
-        stdinData = this.vfs.readFile(rt.StdinFrom);
+        stdinData = this.vfs.readFile(this.resolvePath(rt.StdinFrom));
       }
     }
 
@@ -224,17 +324,18 @@ export class ShellRunner {
       const rt = redirect.redirect_type;
       if (typeof rt === 'object' && 'StdoutOverwrite' in rt) {
         this.vfs.writeFile(
-          rt.StdoutOverwrite,
+          this.resolvePath(rt.StdoutOverwrite),
           new TextEncoder().encode(stdout),
         );
         stdout = '';
       } else if (typeof rt === 'object' && 'StdoutAppend' in rt) {
-        const existing = this.tryReadFile(rt.StdoutAppend);
+        const resolved = this.resolvePath(rt.StdoutAppend);
+        const existing = this.tryReadFile(resolved);
         const combined = concatBytes(
           existing,
           new TextEncoder().encode(stdout),
         );
-        this.vfs.writeFile(rt.StdoutAppend, combined);
+        this.vfs.writeFile(resolved, combined);
         stdout = '';
       }
     }
@@ -269,7 +370,8 @@ export class ShellRunner {
       // For pipeline stages, we need to inject stdin from previous stage
       if ('Simple' in cmd) {
         const simple = cmd.Simple;
-        const expandedWords = simple.words.map(w => this.expandWord(w));
+        const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
+        const expandedWords = this.expandGlobs(rawWords);
         const cmdName = expandedWords[0];
         const args = expandedWords.slice(1);
 
@@ -364,7 +466,8 @@ export class ShellRunner {
     words: Word[];
     body: Command;
   }): Promise<RunResult> {
-    const expandedWords = forCmd.words.map(w => this.expandWord(w));
+    const rawWords = await Promise.all(forCmd.words.map(w => this.expandWord(w)));
+    const expandedWords = this.expandGlobs(rawWords);
     let combinedStdout = '';
     let combinedStderr = '';
     let lastExitCode = 0;
@@ -425,11 +528,14 @@ export class ShellRunner {
    * Expand a Word (which may contain variables and command substitutions)
    * into a plain string.
    */
-  private expandWord(word: Word): string {
-    return word.parts.map(part => this.expandWordPart(part)).join('');
+  private async expandWord(word: Word): Promise<string> {
+    const parts = await Promise.all(
+      word.parts.map(part => this.expandWordPart(part)),
+    );
+    return parts.join('');
   }
 
-  private expandWordPart(part: WordPart): string {
+  private async expandWordPart(part: WordPart): Promise<string> {
     if ('Literal' in part) {
       return part.Literal;
     }
@@ -437,9 +543,17 @@ export class ShellRunner {
       return this.env.get(part.Variable) ?? '';
     }
     if ('CommandSub' in part) {
-      // Command substitution would require recursive execution.
-      // For now return empty — will be implemented as needed.
-      return '';
+      if (this.substitutionDepth >= MAX_SUBSTITUTION_DEPTH) {
+        return ''; // prevent infinite recursion
+      }
+      this.substitutionDepth++;
+      try {
+        const result = await this.run(part.CommandSub);
+        // Strip trailing newline (standard shell behavior)
+        return result.stdout.replace(/\n$/, '');
+      } finally {
+        this.substitutionDepth--;
+      }
     }
     return '';
   }
@@ -449,21 +563,301 @@ export class ShellRunner {
     args: string[],
     stdinData: Uint8Array | undefined,
   ): Promise<SpawnResult> {
-    if (PYTHON_COMMANDS.has(cmdName)) {
-      if (!this.pythonRunner) {
-        this.pythonRunner = new PythonRunner(this.vfs);
-      }
-      return this.pythonRunner.run({
-        args,
-        env: Object.fromEntries(this.env),
-        stdinData,
-      });
+    // If the command looks like a path (./script.sh, /tmp/run.py),
+    // try shebang-based execution before falling through to tool lookup.
+    if (cmdName.includes('/')) {
+      return this.execPath(cmdName, args, stdinData);
     }
+
+    if (PYTHON_COMMANDS.has(cmdName)) {
+      return this.execPython(args, stdinData);
+    }
+    // Resolve relative path args for WASI binaries. WASI resolves all
+    // paths against the root preopen (/), so we must convert relative
+    // paths to absolute ones using PWD before spawning.
+    const resolvedArgs = args.map(a => this.resolveArgIfPath(cmdName, a));
     return this.mgr.spawn(cmdName, {
+      args: resolvedArgs,
+      env: Object.fromEntries(this.env),
+      stdinData,
+      cwd: this.env.get('PWD'),
+    });
+  }
+
+  /** Run a Python script via PythonRunner. */
+  private async execPython(
+    args: string[],
+    stdinData: Uint8Array | undefined,
+  ): Promise<SpawnResult> {
+    if (!this.pythonRunner) {
+      this.pythonRunner = new PythonRunner(this.mgr);
+    }
+    return this.pythonRunner.run({
       args,
       env: Object.fromEntries(this.env),
       stdinData,
+      cwd: this.env.get('PWD'),
     });
+  }
+
+  /**
+   * Execute a file by path (e.g. ./script.sh, /tmp/run.py).
+   * Reads the file, checks for a shebang line, and dispatches to
+   * the appropriate interpreter. Falls back to shell execution.
+   */
+  private async execPath(
+    cmdPath: string,
+    args: string[],
+    stdinData: Uint8Array | undefined,
+  ): Promise<SpawnResult> {
+    const resolved = this.resolvePath(cmdPath);
+
+    // Read the file
+    let content: Uint8Array;
+    try {
+      content = this.vfs.readFile(resolved);
+    } catch {
+      throw new Error(`no such file or directory: ${cmdPath}`);
+    }
+
+    const text = new TextDecoder().decode(content);
+    const firstLine = text.split('\n', 1)[0];
+
+    // Parse shebang
+    const interpreter = parseShebang(firstLine);
+
+    // Dispatch based on interpreter
+    if (interpreter !== null && PYTHON_INTERPRETERS.has(interpreter)) {
+      // Python script: pass file path + extra args.
+      // PythonRunner reads the file from VFS; the #! line is a valid Python comment.
+      return this.execPython([resolved, ...args], stdinData);
+    }
+
+    // Default: run as shell script (covers #!/bin/sh, #!/bin/bash, and no shebang)
+    return this.execShellScript(text, args, stdinData);
+  }
+
+  /**
+   * Execute a string as a shell script, running each statement through the shell.
+   * Sets positional parameters $1, $2, etc. from args.
+   */
+  private async execShellScript(
+    scriptText: string,
+    args: string[],
+    _stdinData: Uint8Array | undefined,
+  ): Promise<SpawnResult> {
+    // Strip shebang line if present
+    let script = scriptText;
+    if (script.startsWith('#!')) {
+      const nl = script.indexOf('\n');
+      script = nl >= 0 ? script.slice(nl + 1) : '';
+    }
+
+    // Set positional parameters
+    for (let i = 0; i < args.length; i++) {
+      this.env.set(String(i + 1), args[i]);
+    }
+
+    // Run the entire script as a single command string.
+    // The shell parser handles semicolons, &&, newlines, etc.
+    const result = await this.run(script);
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      executionTimeMs: result.executionTimeMs,
+    };
+  }
+
+  /**
+   * Expand an assignment value string, handling $VAR, $(cmd), and `cmd` patterns.
+   * The Rust lexer inlines these into the assignment value as literal text.
+   */
+  private async expandAssignmentValue(value: string): Promise<string> {
+    let result = '';
+    let i = 0;
+    while (i < value.length) {
+      if (value[i] === '$' && i + 1 < value.length && value[i + 1] === '(') {
+        // Command substitution: $(...)
+        if (this.substitutionDepth >= MAX_SUBSTITUTION_DEPTH) {
+          i += 2; continue;
+        }
+        const content = this.extractBalanced(value, i + 2, '(', ')');
+        this.substitutionDepth++;
+        try {
+          const subResult = await this.run(content.text);
+          result += subResult.stdout.replace(/\n$/, '');
+        } finally {
+          this.substitutionDepth--;
+        }
+        i = content.end;
+      } else if (value[i] === '`') {
+        // Backtick substitution: `...`
+        if (this.substitutionDepth >= MAX_SUBSTITUTION_DEPTH) {
+          i = value.indexOf('`', i + 1); i = i >= 0 ? i + 1 : value.length; continue;
+        }
+        const end = value.indexOf('`', i + 1);
+        const cmd = end >= 0 ? value.slice(i + 1, end) : value.slice(i + 1);
+        this.substitutionDepth++;
+        try {
+          const subResult = await this.run(cmd);
+          result += subResult.stdout.replace(/\n$/, '');
+        } finally {
+          this.substitutionDepth--;
+        }
+        i = end >= 0 ? end + 1 : value.length;
+      } else if (value[i] === '$') {
+        // Variable expansion: $VAR or ${VAR}
+        i++;
+        if (i < value.length && value[i] === '{') {
+          const end = value.indexOf('}', i + 1);
+          const varName = end >= 0 ? value.slice(i + 1, end) : value.slice(i + 1);
+          result += this.env.get(varName) ?? '';
+          i = end >= 0 ? end + 1 : value.length;
+        } else {
+          let varName = '';
+          while (i < value.length && /[a-zA-Z0-9_]/.test(value[i])) {
+            varName += value[i++];
+          }
+          result += this.env.get(varName) ?? '';
+        }
+      } else {
+        result += value[i++];
+      }
+    }
+    return result;
+  }
+
+  /** Extract balanced content between open/close chars. */
+  private extractBalanced(
+    s: string, start: number, open: string, close: string,
+  ): { text: string; end: number } {
+    let depth = 1;
+    let i = start;
+    while (i < s.length && depth > 0) {
+      if (s[i] === open) depth++;
+      else if (s[i] === close) depth--;
+      if (depth > 0) i++;
+    }
+    return { text: s.slice(start, i), end: i + 1 };
+  }
+
+  /**
+   * Expand glob patterns (* and ?) in a list of words.
+   * Words without globs pass through unchanged.
+   * If a glob matches nothing, the literal pattern is kept (POSIX behavior).
+   */
+  private expandGlobs(words: string[]): string[] {
+    const result: string[] = [];
+    for (const word of words) {
+      if (word.includes('*') || word.includes('?')) {
+        const matches = this.globMatch(word);
+        if (matches.length > 0) {
+          result.push(...matches.sort());
+        } else {
+          result.push(word); // no match → keep literal
+        }
+      } else {
+        result.push(word);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Match a glob pattern against VFS entries.
+   * Supports * (any sequence) and ? (any single char).
+   * Pattern may be absolute (/tmp/*.txt) or relative (*.txt).
+   */
+  private globMatch(pattern: string): string[] {
+    // Split into directory part and filename pattern
+    const lastSlash = pattern.lastIndexOf('/');
+    let dirPath: string;
+    let filePattern: string;
+
+    if (lastSlash >= 0) {
+      dirPath = pattern.slice(0, lastSlash) || '/';
+      filePattern = pattern.slice(lastSlash + 1);
+    } else {
+      // Relative: use PWD
+      dirPath = this.env.get('PWD') || '/';
+      filePattern = pattern;
+    }
+
+    // Convert glob pattern to regex
+    const regexStr = '^' + filePattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // escape regex specials
+      .replace(/\*/g, '.*')                     // * → .*
+      .replace(/\?/g, '.')                      // ? → .
+      + '$';
+    const regex = new RegExp(regexStr);
+
+    try {
+      const entries = this.vfs.readdir(dirPath);
+      const matches: string[] = [];
+      for (const entry of entries) {
+        if (regex.test(entry.name)) {
+          if (lastSlash >= 0) {
+            matches.push(dirPath === '/' ? `/${entry.name}` : `${dirPath}/${entry.name}`);
+          } else {
+            matches.push(entry.name);
+          }
+        }
+      }
+      return matches;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Builtin: which — locate a command by searching known tool names. */
+  private builtinWhich(args: string[]): RunResult {
+    let stdout = '';
+    let exitCode = 0;
+    for (const name of args) {
+      if (this.mgr.hasTool(name) || PYTHON_COMMANDS.has(name) || SHELL_BUILTINS.has(name)) {
+        stdout += `/bin/${name}\n`;
+      } else {
+        exitCode = 1;
+      }
+    }
+    return { exitCode, stdout, stderr: '', executionTimeMs: 0 };
+  }
+
+  /** Builtin: chmod — change file permissions. */
+  private builtinChmod(args: string[]): RunResult {
+    if (args.length < 2) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'chmod: missing operand\n',
+        executionTimeMs: 0,
+      };
+    }
+
+    const modeArg = args[0];
+    const files = args.slice(1);
+    let stderr = '';
+    let exitCode = 0;
+
+    for (const file of files) {
+      const resolved = this.resolvePath(file);
+      try {
+        const currentMode = this.vfs.stat(resolved).permissions;
+        const newMode = parseChmodMode(modeArg, currentMode);
+        if (newMode === null) {
+          stderr += `chmod: invalid mode: '${modeArg}'\n`;
+          exitCode = 1;
+          continue;
+        }
+        this.vfs.chmod(resolved, newMode);
+      } catch {
+        stderr += `chmod: cannot access '${file}': No such file or directory\n`;
+        exitCode = 1;
+      }
+    }
+
+    return { exitCode, stdout: '', stderr, executionTimeMs: 0 };
   }
 
   private tryReadFile(path: string): Uint8Array {
@@ -473,6 +867,69 @@ export class ShellRunner {
       return new Uint8Array(0);
     }
   }
+}
+
+/**
+ * Parse a chmod mode argument. Returns the new octal mode or null if invalid.
+ *
+ * Supports:
+ *   - Octal: "755", "644", "0755"
+ *   - Symbolic: "+x", "-w", "u+x", "go-w", "a+rx"
+ */
+function parseChmodMode(modeArg: string, currentMode: number): number | null {
+  // Try octal first
+  if (/^0?[0-7]{3}$/.test(modeArg)) {
+    return parseInt(modeArg, 8);
+  }
+
+  // Symbolic mode: [ugoa]*[+-][rwx]+
+  const match = modeArg.match(/^([ugoa]*)([+-])([rwx]+)$/);
+  if (!match) return null;
+
+  const [, whoStr, op, permsStr] = match;
+  const who = whoStr === '' || whoStr === 'a' ? 'ugo' : whoStr;
+
+  // Build the bit mask for the specified permissions
+  let mask = 0;
+  for (const w of who) {
+    const shift = w === 'u' ? 6 : w === 'g' ? 3 : 0;
+    for (const p of permsStr) {
+      const bit = p === 'r' ? 4 : p === 'w' ? 2 : 1;
+      mask |= bit << shift;
+    }
+  }
+
+  return op === '+' ? currentMode | mask : currentMode & ~mask;
+}
+
+/**
+ * Parse a shebang line and return the interpreter base name, or null.
+ *
+ * Handles:
+ *   #!/usr/bin/env python3  → "python3"
+ *   #!/usr/bin/python3      → "python3"
+ *   #!/bin/sh               → "sh"
+ *   #!/bin/bash              → "bash"
+ *   (no shebang)            → null
+ */
+function parseShebang(firstLine: string): string | null {
+  if (!firstLine.startsWith('#!')) return null;
+
+  const rest = firstLine.slice(2).trim();
+  const parts = rest.split(/\s+/);
+
+  // #!/usr/bin/env <interpreter> — use the second word
+  if (parts.length >= 2 && parts[0].endsWith('/env')) {
+    return parts[1];
+  }
+
+  // #!/path/to/interpreter — use the basename
+  if (parts.length >= 1) {
+    const slash = parts[0].lastIndexOf('/');
+    return slash >= 0 ? parts[0].slice(slash + 1) : parts[0];
+  }
+
+  return null;
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
