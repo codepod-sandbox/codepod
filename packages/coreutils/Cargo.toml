@@ -103,4 +103,36 @@ path = "src/bin/awk.rs"
 name = "jq"
 path = "src/bin/jq.rs"
 
+[[bin]]
+name = "uname"
+path = "src/bin/uname.rs"
+
+[[bin]]
+name = "whoami"
+path = "src/bin/whoami.rs"
+
+[[bin]]
+name = "id"
+path = "src/bin/id.rs"
+
+[[bin]]
+name = "printenv"
+path = "src/bin/printenv.rs"
+
+[[bin]]
+name = "yes"
+path = "src/bin/yes.rs"
+
+[[bin]]
+name = "rmdir"
+path = "src/bin/rmdir.rs"
+
+[[bin]]
+name = "sleep"
+path = "src/bin/sleep.rs"
+
+[[bin]]
+name = "seq"
+path = "src/bin/seq.rs"
+
 [dependencies]

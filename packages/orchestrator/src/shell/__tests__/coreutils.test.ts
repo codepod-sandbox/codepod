@@ -20,6 +20,7 @@ const TOOLS = [
   'basename', 'dirname', 'env', 'printf',
   'find', 'sed', 'awk', 'jq',
   'true', 'false',
+  'uname', 'whoami', 'id', 'printenv', 'yes', 'rmdir', 'sleep', 'seq',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
@@ -883,6 +884,80 @@ describe('Coreutils Integration', () => {
       runner.setEnv('PWD', '/tmp/mydir');
       const result = await runner.run('pwd');
       expect(result.stdout.trim()).toBe('/tmp/mydir');
+    });
+  });
+
+  describe('new coreutils', () => {
+    it('uname returns wasmsand', async () => {
+      const result = await runner.run('uname');
+      expect(result.stdout.trim()).toBe('wasmsand');
+    });
+
+    it('uname -a returns full info', async () => {
+      const result = await runner.run('uname -a');
+      expect(result.stdout).toContain('wasmsand');
+    });
+
+    it('whoami returns user', async () => {
+      const result = await runner.run('whoami');
+      expect(result.stdout.trim()).toBe('user');
+    });
+
+    it('id returns uid info', async () => {
+      const result = await runner.run('id');
+      expect(result.stdout).toContain('uid=1000');
+      expect(result.stdout).toContain('user');
+    });
+
+    it('printenv shows specific var', async () => {
+      runner.setEnv('FOO', 'bar');
+      const result = await runner.run('printenv FOO');
+      expect(result.stdout.trim()).toBe('bar');
+    });
+
+    it('printenv missing var exits 1', async () => {
+      const result = await runner.run('printenv NONEXISTENT');
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('yes outputs repeated lines', async () => {
+      const result = await runner.run('yes hello | head -3');
+      expect(result.stdout).toBe('hello\nhello\nhello\n');
+    });
+
+    it('rmdir removes empty directory', async () => {
+      await runner.run('mkdir /tmp/emptydir');
+      const result = await runner.run('rmdir /tmp/emptydir');
+      expect(result.exitCode).toBe(0);
+      const ls = await runner.run('ls /tmp');
+      expect(ls.stdout).not.toContain('emptydir');
+    });
+
+    it('rmdir fails on non-empty directory', async () => {
+      await runner.run('mkdir /tmp/notempty');
+      await runner.run('touch /tmp/notempty/file');
+      const result = await runner.run('rmdir /tmp/notempty');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('sleep exits 0', async () => {
+      const result = await runner.run('sleep 0');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('seq generates range', async () => {
+      const result = await runner.run('seq 1 5');
+      expect(result.stdout).toBe('1\n2\n3\n4\n5\n');
+    });
+
+    it('seq single arg', async () => {
+      const result = await runner.run('seq 3');
+      expect(result.stdout).toBe('1\n2\n3\n');
+    });
+
+    it('seq with step', async () => {
+      const result = await runner.run('seq 2 2 8');
+      expect(result.stdout).toBe('2\n4\n6\n8\n');
     });
   });
 
