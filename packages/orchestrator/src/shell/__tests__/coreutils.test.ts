@@ -23,6 +23,7 @@ const TOOLS = [
   'uname', 'whoami', 'id', 'printenv', 'yes', 'rmdir', 'sleep', 'seq',
   'ln', 'readlink', 'realpath', 'mktemp', 'tac',
   'xargs', 'expr',
+  'diff',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
@@ -1038,6 +1039,25 @@ describe('Coreutils Integration', () => {
     it('expr equality', async () => {
       const result = await runner.run('expr 5 = 5');
       expect(result.stdout.trim()).toBe('1');
+    });
+  });
+
+  describe('diff', () => {
+    it('identical files show no output', async () => {
+      await runner.run('echo "hello" > /tmp/a.txt');
+      await runner.run('echo "hello" > /tmp/b.txt');
+      const result = await runner.run('diff /tmp/a.txt /tmp/b.txt');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+
+    it('different files show differences', async () => {
+      await runner.run('printf "a\\nb\\nc\\n" > /tmp/d1.txt');
+      await runner.run('printf "a\\nB\\nc\\n" > /tmp/d2.txt');
+      const result = await runner.run('diff /tmp/d1.txt /tmp/d2.txt');
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain('< b');
+      expect(result.stdout).toContain('> B');
     });
   });
 
