@@ -41,6 +41,7 @@ describe('Coreutils Integration', () => {
     for (const tool of TOOLS) {
       mgr.registerTool(tool, resolve(FIXTURES, wasmName(tool)));
     }
+    mgr.registerTool('python3', resolve(FIXTURES, 'python3.wasm'));
 
     runner = new ShellRunner(vfs, mgr, adapter, SHELL_WASM);
   });
@@ -182,6 +183,24 @@ describe('Coreutils Integration', () => {
       const result = await runner.run('ls /home/user');
       expect(result.stdout).toContain('a.txt');
       expect(result.stdout).toContain('b.txt');
+    });
+
+    it('ls -l shows correct permissions for files and directories', async () => {
+      vfs.writeFile('/home/user/hello.txt', new TextEncoder().encode('hi'));
+      vfs.mkdir('/home/user/subdir');
+      const result = await runner.run('ls -l /home/user');
+      // Files default to 0o644 → -rw-r--r--
+      expect(result.stdout).toMatch(/-rw-r--r--.*hello\.txt/);
+      // Directories default to 0o755 → drwxr-xr-x
+      expect(result.stdout).toMatch(/drwxr-xr-x.*subdir/);
+    });
+
+    it('ls -l shows executable permissions after chmod', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh'));
+      vfs.chmod('/home/user/script.sh', 0o755);
+      const result = await runner.run('ls -l /home/user');
+      // Should show -rwxr-xr-x after chmod 755
+      expect(result.stdout).toMatch(/-rwxr-xr-x.*script\.sh/);
     });
   });
 
@@ -386,6 +405,395 @@ describe('Coreutils Integration', () => {
       vfs.writeFile('/home/user/data.txt', new TextEncoder().encode('charlie 35\nalice 30\nbob 25\n'));
       const result = await runner.run("cat /home/user/data.txt | awk '{print $1}' | sort");
       expect(result.stdout).toBe('alice\nbob\ncharlie\n');
+    });
+  });
+
+  describe('cwd and path resolution', () => {
+    let cwdRunner: ShellRunner;
+
+    beforeEach(() => {
+      // Create a runner with PWD set to /home/user
+      const adapter = new NodeAdapter();
+      const mgr = new ProcessManager(vfs, adapter);
+      for (const tool of TOOLS) {
+        mgr.registerTool(tool, resolve(FIXTURES, wasmName(tool)));
+      }
+      mgr.registerTool('python3', resolve(FIXTURES, 'python3.wasm'));
+      cwdRunner = new ShellRunner(vfs, mgr, adapter, SHELL_WASM);
+      cwdRunner.setEnv('PWD', '/home/user');
+      cwdRunner.setEnv('HOME', '/home/user');
+    });
+
+    it('ls with no args lists cwd (/home/user)', async () => {
+      vfs.writeFile('/home/user/hello.txt', new TextEncoder().encode('hi'));
+      const result = await cwdRunner.run('ls');
+      expect(result.stdout).toContain('hello.txt');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('ls with absolute path /tmp works', async () => {
+      vfs.writeFile('/tmp/tmpfile.txt', new TextEncoder().encode('data'));
+      const result = await cwdRunner.run('ls /tmp');
+      expect(result.stdout).toContain('tmpfile.txt');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('ls / lists root directories', async () => {
+      const result = await cwdRunner.run('ls /');
+      expect(result.stdout).toContain('home');
+      expect(result.stdout).toContain('tmp');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('redirect > writes to cwd-relative path', async () => {
+      await cwdRunner.run('echo hello > a.txt');
+      const data = new TextDecoder().decode(vfs.readFile('/home/user/a.txt'));
+      expect(data).toBe('hello\n');
+    });
+
+    it('redirect < reads from cwd-relative path', async () => {
+      vfs.writeFile('/home/user/input.txt', new TextEncoder().encode('from file'));
+      const result = await cwdRunner.run('cat < input.txt');
+      expect(result.stdout).toBe('from file');
+    });
+
+    it('redirect >> appends to cwd-relative path', async () => {
+      await cwdRunner.run('echo line1 > log.txt');
+      await cwdRunner.run('echo line2 >> log.txt');
+      const data = new TextDecoder().decode(vfs.readFile('/home/user/log.txt'));
+      expect(data).toBe('line1\nline2\n');
+    });
+
+    it('cat reads a relative path in cwd', async () => {
+      vfs.writeFile('/home/user/data.txt', new TextEncoder().encode('cwd content'));
+      const result = await cwdRunner.run('cat data.txt');
+      expect(result.stdout).toBe('cwd content');
+    });
+
+    it('cat reads an absolute path outside cwd', async () => {
+      vfs.writeFile('/tmp/other.txt', new TextEncoder().encode('tmp content'));
+      const result = await cwdRunner.run('cat /tmp/other.txt');
+      expect(result.stdout).toBe('tmp content');
+    });
+
+    it('write to /tmp and read back with absolute path', async () => {
+      await cwdRunner.run('echo tmpdata > /tmp/test.txt');
+      const result = await cwdRunner.run('cat /tmp/test.txt');
+      expect(result.stdout).toBe('tmpdata\n');
+    });
+
+    it('mkdir with relative path creates in cwd', async () => {
+      await cwdRunner.run('mkdir mydir');
+      expect(vfs.stat('/home/user/mydir').type).toBe('dir');
+    });
+
+    it('touch with relative path creates in cwd', async () => {
+      await cwdRunner.run('touch newfile.txt');
+      expect(vfs.stat('/home/user/newfile.txt').type).toBe('file');
+    });
+
+    it('python3 reads script from relative path in cwd', async () => {
+      vfs.writeFile('/home/user/script.py', new TextEncoder().encode('print("from cwd")'));
+      const result = await cwdRunner.run('python3 script.py');
+      expect(result.stdout).toBe('from cwd\n');
+    });
+  });
+
+  describe('command substitution', () => {
+    it('backtick substitution in echo', async () => {
+      vfs.writeFile('/tmp/a.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/tmp/b.txt', new TextEncoder().encode(''));
+      const result = await runner.run('echo `ls /tmp`');
+      expect(result.stdout).toContain('a.txt');
+      expect(result.stdout).toContain('b.txt');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('$() substitution in echo', async () => {
+      const result = await runner.run('echo $(echo hello)');
+      expect(result.stdout).toBe('hello\n');
+    });
+
+    it('command substitution as separate word in echo', async () => {
+      // Note: inline word concatenation (e.g. "prefix$(cmd)suffix") requires
+      // multi-part word support in the lexer, which is not yet implemented.
+      // For now, command substitutions work as separate words.
+      const result = await runner.run('echo before $(echo middle) after');
+      expect(result.stdout).toBe('before middle after\n');
+    });
+
+    it('nested command substitution', async () => {
+      const result = await runner.run('echo $(echo $(echo deep))');
+      expect(result.stdout).toBe('deep\n');
+    });
+
+    it('command substitution in variable assignment', async () => {
+      await runner.run('X=$(echo hello)');
+      const result = await runner.run('echo $X');
+      expect(result.stdout).toBe('hello\n');
+    });
+  });
+
+  describe('which builtin', () => {
+    it('finds a registered tool', async () => {
+      const result = await runner.run('which cat');
+      expect(result.stdout.trim()).toBe('/bin/cat');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('finds python3', async () => {
+      const result = await runner.run('which python3');
+      expect(result.stdout.trim()).toBe('/bin/python3');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('returns exit code 1 for unknown command', async () => {
+      const result = await runner.run('which nonexistent');
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe('');
+    });
+
+    it('handles multiple arguments', async () => {
+      const result = await runner.run('which cat echo');
+      expect(result.stdout).toContain('/bin/cat');
+      expect(result.stdout).toContain('/bin/echo');
+    });
+  });
+
+  describe('chmod builtin', () => {
+    it('sets octal permissions', async () => {
+      vfs.writeFile('/home/user/f.txt', new TextEncoder().encode('hi'));
+      const result = await runner.run('chmod 755 /home/user/f.txt');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/f.txt').permissions).toBe(0o755);
+    });
+
+    it('supports +x symbolic mode', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh'));
+      // Default is 0o644
+      const result = await runner.run('chmod +x /home/user/script.sh');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/script.sh').permissions).toBe(0o755);
+    });
+
+    it('supports -x symbolic mode', async () => {
+      vfs.writeFile('/home/user/run.sh', new TextEncoder().encode(''));
+      vfs.chmod('/home/user/run.sh', 0o755);
+      const result = await runner.run('chmod -x /home/user/run.sh');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/run.sh').permissions).toBe(0o644);
+    });
+
+    it('supports u+x symbolic mode', async () => {
+      vfs.writeFile('/home/user/a.sh', new TextEncoder().encode(''));
+      // Default 0o644, u+x → 0o744
+      const result = await runner.run('chmod u+x /home/user/a.sh');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/a.sh').permissions).toBe(0o744);
+    });
+
+    it('supports go-w symbolic mode', async () => {
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode(''));
+      vfs.chmod('/home/user/b.txt', 0o666);
+      const result = await runner.run('chmod go-w /home/user/b.txt');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/b.txt').permissions).toBe(0o644);
+    });
+
+    it('handles multiple files', async () => {
+      vfs.writeFile('/home/user/x.sh', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/y.sh', new TextEncoder().encode(''));
+      const result = await runner.run('chmod 755 /home/user/x.sh /home/user/y.sh');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/x.sh').permissions).toBe(0o755);
+      expect(vfs.stat('/home/user/y.sh').permissions).toBe(0o755);
+    });
+
+    it('errors on missing file', async () => {
+      const result = await runner.run('chmod 755 /home/user/nonexistent.txt');
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('No such file or directory');
+    });
+
+    it('errors on missing operand', async () => {
+      const result = await runner.run('chmod');
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('missing operand');
+    });
+
+    it('errors on invalid mode', async () => {
+      vfs.writeFile('/home/user/z.txt', new TextEncoder().encode(''));
+      const result = await runner.run('chmod zzz /home/user/z.txt');
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('invalid mode');
+    });
+
+    it('is discoverable via which', async () => {
+      const result = await runner.run('which chmod');
+      expect(result.stdout.trim()).toBe('/bin/chmod');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('ls -l reflects chmod +x', async () => {
+      vfs.writeFile('/home/user/test.sh', new TextEncoder().encode('#!/bin/sh'));
+      await runner.run('chmod +x /home/user/test.sh');
+      const result = await runner.run('ls -l /home/user/test.sh');
+      expect(result.stdout).toMatch(/-rwxr-xr-x/);
+    });
+  });
+
+  describe('shebang execution', () => {
+    it('runs a python script via ./path with #!/usr/bin/env python3', async () => {
+      vfs.writeFile('/home/user/hello.py', new TextEncoder().encode(
+        '#!/usr/bin/env python3\nprint("hello from python")\n',
+      ));
+      vfs.chmod('/home/user/hello.py', 0o755);
+      runner.setEnv('PWD', '/home/user');
+      const result = await runner.run('./hello.py');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello from python');
+    });
+
+    it('runs a python script via #!/usr/bin/python3', async () => {
+      vfs.writeFile('/tmp/run.py', new TextEncoder().encode(
+        '#!/usr/bin/python3\nprint(2 + 2)\n',
+      ));
+      const result = await runner.run('/tmp/run.py');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('4');
+    });
+
+    it('runs a shell script via ./path with #!/bin/sh', async () => {
+      vfs.writeFile('/home/user/greet.sh', new TextEncoder().encode(
+        '#!/bin/sh\necho "hello from shell"\n',
+      ));
+      vfs.chmod('/home/user/greet.sh', 0o755);
+      runner.setEnv('PWD', '/home/user');
+      const result = await runner.run('./greet.sh');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello from shell');
+    });
+
+    it('runs a script with no shebang as shell', async () => {
+      vfs.writeFile('/home/user/noshebang.sh', new TextEncoder().encode(
+        'echo "no shebang"\n',
+      ));
+      runner.setEnv('PWD', '/home/user');
+      const result = await runner.run('./noshebang.sh');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('no shebang');
+    });
+
+    it('passes arguments to python scripts', async () => {
+      vfs.writeFile('/tmp/greet.py', new TextEncoder().encode(
+        '#!/usr/bin/env python3\nimport sys\nprint(f"Hi {sys.argv[1]}")\n',
+      ));
+      const result = await runner.run('/tmp/greet.py Alice');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('Hi Alice');
+    });
+
+    it('returns exit 127 for nonexistent path', async () => {
+      const result = await runner.run('./nonexistent.sh');
+      expect(result.exitCode).toBe(127);
+      expect(result.stderr).toContain('no such file or directory');
+    });
+
+    it('runs a multi-line shell script', async () => {
+      vfs.writeFile('/tmp/multi.sh', new TextEncoder().encode(
+        '#!/bin/sh\necho "line1"\necho "line2"\n',
+      ));
+      const result = await runner.run('/tmp/multi.sh');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('line1');
+      expect(result.stdout).toContain('line2');
+    });
+
+    it('full LLM workflow: write, chmod, execute python', async () => {
+      // Simulate the exact LLM workflow
+      runner.setEnv('PWD', '/home/user');
+      await runner.run('echo \'#!/usr/bin/env python3\nprint("it works")\' > /home/user/solve.py');
+      await runner.run('chmod +x /home/user/solve.py');
+      const result = await runner.run('./solve.py');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('it works');
+    });
+
+    it('full LLM workflow: write, chmod, execute shell', async () => {
+      runner.setEnv('PWD', '/home/user');
+      await runner.run('echo \'#!/bin/sh\necho "shell works"\' > /home/user/test.sh');
+      await runner.run('chmod +x /home/user/test.sh');
+      const result = await runner.run('./test.sh');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('shell works');
+    });
+  });
+
+  describe('ls /bin lists registered tools', () => {
+    it('ls /bin shows registered tools', async () => {
+      const result = await runner.run('ls -1 /bin');
+      expect(result.stdout).toContain('cat');
+      expect(result.stdout).toContain('echo');
+      expect(result.stdout).toContain('ls');
+      expect(result.stdout).toContain('python3');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('ls /bin/ with trailing slash also works', async () => {
+      const result = await runner.run('ls /bin/');
+      expect(result.stdout).toContain('cat');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('which cat returns /bin/cat and file exists', async () => {
+      const result = await runner.run('which cat');
+      expect(result.stdout.trim()).toBe('/bin/cat');
+      // The file should also be stat-able in VFS
+      expect(vfs.stat('/bin/cat').type).toBe('file');
+    });
+  });
+
+  describe('glob expansion', () => {
+    it('expands * in for loop word list', async () => {
+      vfs.writeFile('/tmp/a.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/tmp/b.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/tmp/c.log', new TextEncoder().encode(''));
+      const result = await runner.run('for f in /tmp/*.txt; do echo $f; done');
+      expect(result.stdout).toContain('/tmp/a.txt');
+      expect(result.stdout).toContain('/tmp/b.txt');
+      expect(result.stdout).not.toContain('c.log');
+    });
+
+    it('expands * in echo', async () => {
+      vfs.writeFile('/tmp/x.md', new TextEncoder().encode(''));
+      vfs.writeFile('/tmp/y.md', new TextEncoder().encode(''));
+      const result = await runner.run('echo /tmp/*.md');
+      expect(result.stdout).toContain('/tmp/x.md');
+      expect(result.stdout).toContain('/tmp/y.md');
+    });
+
+    it('expands * without path prefix in cwd', async () => {
+      const adapter = new NodeAdapter();
+      const mgr = new ProcessManager(vfs, adapter);
+      for (const tool of TOOLS) {
+        mgr.registerTool(tool, resolve(FIXTURES, wasmName(tool)));
+      }
+      const cwdGlobRunner = new ShellRunner(vfs, mgr, adapter, SHELL_WASM);
+      cwdGlobRunner.setEnv('PWD', '/home/user');
+      cwdGlobRunner.setEnv('HOME', '/home/user');
+
+      vfs.writeFile('/home/user/one.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/two.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/pic.png', new TextEncoder().encode(''));
+      const result = await cwdGlobRunner.run('echo *.txt');
+      expect(result.stdout).toContain('one.txt');
+      expect(result.stdout).toContain('two.txt');
+      expect(result.stdout).not.toContain('pic.png');
+    });
+
+    it('passes literal when no glob match', async () => {
+      const result = await runner.run('echo /nonexistent/*.xyz');
+      expect(result.stdout.trim()).toBe('/nonexistent/*.xyz');
     });
   });
 });
