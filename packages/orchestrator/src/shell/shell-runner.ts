@@ -593,7 +593,7 @@ export class ShellRunner {
       const cmd = pipeline.commands[i];
 
       // For pipeline stages, we need to inject stdin from previous stage
-      if ('Simple' in cmd) {
+      if (typeof cmd === 'object' && 'Simple' in cmd) {
         const simple = cmd.Simple;
         const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
         const expandedWords = this.expandGlobs(rawWords);
