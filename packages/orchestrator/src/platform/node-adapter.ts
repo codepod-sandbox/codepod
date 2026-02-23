@@ -16,6 +16,8 @@ function wasmToToolName(filename: string): string {
 }
 
 export class NodeAdapter implements PlatformAdapter {
+  supportsWorkerExecution = true;
+
   async loadModule(path: string): Promise<WebAssembly.Module> {
     const buffer = await readFile(path);
     return WebAssembly.compile(buffer);

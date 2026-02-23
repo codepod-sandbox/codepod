@@ -24,6 +24,8 @@ function toolToWasmFile(name: string): string {
 }
 
 export class BrowserAdapter implements PlatformAdapter {
+  supportsWorkerExecution = false;
+
   async loadModule(url: string): Promise<WebAssembly.Module> {
     const response = await fetch(url);
     return WebAssembly.compileStreaming(response);

@@ -21,4 +21,7 @@ export interface PlatformAdapter {
    * Excludes shell parser and python binaries (registered separately).
    */
   scanTools(wasmDir: string): Promise<Map<string, string>>;
+
+  /** Whether the platform supports Worker-based execution (hard kill). */
+  supportsWorkerExecution?: boolean;
 }
