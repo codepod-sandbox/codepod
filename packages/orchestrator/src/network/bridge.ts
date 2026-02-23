@@ -42,12 +42,14 @@ export class NetworkBridge {
 
   async start(): Promise<void> {
     const workerCode = `
-      const { workerData } = require('node:worker_threads');
+      const { workerData, parentPort } = require('node:worker_threads');
       const sab = workerData.sab;
       const int32 = new Int32Array(sab);
       const uint8 = new Uint8Array(sab);
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
+
+      parentPort.postMessage('ready');
 
       async function loop() {
         while (true) {
@@ -90,8 +92,20 @@ export class NetworkBridge {
       workerData: { sab: this.sab },
     });
 
-    // Give the worker a moment to start its event loop
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    // Attach error handler that unblocks any waiting thread
+    this.worker.on('error', () => {
+      Atomics.store(this.int32, 0, STATUS_ERROR);
+      Atomics.notify(this.int32, 0);
+    });
+
+    // Wait for the worker to signal it's ready (with a fallback timeout)
+    await new Promise<void>((resolve, reject) => {
+      this.worker!.on('message', (msg: string) => {
+        if (msg === 'ready') resolve();
+      });
+      this.worker!.on('error', reject);
+      setTimeout(() => resolve(), 2000); // fallback timeout
+    });
   }
 
   /**
@@ -99,6 +113,10 @@ export class NetworkBridge {
    * Safe to call from WASI host functions.
    */
   fetchSync(url: string, method: string, headers: Record<string, string>, body?: string): SyncFetchResult {
+    if (!this.worker) {
+      return { status: 0, body: '', headers: {}, error: 'bridge not started' };
+    }
+
     // Check gateway policy synchronously first
     const access = this.gateway.checkAccess(url, method);
     if (!access.allowed) {
@@ -110,13 +128,20 @@ export class NetworkBridge {
 
     const reqJson = JSON.stringify({ url, method, headers, body });
     const reqEncoded = encoder.encode(reqJson);
+    if (reqEncoded.byteLength > SAB_SIZE - 8) {
+      return { status: 413, body: '', headers: {}, error: 'request too large' };
+    }
     this.uint8.set(reqEncoded, 8);
     Atomics.store(this.int32, 1, reqEncoded.byteLength);
     Atomics.store(this.int32, 0, STATUS_REQUEST_READY);
     Atomics.notify(this.int32, 0);
 
-    // Block until response
-    Atomics.wait(this.int32, 0, STATUS_REQUEST_READY);
+    // Block until response (30-second timeout to avoid hanging if worker crashes)
+    const waitResult = Atomics.wait(this.int32, 0, STATUS_REQUEST_READY, 30_000);
+    if (waitResult === 'timed-out') {
+      Atomics.store(this.int32, 0, STATUS_IDLE);
+      return { status: 0, body: '', headers: {}, error: 'network request timed out' };
+    }
 
     const status = Atomics.load(this.int32, 0);
     const len = Atomics.load(this.int32, 1);

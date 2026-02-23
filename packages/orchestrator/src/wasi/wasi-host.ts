@@ -14,6 +14,7 @@ import type { VFS } from '../vfs/vfs.js';
 import { fdErrorToWasi, vfsErrnoToWasi } from './errors.js';
 import type { NetworkBridge } from '../network/bridge.js';
 import {
+  WASI_EAGAIN,
   WASI_EBADF,
   WASI_EINVAL,
   WASI_ENOSYS,
@@ -444,6 +445,7 @@ export class WasiHost {
     try {
       this.fdTable.close(fd);
       this.dirFds.delete(fd);
+      this.sockConnections.delete(fd);
       return WASI_ESUCCESS;
     } catch (err) {
       return fdErrorToWasi(err);
@@ -846,6 +848,15 @@ export class WasiHost {
 
   // ---- Socket implementations ----
 
+  /**
+   * WASI sock_send implementation.
+   *
+   * Note: sockConnections entries must be populated externally (via a future
+   * sock_connect mechanism). The sock_* methods are infrastructure for when
+   * WASI networking is fully supported. Currently, connections are established
+   * by higher-level code that sets up the sockConnections map entry before
+   * the WASM module calls sock_send/sock_recv.
+   */
   private sockSend(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nwrittenPtr: number): number {
     if (!this.networkBridge) return WASI_ENOSYS;
     const view = this.getView();
@@ -879,7 +890,8 @@ export class WasiHost {
   private sockRecv(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nreadPtr: number): number {
     if (!this.networkBridge) return WASI_ENOSYS;
     const conn = this.sockConnections.get(fd);
-    if (!conn || !conn.responseBuf) return WASI_EBADF;
+    if (!conn) return WASI_EBADF;
+    if (!conn.responseBuf) return WASI_EAGAIN;
 
     const view = this.getView();
     const bytes = this.getBytes();
