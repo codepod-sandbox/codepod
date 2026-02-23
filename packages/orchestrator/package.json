@@ -5,13 +5,12 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "test": "vitest run",
+    "test": "bun test",
     "build": "tsup"
   },
   "devDependencies": {
     "tsup": "^8.0",
-    "typescript": "^5.7",
-    "vitest": "^3.0"
+    "typescript": "^5.7"
   },
   "dependencies": {}
 }
