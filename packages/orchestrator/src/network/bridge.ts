@@ -10,7 +10,7 @@
  *   Bytes 8+ = JSON request or response payload
  */
 
-import { Worker } from 'node:worker_threads';
+import type { Worker } from 'node:worker_threads';
 import type { NetworkGateway } from './gateway.js';
 
 const SAB_SIZE = 16 * 1024 * 1024; // 16MB
@@ -41,6 +41,7 @@ export class NetworkBridge {
   }
 
   async start(): Promise<void> {
+    const { Worker } = await import('node:worker_threads');
     const workerCode = `
       const { workerData, parentPort } = require('node:worker_threads');
       const sab = workerData.sab;
