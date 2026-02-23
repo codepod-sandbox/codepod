@@ -9,6 +9,7 @@
 import type { PlatformAdapter } from '../platform/adapter.js';
 import type { VFS } from '../vfs/vfs.js';
 import { WasiHost } from '../wasi/wasi-host.js';
+import type { NetworkBridge } from '../network/bridge.js';
 
 import type { SpawnOptions, SpawnResult } from './process.js';
 
@@ -17,10 +18,12 @@ export class ProcessManager {
   private adapter: PlatformAdapter;
   private registry: Map<string, string> = new Map();
   private moduleCache: Map<string, WebAssembly.Module> = new Map();
+  private networkBridge: NetworkBridge | null;
 
-  constructor(vfs: VFS, adapter: PlatformAdapter) {
+  constructor(vfs: VFS, adapter: PlatformAdapter, networkBridge?: NetworkBridge) {
     this.vfs = vfs;
     this.adapter = adapter;
+    this.networkBridge = networkBridge ?? null;
   }
 
   /** Register a tool name to a .wasm file path. */
@@ -68,6 +71,7 @@ export class ProcessManager {
       env: opts.env,
       preopens: { '/': '/' },
       stdin: stdinData,
+      networkBridge: this.networkBridge ?? undefined,
     });
 
     const instance = await this.adapter.instantiate(module, host.getImports());

@@ -14,6 +14,7 @@ import type { PlatformAdapter } from './platform/adapter.js';
 import type { DirEntry, StatResult } from './vfs/inode.js';
 import { NetworkGateway } from './network/gateway.js';
 import type { NetworkPolicy } from './network/gateway.js';
+import { NetworkBridge } from './network/bridge.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -43,6 +44,8 @@ export class Sandbox {
   private shellWasmPath: string;
   private mgr: ProcessManager;
   private envSnapshots: Map<string, Map<string, string>> = new Map();
+  private bridge: NetworkBridge | null = null;
+  private networkPolicy: NetworkPolicy | undefined;
 
   private constructor(
     vfs: VFS,
@@ -52,6 +55,8 @@ export class Sandbox {
     wasmDir: string,
     shellWasmPath: string,
     mgr: ProcessManager,
+    bridge?: NetworkBridge,
+    networkPolicy?: NetworkPolicy,
   ) {
     this.vfs = vfs;
     this.runner = runner;
@@ -60,6 +65,8 @@ export class Sandbox {
     this.wasmDir = wasmDir;
     this.shellWasmPath = shellWasmPath;
     this.mgr = mgr;
+    this.bridge = bridge ?? null;
+    this.networkPolicy = networkPolicy;
   }
 
   static async create(options: SandboxOptions): Promise<Sandbox> {
@@ -68,7 +75,16 @@ export class Sandbox {
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
     const vfs = new VFS({ fsLimitBytes });
-    const mgr = new ProcessManager(vfs, adapter);
+    const gateway = options.network ? new NetworkGateway(options.network) : undefined;
+
+    // Create bridge for WASI socket access when network policy exists
+    let bridge: NetworkBridge | undefined;
+    if (gateway) {
+      bridge = new NetworkBridge(gateway);
+      await bridge.start();
+    }
+
+    const mgr = new ProcessManager(vfs, adapter, bridge);
 
     // Discover and register tools
     const tools = await adapter.scanTools(options.wasmDir);
@@ -83,10 +99,9 @@ export class Sandbox {
 
     // Shell parser wasm
     const shellWasmPath = options.shellWasmPath ?? `${options.wasmDir}/wasmsand-shell.wasm`;
-    const gateway = options.network ? new NetworkGateway(options.network) : undefined;
     const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
-    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr);
+    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, bridge, options.network);
   }
 
   private static async detectAdapter(): Promise<PlatformAdapter> {
@@ -170,7 +185,17 @@ export class Sandbox {
   async fork(): Promise<Sandbox> {
     this.assertAlive();
     const childVfs = this.vfs.cowClone();
-    const childMgr = new ProcessManager(childVfs, this.adapter);
+
+    // Create a new bridge for the forked sandbox if the parent has network policy
+    let childBridge: NetworkBridge | undefined;
+    let childGateway: NetworkGateway | undefined;
+    if (this.networkPolicy) {
+      childGateway = new NetworkGateway(this.networkPolicy);
+      childBridge = new NetworkBridge(childGateway);
+      await childBridge.start();
+    }
+
+    const childMgr = new ProcessManager(childVfs, this.adapter, childBridge);
 
     // Re-register tools from the same wasmDir
     const tools = await this.adapter.scanTools(this.wasmDir);
@@ -181,7 +206,7 @@ export class Sandbox {
       childMgr.registerTool('python3', `${this.wasmDir}/python3.wasm`);
     }
 
-    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath);
+    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, childGateway);
 
     // Copy env
     const envMap = this.runner.getEnvMap();
@@ -192,12 +217,13 @@ export class Sandbox {
     return new Sandbox(
       childVfs, childRunner, this.timeoutMs,
       this.adapter, this.wasmDir, this.shellWasmPath,
-      childMgr,
+      childMgr, childBridge, this.networkPolicy,
     );
   }
 
   destroy(): void {
     this.destroyed = true;
+    this.bridge?.dispose();
   }
 
   private assertAlive(): void {

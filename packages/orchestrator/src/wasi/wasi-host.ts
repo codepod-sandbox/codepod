@@ -12,6 +12,7 @@ import { VfsError } from '../vfs/inode.js';
 import type { InodeType } from '../vfs/inode.js';
 import type { VFS } from '../vfs/vfs.js';
 import { fdErrorToWasi, vfsErrnoToWasi } from './errors.js';
+import type { NetworkBridge } from '../network/bridge.js';
 import {
   WASI_EBADF,
   WASI_EINVAL,
@@ -48,6 +49,7 @@ export interface WasiHostOptions {
   env: Record<string, string>;
   preopens: Record<string, string>;
   stdin?: Uint8Array;
+  networkBridge?: NetworkBridge;
 }
 
 interface PreopenEntry {
@@ -119,6 +121,15 @@ export class WasiHost {
   /** Map from fd number to the directory path it represents (for preopens + opened dirs). */
   private dirFds: Map<number, string> = new Map();
 
+  private networkBridge: NetworkBridge | null;
+  private sockConnections: Map<number, {
+    host: string;
+    port: number;
+    requestBuf: Uint8Array[];
+    responseBuf: Uint8Array | null;
+    responseOffset: number;
+  }> = new Map();
+
   constructor(options: WasiHostOptions) {
     this.vfs = options.vfs;
     this.fdTable = new FdTable(options.vfs);
@@ -127,6 +138,7 @@ export class WasiHost {
       ([k, v]) => `${k}=${v}`,
     );
     this.stdinData = options.stdin;
+    this.networkBridge = options.networkBridge ?? null;
     this.preopens = [];
 
     // Set up preopened directories starting at fd 3.
@@ -234,9 +246,9 @@ export class WasiHost {
         poll_oneoff: this.stub.bind(this),
         proc_raise: this.stub.bind(this),
         sock_accept: this.stub.bind(this),
-        sock_recv: this.stub.bind(this),
-        sock_send: this.stub.bind(this),
-        sock_shutdown: this.stub.bind(this),
+        sock_recv: this.sockRecv.bind(this),
+        sock_send: this.sockSend.bind(this),
+        sock_shutdown: this.sockShutdown.bind(this),
         clock_res_get: this.stub.bind(this),
       },
     };
@@ -830,6 +842,99 @@ export class WasiHost {
 
   private schedYield(): number {
     return WASI_ESUCCESS;
+  }
+
+  // ---- Socket implementations ----
+
+  private sockSend(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nwrittenPtr: number): number {
+    if (!this.networkBridge) return WASI_ENOSYS;
+    const view = this.getView();
+    const bytes = this.getBytes();
+    const iovecs = readIovecs(view, iovsPtr, iovsLen);
+    const conn = this.sockConnections.get(fd);
+    if (!conn) return WASI_EBADF;
+
+    let totalWritten = 0;
+    for (const iov of iovecs) {
+      const data = bytes.slice(iov.buf, iov.buf + iov.len);
+      conn.requestBuf.push(data);
+      totalWritten += data.byteLength;
+    }
+
+    // Try to parse accumulated request as HTTP
+    const fullRequest = concatBuffers(conn.requestBuf);
+    const requestStr = this.decoder.decode(fullRequest);
+    if (requestStr.includes('\r\n\r\n')) {
+      const result = this.processHttpRequest(requestStr, conn.host, conn.port);
+      conn.responseBuf = this.encoder.encode(result);
+      conn.responseOffset = 0;
+      conn.requestBuf = [];
+    }
+
+    const viewAfter = this.getView();
+    viewAfter.setUint32(nwrittenPtr, totalWritten, true);
+    return WASI_ESUCCESS;
+  }
+
+  private sockRecv(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nreadPtr: number): number {
+    if (!this.networkBridge) return WASI_ENOSYS;
+    const conn = this.sockConnections.get(fd);
+    if (!conn || !conn.responseBuf) return WASI_EBADF;
+
+    const view = this.getView();
+    const bytes = this.getBytes();
+    const iovecs = readIovecs(view, iovsPtr, iovsLen);
+
+    let totalRead = 0;
+    for (const iov of iovecs) {
+      const remaining = conn.responseBuf.byteLength - conn.responseOffset;
+      if (remaining <= 0) break;
+      const toRead = Math.min(iov.len, remaining);
+      bytes.set(conn.responseBuf.subarray(conn.responseOffset, conn.responseOffset + toRead), iov.buf);
+      conn.responseOffset += toRead;
+      totalRead += toRead;
+    }
+
+    const viewAfter = this.getView();
+    viewAfter.setUint32(nreadPtr, totalRead, true);
+    return WASI_ESUCCESS;
+  }
+
+  private sockShutdown(fd: number, _how: number): number {
+    this.sockConnections.delete(fd);
+    return WASI_ESUCCESS;
+  }
+
+  private processHttpRequest(requestStr: string, host: string, port: number): string {
+    const firstLine = requestStr.split('\r\n')[0];
+    const parts = firstLine.split(' ');
+    const method = parts[0] || 'GET';
+    const path = parts[1] || '/';
+    const scheme = port === 443 ? 'https' : 'http';
+    const url = `${scheme}://${host}${path}`;
+
+    const headerLines = requestStr.split('\r\n\r\n')[0].split('\r\n').slice(1);
+    const headers: Record<string, string> = {};
+    for (const line of headerLines) {
+      const colonIdx = line.indexOf(':');
+      if (colonIdx > 0) {
+        headers[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
+      }
+    }
+
+    const bodyStart = requestStr.indexOf('\r\n\r\n');
+    const body = bodyStart >= 0 ? requestStr.slice(bodyStart + 4) : undefined;
+
+    const result = this.networkBridge!.fetchSync(url, method, headers, body || undefined);
+
+    let response = `HTTP/1.1 ${result.status} OK\r\n`;
+    for (const [k, v] of Object.entries(result.headers)) {
+      response += `${k}: ${v}\r\n`;
+    }
+    response += `Content-Length: ${Buffer.byteLength(result.body)}\r\n`;
+    response += '\r\n';
+    response += result.body;
+    return response;
   }
 
   private stub(): number {
