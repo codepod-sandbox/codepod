@@ -14,9 +14,10 @@ import type { SpawnResult } from '../process/process.js';
 import type { VFS } from '../vfs/vfs.js';
 import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
+import { NetworkGateway, NetworkAccessDenied } from '../network/gateway.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['which', 'chmod', 'test', '[', 'pwd']);
+const SHELL_BUILTINS = new Set(['which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -84,6 +85,7 @@ export class ShellRunner {
   private shellWasmPath: string;
   private shellModule: WebAssembly.Module | null = null;
   private pythonRunner: PythonRunner | null = null;
+  private gateway: NetworkGateway | null = null;
   private env: Map<string, string> = new Map();
   /** Current command substitution nesting depth. */
   private substitutionDepth = 0;
@@ -93,11 +95,13 @@ export class ShellRunner {
     mgr: ProcessManager,
     adapter: PlatformAdapter,
     shellWasmPath: string,
+    gateway?: NetworkGateway,
   ) {
     this.vfs = vfs;
     this.mgr = mgr;
     this.adapter = adapter;
     this.shellWasmPath = shellWasmPath;
+    this.gateway = gateway ?? null;
 
     // Populate /bin with stubs for registered tools + python3 so that
     // `ls /bin` and `which <tool>` work as expected.
@@ -130,6 +134,16 @@ export class ShellRunner {
 
   getEnv(name: string): string | undefined {
     return this.env.get(name);
+  }
+
+  /** Return a copy of all env vars (for snapshot). */
+  getEnvMap(): Map<string, string> {
+    return new Map(this.env);
+  }
+
+  /** Replace all env vars (for restore). */
+  setEnvMap(env: Map<string, string>): void {
+    this.env = new Map(env);
   }
 
   /** Resolve a path relative to PWD. Absolute paths pass through unchanged. */
@@ -190,13 +204,69 @@ export class ShellRunner {
    */
   async run(command: string): Promise<RunResult> {
     const startTime = performance.now();
-    const ast = await this.parse(command);
+
+    // Pre-process: the Rust parser swallows NAME=VALUE tokens after `export`,
+    // so we handle `export NAME=VALUE ...` by converting assignments into
+    // env.set calls and stripping them from the command before parsing.
+    const preprocessed = this.preprocessExport(command);
+    if (preprocessed === null) {
+      // Fully handled (e.g. `export FOO=bar` with no remaining command)
+      const elapsed = performance.now() - startTime;
+      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: elapsed };
+    }
+
+    const ast = await this.parse(preprocessed);
     if (ast === null) {
       return EMPTY_RESULT;
     }
     const result = await this.execCommand(ast);
     result.executionTimeMs = performance.now() - startTime;
     return result;
+  }
+
+  /**
+   * Pre-process `export` commands. The Rust shell parser swallows NAME=VALUE
+   * tokens after `export`, so we extract and apply them before parsing.
+   *
+   * Returns the (possibly modified) command to parse, or null if the command
+   * was fully handled (pure `export NAME=VALUE` with no other words).
+   */
+  private preprocessExport(command: string): string | null {
+    const trimmed = command.trim();
+    if (!trimmed.startsWith('export')) return command;
+
+    // Match: export [NAME=VALUE ...] [NAME ...]
+    const match = trimmed.match(/^export(\s+|$)/);
+    if (!match) return command;
+
+    const rest = trimmed.slice(match[0].length).trim();
+
+    // `export` with no arguments — pass through to builtinExport
+    if (rest === '') return command;
+
+    // Split tokens and process assignments
+    const tokens = rest.split(/\s+/);
+    let hasAssignment = false;
+    const remaining: string[] = [];
+
+    for (const token of tokens) {
+      const eqIdx = token.indexOf('=');
+      if (eqIdx > 0 && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token.slice(0, eqIdx))) {
+        // This is a NAME=VALUE assignment
+        this.env.set(token.slice(0, eqIdx), token.slice(eqIdx + 1));
+        hasAssignment = true;
+      } else {
+        remaining.push(token);
+      }
+    }
+
+    if (remaining.length === 0 && hasAssignment) {
+      // All tokens were assignments — fully handled
+      return null;
+    }
+
+    // Rebuild: `export` + remaining non-assignment tokens
+    return 'export ' + remaining.join(' ');
   }
 
   /**
@@ -300,6 +370,24 @@ export class ShellRunner {
     }
     if (cmdName === 'pwd') {
       return this.builtinPwd();
+    }
+    if (cmdName === 'cd') {
+      return this.builtinCd(args);
+    }
+    if (cmdName === 'export') {
+      return this.builtinExport(args);
+    }
+    if (cmdName === 'unset') {
+      return this.builtinUnset(args);
+    }
+    if (cmdName === 'date') {
+      return this.builtinDate(args);
+    }
+    if (cmdName === 'curl') {
+      return this.builtinCurl(args);
+    }
+    if (cmdName === 'wget') {
+      return this.builtinWget(args);
     }
 
     // Handle stdin redirect
@@ -825,6 +913,82 @@ export class ShellRunner {
     return { exitCode: 0, stdout: cwd + '\n', stderr: '', executionTimeMs: 0 };
   }
 
+  /** Builtin: cd — change working directory. */
+  private builtinCd(args: string[]): RunResult {
+    let target: string;
+
+    if (args.length === 0) {
+      target = '/home/user';
+    } else if (args[0] === '-') {
+      const oldPwd = this.env.get('OLDPWD');
+      if (!oldPwd) {
+        return { exitCode: 1, stdout: '', stderr: 'cd: OLDPWD not set\n', executionTimeMs: 0 };
+      }
+      target = oldPwd;
+    } else {
+      target = this.resolvePath(args[0]);
+    }
+
+    // Normalize the path (resolve . and .. segments)
+    target = normalizePath(target);
+
+    try {
+      const stat = this.vfs.stat(target);
+      if (stat.type !== 'dir') {
+        return { exitCode: 1, stdout: '', stderr: `cd: ${args[0] ?? target}: not a directory\n`, executionTimeMs: 0 };
+      }
+    } catch {
+      return { exitCode: 1, stdout: '', stderr: `cd: ${args[0] ?? target}: no such file or directory\n`, executionTimeMs: 0 };
+    }
+
+    const oldPwd = this.env.get('PWD') || '/';
+    this.env.set('OLDPWD', oldPwd);
+    this.env.set('PWD', target);
+    return { ...EMPTY_RESULT };
+  }
+
+  /** Builtin: export — set env variables (alias for assignment). */
+  private builtinExport(args: string[]): RunResult {
+    if (args.length === 0) {
+      let stdout = '';
+      for (const [key, value] of this.env) {
+        stdout += `${key}=${value}\n`;
+      }
+      return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
+    }
+
+    for (const arg of args) {
+      const eqIdx = arg.indexOf('=');
+      if (eqIdx >= 0) {
+        this.env.set(arg.slice(0, eqIdx), arg.slice(eqIdx + 1));
+      }
+      // export FOO with no value is a no-op
+    }
+    return { ...EMPTY_RESULT };
+  }
+
+  /** Builtin: unset — remove env variables. */
+  private builtinUnset(args: string[]): RunResult {
+    for (const name of args) {
+      this.env.delete(name);
+    }
+    return { ...EMPTY_RESULT };
+  }
+
+  /** Builtin: date — print current date/time. */
+  private builtinDate(args: string[]): RunResult {
+    const now = new Date();
+
+    if (args.length > 0 && args[0].startsWith('+')) {
+      const format = args[0].slice(1);
+      const stdout = formatDate(now, format) + '\n';
+      return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
+    }
+
+    const stdout = now.toUTCString() + '\n';
+    return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
+  }
+
   /** Builtin: test / [ — evaluate conditional expressions. */
   private builtinTest(args: string[], isBracket: boolean): RunResult {
     // If [ syntax, require and strip trailing ]
@@ -951,6 +1115,107 @@ export class ShellRunner {
     return { exitCode, stdout: '', stderr, executionTimeMs: 0 };
   }
 
+  /** Builtin: curl — HTTP client delegating to NetworkGateway. */
+  private async builtinCurl(args: string[]): Promise<RunResult> {
+    if (!this.gateway) {
+      return { exitCode: 1, stdout: '', stderr: 'curl: network access not configured\n', executionTimeMs: 0 };
+    }
+
+    let method = 'GET';
+    const headers: Record<string, string> = {};
+    let data: string | undefined;
+    let outputFile: string | undefined;
+    let headOnly = false;
+    let url: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '-X' && i + 1 < args.length) { method = args[++i]; }
+      else if (arg === '-H' && i + 1 < args.length) {
+        const header = args[++i];
+        const colonIdx = header.indexOf(':');
+        if (colonIdx > 0) headers[header.slice(0, colonIdx).trim()] = header.slice(colonIdx + 1).trim();
+      }
+      else if ((arg === '-d' || arg === '--data') && i + 1 < args.length) {
+        data = args[++i];
+        if (method === 'GET') method = 'POST';
+      }
+      else if (arg === '-o' && i + 1 < args.length) { outputFile = this.resolvePath(args[++i]); }
+      else if (arg === '-s' || arg === '--silent') { /* silent mode */ }
+      else if (arg === '-I' || arg === '--head') { headOnly = true; method = 'HEAD'; }
+      else if (arg === '-L' || arg === '--location') { /* follow redirects is default with fetch() */ }
+      else if (!arg.startsWith('-')) { url = arg; }
+    }
+
+    if (!url) return { exitCode: 1, stdout: '', stderr: 'curl: no URL specified\n', executionTimeMs: 0 };
+
+    try {
+      const init: RequestInit = { method, headers };
+      if (data) {
+        init.body = data;
+        if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
+      }
+      const response = await this.gateway.fetch(url, init);
+
+      if (headOnly) {
+        let headerStr = `HTTP/${response.status}\n`;
+        response.headers.forEach((v, k) => { headerStr += `${k}: ${v}\n`; });
+        return { exitCode: 0, stdout: headerStr, stderr: '', executionTimeMs: 0 };
+      }
+
+      const body = await response.text();
+      if (outputFile) {
+        this.vfs.writeFile(outputFile, new TextEncoder().encode(body));
+        return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
+      }
+      return { exitCode: 0, stdout: body, stderr: '', executionTimeMs: 0 };
+    } catch (err) {
+      if (err instanceof NetworkAccessDenied) return { exitCode: 1, stdout: '', stderr: `curl: ${err.message}\n`, executionTimeMs: 0 };
+      const msg = err instanceof Error ? err.message : String(err);
+      return { exitCode: 1, stdout: '', stderr: `curl: ${msg}\n`, executionTimeMs: 0 };
+    }
+  }
+
+  /** Builtin: wget — download files via NetworkGateway. */
+  private async builtinWget(args: string[]): Promise<RunResult> {
+    if (!this.gateway) {
+      return { exitCode: 1, stdout: '', stderr: 'wget: network access not configured\n', executionTimeMs: 0 };
+    }
+
+    let outputFile: string | undefined;
+    let toStdout = false;
+    let quiet = false;
+    let url: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '-O' && i + 1 < args.length) {
+        const val = args[++i];
+        if (val === '-') toStdout = true;
+        else outputFile = this.resolvePath(val);
+      } else if (arg === '-q') { quiet = true; }
+      else if (!arg.startsWith('-')) { url = arg; }
+    }
+
+    if (!url) return { exitCode: 1, stdout: '', stderr: 'wget: no URL specified\n', executionTimeMs: 0 };
+
+    try {
+      const response = await this.gateway.fetch(url);
+      const body = await response.text();
+
+      if (toStdout) return { exitCode: 0, stdout: body, stderr: '', executionTimeMs: 0 };
+
+      const destPath = outputFile ?? this.resolvePath(url.split('/').pop() || 'index.html');
+      this.vfs.writeFile(destPath, new TextEncoder().encode(body));
+      const stderr = quiet ? '' : `saved to ${destPath}\n`;
+      return { exitCode: 0, stdout: '', stderr, executionTimeMs: 0 };
+    } catch (err) {
+      if (err instanceof NetworkAccessDenied) return { exitCode: 1, stdout: '', stderr: `wget: ${err.message}\n`, executionTimeMs: 0 };
+      const msg = err instanceof Error ? err.message : String(err);
+      return { exitCode: 1, stdout: '', stderr: `wget: ${msg}\n`, executionTimeMs: 0 };
+    }
+  }
+
   private tryReadFile(path: string): Uint8Array {
     try {
       return this.vfs.readFile(path);
@@ -1021,6 +1286,53 @@ function parseShebang(firstLine: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Normalize an absolute path by resolving `.` and `..` segments.
+ * E.g. "/home/user/.." → "/home", "/home/./user" → "/home/user".
+ */
+function normalizePath(path: string): string {
+  const parts = path.split('/');
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  return '/' + resolved.join('/');
+}
+
+/** Simple strftime-like date formatter. Supports common % tokens. */
+function formatDate(d: Date, format: string): string {
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  return format.replace(/%([YmdHMSaAbBpZsnT%])/g, (_, code: string) => {
+    switch (code) {
+      case 'Y': return String(d.getUTCFullYear());
+      case 'm': return pad(d.getUTCMonth() + 1);
+      case 'd': return pad(d.getUTCDate());
+      case 'H': return pad(d.getUTCHours());
+      case 'M': return pad(d.getUTCMinutes());
+      case 'S': return pad(d.getUTCSeconds());
+      case 'a': return days[d.getUTCDay()];
+      case 'A': return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getUTCDay()];
+      case 'b': return months[d.getUTCMonth()];
+      case 'B': return ['January','February','March','April','May','June','July','August','September','October','November','December'][d.getUTCMonth()];
+      case 'p': return d.getUTCHours() < 12 ? 'AM' : 'PM';
+      case 'Z': return 'UTC';
+      case 's': return String(Math.floor(d.getTime() / 1000));
+      case 'n': return '\n';
+      case 'T': return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+      case '%': return '%';
+      default: return `%${code}`;
+    }
+  });
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {

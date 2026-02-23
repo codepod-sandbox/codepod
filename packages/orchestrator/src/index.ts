@@ -12,3 +12,7 @@ export { BrowserAdapter } from './platform/browser-adapter.js';
 export type { PlatformAdapter } from './platform/adapter.js';
 export type { SpawnOptions, SpawnResult } from './process/process.js';
 export type { RunResult } from './shell/shell-runner.js';
+export { NetworkGateway, NetworkAccessDenied } from './network/gateway.js';
+export type { NetworkPolicy } from './network/gateway.js';
+export { NetworkBridge } from './network/bridge.js';
+export type { SyncFetchResult } from './network/bridge.js';

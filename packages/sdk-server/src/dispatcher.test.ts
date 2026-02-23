@@ -29,6 +29,9 @@ function createMockSandbox(): SandboxLike {
     setEnv: mock((_name: string, _value: string) => {}),
     getEnv: mock((name: string) => (name === 'FOO' ? 'bar' : undefined)),
     destroy: mock(() => {}),
+    snapshot: mock(() => '1'),
+    restore: mock((_id: string) => {}),
+    fork: mock(async () => createMockSandbox()),
   };
 }
 
@@ -274,6 +277,36 @@ describe('Dispatcher', () => {
         code: 1,
         message: 'something went wrong',
       });
+    });
+  });
+
+  describe('snapshot.create', () => {
+    it('calls sandbox.snapshot() and returns id', async () => {
+      const result = await dispatcher.dispatch('snapshot.create', {});
+      expect(sandbox.snapshot).toHaveBeenCalled();
+      expect(result).toEqual({ id: '1' });
+    });
+  });
+
+  describe('snapshot.restore', () => {
+    it('calls sandbox.restore() with id', async () => {
+      const result = await dispatcher.dispatch('snapshot.restore', { id: '1' });
+      expect(sandbox.restore).toHaveBeenCalledWith('1');
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects when id param is missing', async () => {
+      await expect(dispatcher.dispatch('snapshot.restore', {})).rejects.toMatchObject({
+        code: -32602,
+      });
+    });
+  });
+
+  describe('sandbox.fork', () => {
+    it('calls sandbox.fork() and returns sandboxId', async () => {
+      const result = await dispatcher.dispatch('sandbox.fork', {});
+      expect(sandbox.fork).toHaveBeenCalled();
+      expect(result).toHaveProperty('sandboxId');
     });
   });
 });

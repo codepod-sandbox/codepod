@@ -12,6 +12,10 @@ import { ShellRunner } from './shell/shell-runner.js';
 import type { RunResult } from './shell/shell-runner.js';
 import type { PlatformAdapter } from './platform/adapter.js';
 import type { DirEntry, StatResult } from './vfs/inode.js';
+import { NetworkGateway } from './network/gateway.js';
+import type { NetworkPolicy } from './network/gateway.js';
+import { NetworkBridge } from './network/bridge.js';
+import { SOCKET_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from './network/socket-shim.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -24,6 +28,8 @@ export interface SandboxOptions {
   fsLimitBytes?: number;
   /** Path to the shell parser wasm. Defaults to `${wasmDir}/wasmsand-shell.wasm`. */
   shellWasmPath?: string;
+  /** Network policy for curl/wget builtins. If omitted, network access is disabled. */
+  network?: NetworkPolicy;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -34,11 +40,34 @@ export class Sandbox {
   private runner: ShellRunner;
   private timeoutMs: number;
   private destroyed = false;
+  private adapter: PlatformAdapter;
+  private wasmDir: string;
+  private shellWasmPath: string;
+  private mgr: ProcessManager;
+  private envSnapshots: Map<string, Map<string, string>> = new Map();
+  private bridge: NetworkBridge | null = null;
+  private networkPolicy: NetworkPolicy | undefined;
 
-  private constructor(vfs: VFS, runner: ShellRunner, timeoutMs: number) {
+  private constructor(
+    vfs: VFS,
+    runner: ShellRunner,
+    timeoutMs: number,
+    adapter: PlatformAdapter,
+    wasmDir: string,
+    shellWasmPath: string,
+    mgr: ProcessManager,
+    bridge?: NetworkBridge,
+    networkPolicy?: NetworkPolicy,
+  ) {
     this.vfs = vfs;
     this.runner = runner;
     this.timeoutMs = timeoutMs;
+    this.adapter = adapter;
+    this.wasmDir = wasmDir;
+    this.shellWasmPath = shellWasmPath;
+    this.mgr = mgr;
+    this.bridge = bridge ?? null;
+    this.networkPolicy = networkPolicy;
   }
 
   static async create(options: SandboxOptions): Promise<Sandbox> {
@@ -47,7 +76,16 @@ export class Sandbox {
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
     const vfs = new VFS({ fsLimitBytes });
-    const mgr = new ProcessManager(vfs, adapter);
+    const gateway = options.network ? new NetworkGateway(options.network) : undefined;
+
+    // Create bridge for WASI socket access when network policy exists
+    let bridge: NetworkBridge | undefined;
+    if (gateway) {
+      bridge = new NetworkBridge(gateway);
+      await bridge.start();
+    }
+
+    const mgr = new ProcessManager(vfs, adapter, bridge);
 
     // Discover and register tools
     const tools = await adapter.scanTools(options.wasmDir);
@@ -62,9 +100,20 @@ export class Sandbox {
 
     // Shell parser wasm
     const shellWasmPath = options.shellWasmPath ?? `${options.wasmDir}/wasmsand-shell.wasm`;
-    const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath);
+    const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
-    return new Sandbox(vfs, runner, timeoutMs);
+    // Bootstrap Python socket shim when networking is enabled
+    if (bridge) {
+      vfs.mkdirp('/usr/lib/python');
+      vfs.writeFile('/usr/lib/python/socket.py', new TextEncoder().encode(SOCKET_SHIM_SOURCE));
+      // sitecustomize.py pre-loads our socket shim into sys.modules at interpreter
+      // startup, bypassing RustPython's frozen socket module which would otherwise
+      // take priority over PYTHONPATH files.
+      vfs.writeFile('/usr/lib/python/sitecustomize.py', new TextEncoder().encode(SITE_CUSTOMIZE_SOURCE));
+      runner.setEnv('PYTHONPATH', '/usr/lib/python');
+    }
+
+    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, bridge, options.network);
   }
 
   private static async detectAdapter(): Promise<PlatformAdapter> {
@@ -129,8 +178,64 @@ export class Sandbox {
     return this.runner.getEnv(name);
   }
 
+  snapshot(): string {
+    this.assertAlive();
+    const id = this.vfs.snapshot();
+    this.envSnapshots.set(id, this.runner.getEnvMap());
+    return id;
+  }
+
+  restore(id: string): void {
+    this.assertAlive();
+    this.vfs.restore(id);
+    const envSnap = this.envSnapshots.get(id);
+    if (envSnap) {
+      this.runner.setEnvMap(envSnap);
+    }
+  }
+
+  async fork(): Promise<Sandbox> {
+    this.assertAlive();
+    const childVfs = this.vfs.cowClone();
+
+    // Create a new bridge for the forked sandbox if the parent has network policy
+    let childBridge: NetworkBridge | undefined;
+    let childGateway: NetworkGateway | undefined;
+    if (this.networkPolicy) {
+      childGateway = new NetworkGateway(this.networkPolicy);
+      childBridge = new NetworkBridge(childGateway);
+      await childBridge.start();
+    }
+
+    const childMgr = new ProcessManager(childVfs, this.adapter, childBridge);
+
+    // Re-register tools from the same wasmDir
+    const tools = await this.adapter.scanTools(this.wasmDir);
+    for (const [name, path] of tools) {
+      childMgr.registerTool(name, path);
+    }
+    if (!tools.has('python3')) {
+      childMgr.registerTool('python3', `${this.wasmDir}/python3.wasm`);
+    }
+
+    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, childGateway);
+
+    // Copy env
+    const envMap = this.runner.getEnvMap();
+    for (const [k, v] of envMap) {
+      childRunner.setEnv(k, v);
+    }
+
+    return new Sandbox(
+      childVfs, childRunner, this.timeoutMs,
+      this.adapter, this.wasmDir, this.shellWasmPath,
+      childMgr, childBridge, this.networkPolicy,
+    );
+  }
+
   destroy(): void {
     this.destroyed = true;
+    this.bridge?.dispose();
   }
 
   private assertAlive(): void {

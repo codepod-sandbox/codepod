@@ -12,6 +12,7 @@ import { VfsError } from '../vfs/inode.js';
 import type { InodeType } from '../vfs/inode.js';
 import type { VFS } from '../vfs/vfs.js';
 import { fdErrorToWasi, vfsErrnoToWasi } from './errors.js';
+import type { NetworkBridge } from '../network/bridge.js';
 import {
   WASI_EBADF,
   WASI_EINVAL,
@@ -32,6 +33,12 @@ import {
   WASI_WHENCE_SET,
 } from './types.js';
 
+/** Control fd for Python socket shim communication.
+ *  Must fit in a signed 32-bit int (RustPython's os.write uses i32 for fd).
+ *  Must not collide with fds allocated by FdTable (which start at 3) or
+ *  directory pseudo-fds (which start at 100). */
+const CONTROL_FD = 1023;
+
 export class WasiExitError extends Error {
   code: number;
 
@@ -48,6 +55,7 @@ export interface WasiHostOptions {
   env: Record<string, string>;
   preopens: Record<string, string>;
   stdin?: Uint8Array;
+  networkBridge?: NetworkBridge;
 }
 
 interface PreopenEntry {
@@ -119,6 +127,11 @@ export class WasiHost {
   /** Map from fd number to the directory path it represents (for preopens + opened dirs). */
   private dirFds: Map<number, string> = new Map();
 
+  private networkBridge: NetworkBridge | null;
+  private controlConnections: Map<string, { host: string; port: number; scheme: string }> = new Map();
+  private controlResponseBuf: Uint8Array | null = null;
+  private nextControlConnId = 0;
+
   constructor(options: WasiHostOptions) {
     this.vfs = options.vfs;
     this.fdTable = new FdTable(options.vfs);
@@ -127,6 +140,7 @@ export class WasiHost {
       ([k, v]) => `${k}=${v}`,
     );
     this.stdinData = options.stdin;
+    this.networkBridge = options.networkBridge ?? null;
     this.preopens = [];
 
     // Set up preopened directories starting at fd 3.
@@ -160,6 +174,45 @@ export class WasiHost {
 
   getExitCode(): number | null {
     return this.exitCode;
+  }
+
+  /** Handle a control fd command. Public for testing. */
+  handleControlCommand(cmd: Record<string, unknown>): Record<string, unknown> {
+    if (!this.networkBridge) {
+      return { ok: false, error: 'networking not configured' };
+    }
+
+    switch (cmd.cmd) {
+      case 'connect': {
+        const host = cmd.host as string;
+        const port = cmd.port as number;
+        const scheme = port === 443 ? 'https' : 'http';
+        const id = `c${this.nextControlConnId++}`;
+        this.controlConnections.set(id, { host, port, scheme });
+        return { ok: true, id };
+      }
+      case 'request': {
+        const conn = this.controlConnections.get(cmd.id as string);
+        if (!conn) return { ok: false, error: 'unknown connection id' };
+        const url = `${conn.scheme}://${conn.host}:${conn.port}${cmd.path as string}`;
+        const result = this.networkBridge.fetchSync(
+          url, cmd.method as string, (cmd.headers as Record<string, string>) ?? {}, (cmd.body as string) || undefined,
+        );
+        return {
+          ok: true,
+          status: result.status,
+          headers: result.headers,
+          body: result.body,
+          error: result.error,
+        };
+      }
+      case 'close': {
+        this.controlConnections.delete(cmd.id as string);
+        return { ok: true };
+      }
+      default:
+        return { ok: false, error: `unknown command: ${cmd.cmd}` };
+    }
   }
 
   /**
@@ -358,6 +411,19 @@ export class WasiHost {
       } else if (fd === 2) {
         this.stderrBuf.push(data);
         totalWritten += data.byteLength;
+      } else if (fd === CONTROL_FD) {
+        // Control fd: parse JSON command, buffer response
+        const cmdStr = this.decoder.decode(data).trim();
+        if (cmdStr) {
+          try {
+            const cmd = JSON.parse(cmdStr);
+            const resp = this.handleControlCommand(cmd);
+            this.controlResponseBuf = this.encoder.encode(JSON.stringify(resp));
+          } catch {
+            this.controlResponseBuf = this.encoder.encode(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          }
+        }
+        totalWritten += data.byteLength;
       } else {
         try {
           totalWritten += this.fdTable.write(fd, data);
@@ -400,6 +466,21 @@ export class WasiHost {
           break; // EOF reached mid-iovec
         }
         continue;
+      }
+
+      if (fd === CONTROL_FD) {
+        if (!this.controlResponseBuf) break;
+        const remaining = this.controlResponseBuf.byteLength;
+        const toRead = Math.min(iov.len, remaining);
+        const bytes = this.getBytes();
+        bytes.set(this.controlResponseBuf.subarray(0, toRead), iov.buf);
+        totalRead += toRead;
+        if (toRead < remaining) {
+          this.controlResponseBuf = this.controlResponseBuf.subarray(toRead);
+        } else {
+          this.controlResponseBuf = null;
+        }
+        break;
       }
 
       try {
@@ -514,6 +595,8 @@ export class WasiHost {
       filetype = WASI_FILETYPE_DIRECTORY;
     } else if (this.fdTable.isOpen(fd)) {
       filetype = WASI_FILETYPE_REGULAR_FILE;
+    } else if (fd === CONTROL_FD) {
+      filetype = WASI_FILETYPE_CHARACTER_DEVICE;
     } else {
       return WASI_EBADF;
     }
