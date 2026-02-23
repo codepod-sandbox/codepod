@@ -45,6 +45,10 @@ class RpcClient:
 
     def stop(self) -> None:
         if self._proc is not None:
-            self._proc.terminate()
-            self._proc.wait(timeout=5)
-            self._proc = None
+            proc, self._proc = self._proc, None
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()

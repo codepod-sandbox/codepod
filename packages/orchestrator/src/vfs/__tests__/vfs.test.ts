@@ -85,6 +85,60 @@ describe('VFS', () => {
   });
 });
 
+describe('VFS symlinks', () => {
+  it('resolves a simple symlink', () => {
+    const vfs = new VFS();
+    vfs.writeFile('/tmp/real.txt', new TextEncoder().encode('content'));
+    vfs.symlink('/tmp/real.txt', '/tmp/link.txt');
+    const data = vfs.readFile('/tmp/link.txt');
+    expect(new TextDecoder().decode(data)).toBe('content');
+  });
+
+  it('resolves a chain of symlinks within depth limit', () => {
+    const vfs = new VFS();
+    vfs.writeFile('/tmp/target.txt', new TextEncoder().encode('ok'));
+    // Create a short chain: link3 -> link2 -> link1 -> target.txt
+    vfs.symlink('/tmp/target.txt', '/tmp/link1');
+    vfs.symlink('/tmp/link1', '/tmp/link2');
+    vfs.symlink('/tmp/link2', '/tmp/link3');
+    expect(new TextDecoder().decode(vfs.readFile('/tmp/link3'))).toBe('ok');
+  });
+
+  it('throws on symlink chain exceeding max depth', () => {
+    const vfs = new VFS();
+    // Create 41 directories to hold symlinks, each pointing to the next
+    vfs.writeFile('/tmp/end.txt', new TextEncoder().encode('unreachable'));
+    // Build chain: /tmp/s0 -> /tmp/s1 -> ... -> /tmp/s40 -> /tmp/end.txt
+    vfs.symlink('/tmp/end.txt', '/tmp/s40');
+    for (let i = 39; i >= 0; i--) {
+      vfs.symlink(`/tmp/s${i + 1}`, `/tmp/s${i}`);
+    }
+    // Chain of 41 symlinks should exceed MAX_SYMLINK_DEPTH (40)
+    expect(() => vfs.readFile('/tmp/s0')).toThrow(/too many symlinks/);
+  });
+
+  it('counts depth across recursive resolve calls', () => {
+    const vfs = new VFS();
+    // Create symlinks as intermediate path components to test cross-recursion depth
+    // /a/link -> /b, /b/link -> /c, ... forces resolve() to recurse for each segment
+    vfs.mkdirp('/d0');
+    vfs.writeFile('/d0/target.txt', new TextEncoder().encode('found'));
+
+    // Build 41 directories with symlinks between them
+    for (let i = 40; i >= 1; i--) {
+      vfs.mkdirp(`/d${i}`);
+      vfs.symlink(`/d${i - 1}`, `/d${i}/hop`);
+    }
+    // /d41/hop -> /d40, /d40/hop -> /d39, ..., /d1/hop -> /d0
+    // Traversing /d41/hop/hop/hop/.../hop/target.txt requires 41 symlink follows
+    // This should exceed the limit
+    vfs.mkdirp('/d41');
+    vfs.symlink('/d40', '/d41/hop');
+    const deepPath = '/d41' + '/hop'.repeat(41) + '/target.txt';
+    expect(() => vfs.readFile(deepPath)).toThrow(/too many symlinks/);
+  });
+});
+
 describe('VFS size limit', () => {
   it('allows writes within limit', () => {
     const vfs = new VFS({ fsLimitBytes: 1024 });

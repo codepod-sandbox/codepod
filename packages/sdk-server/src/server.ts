@@ -43,12 +43,20 @@ function log(msg: string): void {
   process.stderr.write(`[sdk-server] ${msg}\n`);
 }
 
+// Max request size: 400MB base64 ≈ 300MB decoded. Prevents OOM before VFS limit kicks in.
+const MAX_LINE_BYTES = 400 * 1024 * 1024;
+
 async function main(): Promise<void> {
   let dispatcher: Dispatcher | null = null;
 
   const rl = createInterface({ input: process.stdin });
 
   for await (const line of rl) {
+    if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
+      respond(errorResponse(0, -32700, 'Request too large'));
+      continue;
+    }
+
     let req: JsonRpcRequest;
     try {
       req = JSON.parse(line);

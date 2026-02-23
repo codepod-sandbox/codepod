@@ -104,7 +104,7 @@ export class VFS {
    * Returns the parent directory and the final segment name,
    * or the resolved inode when `resolveLeaf` is true.
    */
-  private resolve(path: string, followSymlinks = true): Inode {
+  private resolve(path: string, followSymlinks = true, depth = 0): Inode {
     const segments = parsePath(path);
 
     if (segments.length === 0) {
@@ -112,7 +112,6 @@ export class VFS {
     }
 
     let current: Inode = this.root;
-    let depth = 0;
 
     for (let i = 0; i < segments.length; i++) {
       // Follow symlinks for intermediate path components (and leaf if requested)
@@ -121,7 +120,7 @@ export class VFS {
           throw new VfsError('ENOENT', `too many symlinks: ${path}`);
         }
         depth++;
-        current = this.resolve(current.target);
+        current = this.resolve(current.target, true, depth);
       }
 
       if (current.type !== 'dir') {
@@ -141,7 +140,8 @@ export class VFS {
       if (depth >= MAX_SYMLINK_DEPTH) {
         throw new VfsError('ENOENT', `too many symlinks: ${path}`);
       }
-      current = this.resolve(current.target);
+      depth++;
+      current = this.resolve(current.target, true, depth);
     }
 
     return current;
@@ -162,10 +162,15 @@ export class VFS {
     const parentSegments = segments.slice(0, -1);
 
     let current: Inode = this.root;
+    let depth = 0;
 
     for (const segment of parentSegments) {
       if (current.type === 'symlink') {
-        current = this.resolve(current.target);
+        if (depth >= MAX_SYMLINK_DEPTH) {
+          throw new VfsError('ENOENT', `too many symlinks: ${path}`);
+        }
+        current = this.resolve(current.target, true, depth + 1);
+        depth++;
       }
       if (current.type !== 'dir') {
         throw new VfsError('ENOTDIR', `not a directory: ${path}`);
@@ -178,7 +183,10 @@ export class VFS {
     }
 
     if (current.type === 'symlink') {
-      current = this.resolve(current.target);
+      if (depth >= MAX_SYMLINK_DEPTH) {
+        throw new VfsError('ENOENT', `too many symlinks: ${path}`);
+      }
+      current = this.resolve(current.target, true, depth + 1);
     }
     if (current.type !== 'dir') {
       throw new VfsError('ENOTDIR', `not a directory: ${path}`);
