@@ -7,14 +7,14 @@
  */
 
 import type { PlatformAdapter } from '../platform/adapter.js';
-import type { VFS } from '../vfs/vfs.js';
+import type { VfsLike } from '../vfs/vfs-like.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 import type { NetworkBridge } from '../network/bridge.js';
 
 import type { SpawnOptions, SpawnResult } from './process.js';
 
 export class ProcessManager {
-  private vfs: VFS;
+  private vfs: VfsLike;
   private adapter: PlatformAdapter;
   private registry: Map<string, string> = new Map();
   private moduleCache: Map<string, WebAssembly.Module> = new Map();
@@ -22,7 +22,7 @@ export class ProcessManager {
   private currentHost: WasiHost | null = null;
   private toolAllowlist: Set<string> | null = null;
 
-  constructor(vfs: VFS, adapter: PlatformAdapter, networkBridge?: NetworkBridge, toolAllowlist?: string[]) {
+  constructor(vfs: VfsLike, adapter: PlatformAdapter, networkBridge?: NetworkBridge, toolAllowlist?: string[]) {
     this.vfs = vfs;
     this.adapter = adapter;
     this.networkBridge = networkBridge ?? null;

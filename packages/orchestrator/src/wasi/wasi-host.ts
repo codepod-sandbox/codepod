@@ -10,7 +10,7 @@ import { FdTable } from '../vfs/fd-table.js';
 import type { OpenMode, SeekWhence } from '../vfs/fd-table.js';
 import { VfsError } from '../vfs/inode.js';
 import type { InodeType } from '../vfs/inode.js';
-import type { VFS } from '../vfs/vfs.js';
+import type { VfsLike } from '../vfs/vfs-like.js';
 import { fdErrorToWasi, vfsErrnoToWasi } from './errors.js';
 import type { NetworkBridge } from '../network/bridge.js';
 import {
@@ -50,7 +50,7 @@ export class WasiExitError extends Error {
 }
 
 export interface WasiHostOptions {
-  vfs: VFS;
+  vfs: VfsLike;
   args: string[];
   env: Record<string, string>;
   preopens: Record<string, string>;
@@ -113,7 +113,7 @@ function wasiWhenceToVfs(whence: number): SeekWhence {
 }
 
 export class WasiHost {
-  private vfs: VFS;
+  private vfs: VfsLike;
   private fdTable: FdTable;
   private args: string[];
   private envPairs: string[];

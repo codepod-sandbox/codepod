@@ -11,7 +11,7 @@
 import type { PlatformAdapter } from '../platform/adapter.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { SpawnResult } from '../process/process.js';
-import type { VFS } from '../vfs/vfs.js';
+import type { VfsLike } from '../vfs/vfs-like.js';
 import { VfsError } from '../vfs/inode.js';
 import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
@@ -104,7 +104,7 @@ class ExitSignal {
 }
 
 export class ShellRunner {
-  private vfs: VFS;
+  private vfs: VfsLike;
   private mgr: ProcessManager;
   private adapter: PlatformAdapter;
   private shellWasmPath: string;
@@ -124,7 +124,7 @@ export class ShellRunner {
   private functions: Map<string, Command> = new Map();
 
   constructor(
-    vfs: VFS,
+    vfs: VfsLike,
     mgr: ProcessManager,
     adapter: PlatformAdapter,
     shellWasmPath: string,
