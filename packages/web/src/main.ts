@@ -2,7 +2,7 @@ import { VFS, ProcessManager, ShellRunner, BrowserAdapter } from '@wasmsand/sand
 import { createTerminal } from './terminal.js';
 import '@xterm/xterm/css/xterm.css';
 
-const WASM_BASE = '/wasm';
+const WASM_BASE = `${import.meta.env.BASE_URL}wasm`.replace(/\/\//g, '/');
 
 const TOOLS = [
   'cat', 'echo', 'head', 'tail', 'wc', 'sort', 'uniq', 'grep',

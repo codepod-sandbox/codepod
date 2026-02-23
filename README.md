@@ -2,15 +2,17 @@
 
 A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 45+ coreutils, and a Python runtime — no containers, no kernel, no hardware emulation.
 
+**[Try it in your browser](https://sunnymar.github.io/wasmsand/)**
+
 LLMs are trained on enormous amounts of shell and Python usage. Rather than inventing a new API for code execution, wasmsand speaks the language they already know: bash, coreutils, and Python 3.
 
 ## What it does
 
 - **Shell execution** — pipes, redirects, variables, globbing, control flow (`if`/`for`/`while`), command substitution, subshells
 - **45+ coreutils** — cat, grep, sed, awk, find, sort, jq, and more, compiled to WebAssembly
-- **Python 3** via Pyodide — standard library plus numpy, pandas, matplotlib, beautifulsoup4
+- **Python 3** via RustPython compiled to WASI — standard library available
 - **In-memory virtual filesystem** — POSIX semantics with inodes, file descriptors, and pipes
-- **Runs everywhere** — same code works in Node.js and in the browser
+- **Runs everywhere** — same code works server-side ([Bun](https://bun.sh) or Node.js) and in the browser
 
 ## Install
 
@@ -85,7 +87,7 @@ with Sandbox() as sb:
 | Path utilities | basename, dirname, readlink, realpath |
 | Environment | env, printenv, export, uname, whoami, id |
 | Scripting | echo, printf, test, expr, seq, sleep, yes, true, false, mktemp |
-| Python | python3 (Pyodide with numpy, pandas, matplotlib, etc.) |
+| Python | python3 (RustPython, standard library) |
 
 ## Shell features
 
@@ -104,12 +106,12 @@ TypeScript Orchestrator ─── VFS (in-memory) ── Process Manager
    ┌────┴────┐
    │         │
 Shell    Coreutils    Python
-(Rust)   (Rust)      (Pyodide)
+(Rust)   (Rust)      (RustPython)
    └────┬────┘
    WebAssembly
 ```
 
-The shell parser is written in Rust and compiled to WASI. It emits a JSON AST that the TypeScript orchestrator executes, managing the virtual filesystem, process lifecycle, and I/O plumbing. Coreutils are individual Rust binaries compiled to WASM. Python runs via Pyodide with its filesystem proxied through the same VFS.
+The shell parser is written in Rust and compiled to WASI. It emits a JSON AST that the TypeScript orchestrator executes, managing the virtual filesystem, process lifecycle, and I/O plumbing. Coreutils are individual Rust binaries compiled to WASM. Python runs via RustPython (also compiled to WASI) sharing the same VFS.
 
 ## Limitations
 
@@ -117,19 +119,22 @@ The shell parser is written in Rust and compiled to WASI. It emits a JSON AST th
 - **No persistent storage.** The VFS is in-memory and scoped to a single session. There is no snapshot/restore across sessions yet.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O rather than in parallel. This is correct but slower than a real shell for streaming workloads.
 - **Bash subset, not full POSIX.** No function definitions, aliases, `eval`, job control, or advanced file descriptor manipulation (e.g., `>&3`).
-- **No dynamic package installation.** Python packages are pre-bundled with Pyodide. There is no `pip install` at runtime.
+- **No dynamic package installation.** There is no `pip install` at runtime. Only the Python standard library is available.
 - **256 MB filesystem limit** by default. Configurable, but the VFS is always in-memory.
 - **Security hardening is in progress.** Timeout enforcement, capability policies, output truncation, and session isolation are defined but not all fully implemented yet. Do not use for adversarial untrusted input in production without reviewing the [security spec](docs/plans/2026-02-23-security-mvp-spec.md).
 
 ## Development
 
-Requires [Bun](https://bun.sh) and a Rust toolchain with the `wasm32-wasip1` target.
+Requires [Bun](https://bun.sh) (runtime, bundler, and test runner) and a Rust toolchain with the `wasm32-wasip1` target.
 
 ```bash
-# Build everything
+# Install dependencies
+bun install
+
+# Build everything (Rust WASM + TypeScript)
 make build
 
-# Run tests
+# Run tests (338 tests)
 make test
 
 # Package for npm
