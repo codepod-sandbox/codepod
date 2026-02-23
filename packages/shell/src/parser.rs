@@ -74,6 +74,7 @@ impl Parser {
             Some(token) => matches!(
                 token,
                 Token::Word(_)
+                    | Token::DoubleQuoted(_)
                     | Token::Assignment(_, _)
                     | Token::Variable(_)
                     | Token::CommandSub(_)
@@ -202,6 +203,12 @@ impl Parser {
                         words.push(Word::variable(&v));
                     }
                 }
+                Some(Token::DoubleQuoted(_)) => {
+                    seen_word = true;
+                    if let Token::DoubleQuoted(parts) = self.advance() {
+                        words.push(Word { parts });
+                    }
+                }
                 Some(Token::CommandSub(_)) => {
                     seen_word = true;
                     if let Token::CommandSub(c) = self.advance() {
@@ -301,6 +308,11 @@ impl Parser {
                 Some(Token::Variable(_)) => {
                     if let Token::Variable(v) = self.advance() {
                         words.push(Word::variable(&v));
+                    }
+                }
+                Some(Token::DoubleQuoted(_)) => {
+                    if let Token::DoubleQuoted(parts) = self.advance() {
+                        words.push(Word { parts });
                     }
                 }
                 Some(Token::CommandSub(_)) => {

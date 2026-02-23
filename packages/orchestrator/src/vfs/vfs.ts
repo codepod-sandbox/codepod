@@ -20,6 +20,11 @@ const MAX_SYMLINK_DEPTH = 40;
 export interface VfsOptions {
   /** Maximum total bytes stored in the VFS. Undefined = no limit. */
   fsLimitBytes?: number;
+  /**
+   * Paths that are writable. Everything else is read-only.
+   * Defaults to ['/home/user', '/tmp']. Set to undefined to disable.
+   */
+  writablePaths?: string[] | undefined;
 }
 
 /**
@@ -53,11 +58,18 @@ export class VFS {
   private nextSnapId = 1;
   private totalBytes = 0;
   private fsLimitBytes: number | undefined;
+  /** Writable path prefixes. Writes outside these paths are rejected with EROFS. */
+  private writablePaths: string[] | undefined;
+  /** When true, bypass writable-path checks (used during init). */
+  private initializing = false;
 
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
     this.fsLimitBytes = options?.fsLimitBytes;
+    this.writablePaths = options?.writablePaths !== undefined ? options.writablePaths : ['/home/user', '/tmp'];
+    this.initializing = true;
     this.initDefaultLayout();
+    this.initializing = false;
   }
 
   /** Create a VFS from an already-populated root (used by cowClone). */
@@ -68,6 +80,8 @@ export class VFS {
     vfs.nextSnapId = 1;
     vfs.totalBytes = 0;
     vfs.fsLimitBytes = undefined;
+    vfs.writablePaths = undefined;
+    vfs.initializing = false;
     return vfs;
   }
 
@@ -77,6 +91,16 @@ export class VFS {
     for (const dir of dirs) {
       this.mkdirInternal(dir);
     }
+  }
+
+  /** Throw EROFS if the path is outside writable paths. */
+  private assertWritable(path: string): void {
+    if (this.initializing || this.writablePaths === undefined) return;
+    const normalized = '/' + parsePath(path).join('/');
+    for (const prefix of this.writablePaths) {
+      if (normalized === prefix || normalized.startsWith(prefix + '/')) return;
+    }
+    throw new VfsError('EROFS', `read-only file system: ${path}`);
   }
 
   /** Internal mkdir that silently skips existing directories. Used during init. */
@@ -233,7 +257,15 @@ export class VFS {
     return inode.content;
   }
 
+  /** Run a callback with writable-path checks disabled (for system setup). */
+  withWriteAccess(fn: () => void): void {
+    const prev = this.initializing;
+    this.initializing = true;
+    try { fn(); } finally { this.initializing = prev; }
+  }
+
   writeFile(path: string, data: Uint8Array): void {
+    this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
     const existing = parent.children.get(name);
 
@@ -259,6 +291,7 @@ export class VFS {
   }
 
   mkdir(path: string): void {
+    this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
 
     if (parent.children.has(name)) {
@@ -269,6 +302,7 @@ export class VFS {
   }
 
   mkdirp(path: string): void {
+    this.assertWritable(path);
     const segments = parsePath(path);
     let current: DirInode = this.root;
 
@@ -308,6 +342,7 @@ export class VFS {
   }
 
   unlink(path: string): void {
+    this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
     const child = parent.children.get(name);
 
@@ -325,6 +360,7 @@ export class VFS {
   }
 
   rmdir(path: string): void {
+    this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
     const child = parent.children.get(name);
 
@@ -342,6 +378,8 @@ export class VFS {
   }
 
   rename(oldPath: string, newPath: string): void {
+    this.assertWritable(oldPath);
+    this.assertWritable(newPath);
     const { parent: oldParent, name: oldName } = this.resolveParent(oldPath);
     const child = oldParent.children.get(oldName);
 
@@ -356,6 +394,7 @@ export class VFS {
   }
 
   symlink(target: string, path: string): void {
+    this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
 
     if (parent.children.has(name)) {

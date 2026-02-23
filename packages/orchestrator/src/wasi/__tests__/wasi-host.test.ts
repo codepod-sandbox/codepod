@@ -149,7 +149,7 @@ describe('WasiHost', () => {
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
       // Use path_open to create a file: we need to set up the path string
-      const pathStr = 'test-output.txt';
+      const pathStr = 'tmp/test-output.txt';
       const pathBytes = new TextEncoder().encode(pathStr);
       bytes.set(pathBytes, 500);
 
@@ -173,18 +173,18 @@ describe('WasiHost', () => {
       expect(errno3).toBe(WASI_ESUCCESS);
 
       // Verify via VFS
-      const written = new TextDecoder().decode(vfs.readFile('/test-output.txt'));
+      const written = new TextDecoder().decode(vfs.readFile('/tmp/test-output.txt'));
       expect(written).toBe('file content');
     });
   });
 
   describe('fd_read', () => {
     it('reads from a VFS file', () => {
-      vfs.writeFile('/hello.txt', new TextEncoder().encode('goodbye'));
+      vfs.writeFile('/tmp/hello.txt', new TextEncoder().encode('goodbye'));
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
       // Open the file
-      const pathBytes = new TextEncoder().encode('hello.txt');
+      const pathBytes = new TextEncoder().encode('tmp/hello.txt');
       bytes.set(pathBytes, 500);
       const errno1 = wasi.path_open(3, 0, 500, pathBytes.length, 0, BigInt(0), BigInt(0), 0, 400);
       expect(errno1).toBe(WASI_ESUCCESS);
@@ -204,11 +204,11 @@ describe('WasiHost', () => {
 
   describe('fd_seek and fd_tell', () => {
     it('seeks and tells position', () => {
-      vfs.writeFile('/seek.txt', new TextEncoder().encode('0123456789'));
+      vfs.writeFile('/tmp/seek.txt', new TextEncoder().encode('0123456789'));
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
       // Open file
-      const pathBytes = new TextEncoder().encode('seek.txt');
+      const pathBytes = new TextEncoder().encode('tmp/seek.txt');
       bytes.set(pathBytes, 500);
       wasi.path_open(3, 0, 500, pathBytes.length, 0, BigInt(0), BigInt(0), 0, 400);
       const fd = view.getUint32(400, true);
@@ -330,10 +330,10 @@ describe('WasiHost', () => {
 
   describe('path_open', () => {
     it('opens an existing file for reading', () => {
-      vfs.writeFile('/data.txt', new TextEncoder().encode('content'));
+      vfs.writeFile('/tmp/data.txt', new TextEncoder().encode('content'));
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'data.txt';
+      const pathStr = 'tmp/data.txt';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       const errno = wasi.path_open(3, 0, 500, pathStr.length, 0, BigInt(0), BigInt(0), 0, 400);
@@ -345,7 +345,7 @@ describe('WasiHost', () => {
     it('creates a new file with CREAT flag', () => {
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'new-file.txt';
+      const pathStr = 'tmp/new-file.txt';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       // oflags = CREAT (1) | TRUNC (8) = 9
@@ -370,69 +370,69 @@ describe('WasiHost', () => {
     it('creates a directory', () => {
       const { wasi, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'newdir';
+      const pathStr = 'tmp/newdir';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       const errno = wasi.path_create_directory(3, 500, pathStr.length);
       expect(errno).toBe(WASI_ESUCCESS);
 
-      const stat = vfs.stat('/newdir');
+      const stat = vfs.stat('/tmp/newdir');
       expect(stat.type).toBe('dir');
     });
   });
 
   describe('path_remove_directory', () => {
     it('removes an empty directory', () => {
-      vfs.mkdir('/removeme');
+      vfs.mkdir('/tmp/removeme');
       const { wasi, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'removeme';
+      const pathStr = 'tmp/removeme';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       const errno = wasi.path_remove_directory(3, 500, pathStr.length);
       expect(errno).toBe(WASI_ESUCCESS);
-      expect(() => vfs.stat('/removeme')).toThrow();
+      expect(() => vfs.stat('/tmp/removeme')).toThrow();
     });
   });
 
   describe('path_unlink_file', () => {
     it('removes a file', () => {
-      vfs.writeFile('/delete-me.txt', new Uint8Array(0));
+      vfs.writeFile('/tmp/delete-me.txt', new Uint8Array(0));
       const { wasi, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'delete-me.txt';
+      const pathStr = 'tmp/delete-me.txt';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       const errno = wasi.path_unlink_file(3, 500, pathStr.length);
       expect(errno).toBe(WASI_ESUCCESS);
-      expect(() => vfs.stat('/delete-me.txt')).toThrow();
+      expect(() => vfs.stat('/tmp/delete-me.txt')).toThrow();
     });
   });
 
   describe('path_rename', () => {
     it('renames a file', () => {
-      vfs.writeFile('/old-name.txt', new TextEncoder().encode('data'));
+      vfs.writeFile('/tmp/old-name.txt', new TextEncoder().encode('data'));
       const { wasi, bytes } = getImportsAndView(host, memory);
 
-      const oldPath = 'old-name.txt';
-      const newPath = 'new-name.txt';
+      const oldPath = 'tmp/old-name.txt';
+      const newPath = 'tmp/new-name.txt';
       bytes.set(new TextEncoder().encode(oldPath), 500);
       bytes.set(new TextEncoder().encode(newPath), 600);
 
       const errno = wasi.path_rename(3, 500, oldPath.length, 3, 600, newPath.length);
       expect(errno).toBe(WASI_ESUCCESS);
-      expect(() => vfs.stat('/old-name.txt')).toThrow();
-      const content = new TextDecoder().decode(vfs.readFile('/new-name.txt'));
+      expect(() => vfs.stat('/tmp/old-name.txt')).toThrow();
+      const content = new TextDecoder().decode(vfs.readFile('/tmp/new-name.txt'));
       expect(content).toBe('data');
     });
   });
 
   describe('path_filestat_get', () => {
     it('returns stat info for a file', () => {
-      vfs.writeFile('/stat-me.txt', new TextEncoder().encode('12345'));
+      vfs.writeFile('/tmp/stat-me.txt', new TextEncoder().encode('12345'));
       const { wasi, view, bytes } = getImportsAndView(host, memory);
 
-      const pathStr = 'stat-me.txt';
+      const pathStr = 'tmp/stat-me.txt';
       bytes.set(new TextEncoder().encode(pathStr), 500);
 
       const errno = wasi.path_filestat_get(3, 0, 500, pathStr.length, 100);

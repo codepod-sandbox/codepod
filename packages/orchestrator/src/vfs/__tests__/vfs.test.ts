@@ -120,21 +120,21 @@ describe('VFS symlinks', () => {
   it('counts depth across recursive resolve calls', () => {
     const vfs = new VFS();
     // Create symlinks as intermediate path components to test cross-recursion depth
-    // /a/link -> /b, /b/link -> /c, ... forces resolve() to recurse for each segment
-    vfs.mkdirp('/d0');
-    vfs.writeFile('/d0/target.txt', new TextEncoder().encode('found'));
+    // /tmp/d0/target.txt, /tmp/d1/hop -> /tmp/d0, etc.
+    vfs.mkdirp('/tmp/d0');
+    vfs.writeFile('/tmp/d0/target.txt', new TextEncoder().encode('found'));
 
     // Build 41 directories with symlinks between them
     for (let i = 40; i >= 1; i--) {
-      vfs.mkdirp(`/d${i}`);
-      vfs.symlink(`/d${i - 1}`, `/d${i}/hop`);
+      vfs.mkdirp(`/tmp/d${i}`);
+      vfs.symlink(`/tmp/d${i - 1}`, `/tmp/d${i}/hop`);
     }
-    // /d41/hop -> /d40, /d40/hop -> /d39, ..., /d1/hop -> /d0
-    // Traversing /d41/hop/hop/hop/.../hop/target.txt requires 41 symlink follows
+    // /tmp/d41/hop -> /tmp/d40, /tmp/d40/hop -> /tmp/d39, ..., /tmp/d1/hop -> /tmp/d0
+    // Traversing /tmp/d41/hop/hop/hop/.../hop/target.txt requires 41 symlink follows
     // This should exceed the limit
-    vfs.mkdirp('/d41');
-    vfs.symlink('/d40', '/d41/hop');
-    const deepPath = '/d41' + '/hop'.repeat(41) + '/target.txt';
+    vfs.mkdirp('/tmp/d41');
+    vfs.symlink('/tmp/d40', '/tmp/d41/hop');
+    const deepPath = '/tmp/d41' + '/hop'.repeat(41) + '/target.txt';
     expect(() => vfs.readFile(deepPath)).toThrow(/too many symlinks/);
   });
 });

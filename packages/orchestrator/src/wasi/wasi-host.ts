@@ -149,15 +149,17 @@ export class WasiHost {
     // opening a sentinel file for each preopen slot and immediately
     // recording the fd. The sentinel file is never read/written.
     const sentinelPath = '/.wasi-preopen-sentinel';
-    this.vfs.writeFile(sentinelPath, new Uint8Array(0));
+    this.vfs.withWriteAccess(() => {
+      this.vfs.writeFile(sentinelPath, new Uint8Array(0));
 
-    for (const [vfsPath, label] of Object.entries(options.preopens)) {
-      const fd = this.fdTable.open(sentinelPath, 'r');
-      this.preopens.push({ vfsPath, label, fd });
-      this.dirFds.set(fd, vfsPath);
-    }
+      for (const [vfsPath, label] of Object.entries(options.preopens)) {
+        const fd = this.fdTable.open(sentinelPath, 'r');
+        this.preopens.push({ vfsPath, label, fd });
+        this.dirFds.set(fd, vfsPath);
+      }
 
-    this.vfs.unlink(sentinelPath);
+      this.vfs.unlink(sentinelPath);
+    });
   }
 
   setMemory(memory: WebAssembly.Memory): void {

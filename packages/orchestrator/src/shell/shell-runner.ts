@@ -12,12 +12,13 @@ import type { PlatformAdapter } from '../platform/adapter.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { SpawnResult } from '../process/process.js';
 import type { VFS } from '../vfs/vfs.js';
+import { VfsError } from '../vfs/inode.js';
 import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 import { NetworkGateway, NetworkAccessDenied } from '../network/gateway.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -105,7 +106,13 @@ export class ShellRunner {
 
     // Populate /bin with stubs for registered tools + python3 so that
     // `ls /bin` and `which <tool>` work as expected.
-    this.populateBin();
+    this.vfs.withWriteAccess(() => this.populateBin());
+
+    // Set default environment variables so the shell starts in /home/user.
+    this.env.set('HOME', '/home/user');
+    this.env.set('PWD', '/home/user');
+    this.env.set('USER', 'user');
+    this.env.set('PATH', '/bin:/usr/bin');
   }
 
   /** Write executable stub files into /bin and /usr/bin for all registered tools + python. */
@@ -355,85 +362,96 @@ export class ShellRunner {
       args = [...args, pwd];
     }
 
-    // Handle shell builtins
-    if (cmdName === 'which') {
-      return this.builtinWhich(args);
-    }
-    if (cmdName === 'chmod') {
-      return this.builtinChmod(args);
-    }
-    if (cmdName === 'test') {
-      return this.builtinTest(args, false);
-    }
-    if (cmdName === '[') {
-      return this.builtinTest(args, true);
-    }
-    if (cmdName === 'pwd') {
-      return this.builtinPwd();
-    }
-    if (cmdName === 'cd') {
-      return this.builtinCd(args);
-    }
-    if (cmdName === 'export') {
-      return this.builtinExport(args);
-    }
-    if (cmdName === 'unset') {
-      return this.builtinUnset(args);
-    }
-    if (cmdName === 'date') {
-      return this.builtinDate(args);
-    }
-    if (cmdName === 'curl') {
-      return this.builtinCurl(args);
-    }
-    if (cmdName === 'wget') {
-      return this.builtinWget(args);
+    // Handle shell builtins — capture result, then fall through to redirect handling
+    let result: RunResult | undefined;
+
+    if (cmdName === 'echo') {
+      result = this.builtinEcho(args);
+    } else if (cmdName === 'which') {
+      result = this.builtinWhich(args);
+    } else if (cmdName === 'chmod') {
+      result = this.builtinChmod(args);
+    } else if (cmdName === 'test') {
+      result = this.builtinTest(args, false);
+    } else if (cmdName === '[') {
+      result = this.builtinTest(args, true);
+    } else if (cmdName === 'pwd') {
+      result = this.builtinPwd();
+    } else if (cmdName === 'cd') {
+      result = this.builtinCd(args);
+    } else if (cmdName === 'export') {
+      result = this.builtinExport(args);
+    } else if (cmdName === 'unset') {
+      result = this.builtinUnset(args);
+    } else if (cmdName === 'date') {
+      result = this.builtinDate(args);
+    } else if (cmdName === 'curl') {
+      result = await this.builtinCurl(args);
+    } else if (cmdName === 'wget') {
+      result = await this.builtinWget(args);
     }
 
-    // Handle stdin redirect
-    let stdinData: Uint8Array | undefined;
-    for (const redirect of simple.redirects) {
-      const rt = redirect.redirect_type;
-      if (typeof rt === 'object' && 'StdinFrom' in rt) {
-        stdinData = this.vfs.readFile(this.resolvePath(rt.StdinFrom));
+    if (!result) {
+      // Handle stdin redirect
+      let stdinData: Uint8Array | undefined;
+      for (const redirect of simple.redirects) {
+        const rt = redirect.redirect_type;
+        if (typeof rt === 'object' && 'StdinFrom' in rt) {
+          stdinData = this.vfs.readFile(this.resolvePath(rt.StdinFrom));
+        }
       }
-    }
 
-    // Spawn the process (or delegate to PythonRunner)
-    let result: SpawnResult;
-    try {
-      result = await this.spawnOrPython(cmdName, args, stdinData);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return {
-        exitCode: 127,
-        stdout: '',
-        stderr: `${cmdName}: ${msg}\n`,
-        executionTimeMs: 0,
-      };
+      // Spawn the process (or delegate to PythonRunner)
+      try {
+        result = await this.spawnOrPython(cmdName, args, stdinData);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          exitCode: 127,
+          stdout: '',
+          stderr: `${cmdName}: ${msg}\n`,
+          executionTimeMs: 0,
+        };
+      }
     }
 
     // Handle output redirects
     let stdout = result.stdout;
-    const stderr = result.stderr;
+    let stderr = result.stderr;
 
     for (const redirect of simple.redirects) {
       const rt = redirect.redirect_type;
-      if (typeof rt === 'object' && 'StdoutOverwrite' in rt) {
-        this.vfs.writeFile(
-          this.resolvePath(rt.StdoutOverwrite),
-          new TextEncoder().encode(stdout),
-        );
-        stdout = '';
-      } else if (typeof rt === 'object' && 'StdoutAppend' in rt) {
-        const resolved = this.resolvePath(rt.StdoutAppend);
-        const existing = this.tryReadFile(resolved);
-        const combined = concatBytes(
-          existing,
-          new TextEncoder().encode(stdout),
-        );
-        this.vfs.writeFile(resolved, combined);
-        stdout = '';
+      try {
+        if (typeof rt === 'object' && 'StdoutOverwrite' in rt) {
+          this.vfs.writeFile(
+            this.resolvePath(rt.StdoutOverwrite),
+            new TextEncoder().encode(stdout),
+          );
+          stdout = '';
+        } else if (typeof rt === 'object' && 'StdoutAppend' in rt) {
+          const resolved = this.resolvePath(rt.StdoutAppend);
+          const existing = this.tryReadFile(resolved);
+          const combined = concatBytes(
+            existing,
+            new TextEncoder().encode(stdout),
+          );
+          this.vfs.writeFile(resolved, combined);
+          stdout = '';
+        }
+      } catch (err: unknown) {
+        if (err instanceof VfsError) {
+          const target = typeof rt === 'object' && 'StdoutOverwrite' in rt
+            ? rt.StdoutOverwrite
+            : typeof rt === 'object' && 'StdoutAppend' in rt
+              ? rt.StdoutAppend : '?';
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `${err.errno}: ${target}\n`,
+            executionTimeMs: result.executionTimeMs,
+          };
+        }
+        throw err;
       }
     }
 
@@ -1063,6 +1081,18 @@ export class ShellRunner {
     }
 
     return false;
+  }
+
+  /** Builtin: echo — print arguments to stdout. */
+  private builtinEcho(args: string[]): RunResult {
+    let trailingNewline = true;
+    let startIdx = 0;
+    if (args[0] === '-n') {
+      trailingNewline = false;
+      startIdx = 1;
+    }
+    const output = args.slice(startIdx).join(' ') + (trailingNewline ? '\n' : '');
+    return { exitCode: 0, stdout: output, stderr: '', executionTimeMs: 0 };
   }
 
   /** Builtin: which — locate a command by searching known tool names. */

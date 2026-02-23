@@ -1,3 +1,4 @@
+use crate::ast::WordPart;
 use crate::token::{RedirectType, Token};
 
 /// Tokenize a shell command string into a vector of tokens.
@@ -174,11 +175,18 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
 
-        // Double-quoted string
+        // Double-quoted string — parse $VAR and $(cmd) interpolations
         if chars[pos] == '"' {
             pos += 1; // skip opening quote
-            let content = read_double_quoted(&chars, &mut pos);
-            tokens.push(Token::Word(content));
+            let parts = lex_double_quoted(&chars, &mut pos);
+            // Optimize: if there's a single literal part, emit a plain Word token
+            if parts.len() == 1 {
+                if let WordPart::Literal(ref s) = parts[0] {
+                    tokens.push(Token::Word(s.clone()));
+                    continue;
+                }
+            }
+            tokens.push(Token::DoubleQuoted(parts));
             continue;
         }
 
@@ -259,26 +267,95 @@ fn read_var_name(chars: &[char], pos: &mut usize) -> String {
     name
 }
 
-/// Read the contents of a double-quoted string.
-/// Handles backslash escapes for `$`, `"`, `\`, and `` ` ``.
-fn read_double_quoted(chars: &[char], pos: &mut usize) -> String {
-    let mut result = String::new();
+/// Lex the inside of a double-quoted string into a sequence of WordParts.
+/// Handles `$VAR`, `${VAR}`, `$(cmd)`, backtick substitution, and backslash
+/// escapes for `$`, `"`, `\`, and `` ` ``.
+fn lex_double_quoted(chars: &[char], pos: &mut usize) -> Vec<WordPart> {
+    let mut parts: Vec<WordPart> = Vec::new();
+    let mut literal = String::new();
+
     while *pos < chars.len() && chars[*pos] != '"' {
+        // Backslash escape
         if chars[*pos] == '\\' && *pos + 1 < chars.len() {
             let next = chars[*pos + 1];
             if next == '$' || next == '"' || next == '\\' || next == '`' {
-                result.push(next);
+                literal.push(next);
                 *pos += 2;
                 continue;
             }
         }
-        result.push(chars[*pos]);
+
+        // $ — variable or command substitution
+        if chars[*pos] == '$' {
+            // Flush accumulated literal text
+            if !literal.is_empty() {
+                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+            }
+            *pos += 1;
+            if *pos < chars.len() && chars[*pos] == '(' {
+                // Command substitution: $(...)
+                *pos += 1;
+                let content = read_balanced_parens(chars, pos);
+                parts.push(WordPart::CommandSub(content));
+                continue;
+            }
+            if *pos < chars.len() && chars[*pos] == '{' {
+                // Braced variable: ${...}
+                *pos += 1;
+                let var = read_until_char(chars, pos, '}');
+                parts.push(WordPart::Variable(var));
+                continue;
+            }
+            // Special variables: $?, $$, $!, $#, $@, $*
+            if *pos < chars.len() && "?$!#@*".contains(chars[*pos]) {
+                let var = chars[*pos].to_string();
+                *pos += 1;
+                parts.push(WordPart::Variable(var));
+                continue;
+            }
+            // Positional parameters: $0-$9
+            if *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                let var = chars[*pos].to_string();
+                *pos += 1;
+                parts.push(WordPart::Variable(var));
+                continue;
+            }
+            // Simple variable: $NAME
+            let var = read_var_name(chars, pos);
+            parts.push(WordPart::Variable(var));
+            continue;
+        }
+
+        // Backtick command substitution
+        if chars[*pos] == '`' {
+            if !literal.is_empty() {
+                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+            }
+            *pos += 1;
+            let content = read_until_char(chars, pos, '`');
+            parts.push(WordPart::CommandSub(content));
+            continue;
+        }
+
+        literal.push(chars[*pos]);
         *pos += 1;
     }
+
     if *pos < chars.len() {
         *pos += 1; // skip closing '"'
     }
-    result
+
+    // Flush remaining literal text
+    if !literal.is_empty() {
+        parts.push(WordPart::Literal(literal));
+    }
+
+    // If completely empty (e.g. ""), return a single empty literal
+    if parts.is_empty() {
+        parts.push(WordPart::Literal(String::new()));
+    }
+
+    parts
 }
 
 /// Read an unquoted word, handling backslash escapes.

@@ -879,7 +879,7 @@ describe('Coreutils Integration', () => {
   describe('pwd builtin', () => {
     it('prints default cwd', async () => {
       const result = await runner.run('pwd');
-      expect(result.stdout.trim()).toBe('/');
+      expect(result.stdout.trim()).toBe('/home/user');
     });
 
     it('prints cwd when PWD is set', async () => {

@@ -104,12 +104,14 @@ export class Sandbox {
 
     // Bootstrap Python socket shim when networking is enabled
     if (bridge) {
-      vfs.mkdirp('/usr/lib/python');
-      vfs.writeFile('/usr/lib/python/socket.py', new TextEncoder().encode(SOCKET_SHIM_SOURCE));
-      // sitecustomize.py pre-loads our socket shim into sys.modules at interpreter
-      // startup, bypassing RustPython's frozen socket module which would otherwise
-      // take priority over PYTHONPATH files.
-      vfs.writeFile('/usr/lib/python/sitecustomize.py', new TextEncoder().encode(SITE_CUSTOMIZE_SOURCE));
+      vfs.withWriteAccess(() => {
+        vfs.mkdirp('/usr/lib/python');
+        vfs.writeFile('/usr/lib/python/socket.py', new TextEncoder().encode(SOCKET_SHIM_SOURCE));
+        // sitecustomize.py pre-loads our socket shim into sys.modules at interpreter
+        // startup, bypassing RustPython's frozen socket module which would otherwise
+        // take priority over PYTHONPATH files.
+        vfs.writeFile('/usr/lib/python/sitecustomize.py', new TextEncoder().encode(SITE_CUSTOMIZE_SOURCE));
+      });
       runner.setEnv('PYTHONPATH', '/usr/lib/python');
     }
 

@@ -9,6 +9,7 @@ import {
   WASI_ENOENT,
   WASI_ENOTDIR,
   WASI_ENOTEMPTY,
+  WASI_EROFS,
 } from './types.js';
 
 export function vfsErrnoToWasi(errno: Errno): number {
@@ -23,6 +24,8 @@ export function vfsErrnoToWasi(errno: Errno): number {
       return WASI_EISDIR;
     case 'ENOTEMPTY':
       return WASI_ENOTEMPTY;
+    case 'EROFS':
+      return WASI_EROFS;
     default:
       return WASI_EIO;
   }

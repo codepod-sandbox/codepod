@@ -152,6 +152,11 @@ describe('ShellRunner', () => {
       const result = await runner.run('for x in a b c; do echo-args $x; done');
       expect(result.stdout).toBe('a\nb\nc\n');
     });
+
+    it('expands variables inside double quotes', async () => {
+      const result = await runner.run('for i in a b c; do echo-args "$i - x"; done');
+      expect(result.stdout).toBe('a - x\nb - x\nc - x\n');
+    });
   });
 
   describe('subshells', () => {
