@@ -82,6 +82,8 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   executionTimeMs: number;
+  truncated?: { stdout: boolean; stderr: boolean };
+  errorClass?: 'TIMEOUT' | 'CANCELLED' | 'CAPABILITY_DENIED' | 'LIMIT_EXCEEDED';
 }
 
 const EMPTY_RESULT: RunResult = {
