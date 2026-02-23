@@ -234,4 +234,31 @@ describe('Sandbox', () => {
       }
     });
   });
+
+  describe('SecurityOptions', () => {
+    it('accepts security options on create', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          limits: { stdoutBytes: 1024, stderrBytes: 1024 },
+        },
+      });
+      const result = await sandbox.run('echo hello');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('RunResult includes errorClass on timeout', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 1 } },
+      });
+      // yes | head produces enough work to exceed 1ms timeout
+      const result = await sandbox.run('yes hello | head -10000');
+      expect(result.errorClass).toBe('TIMEOUT');
+    });
+  });
 });

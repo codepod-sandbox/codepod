@@ -16,6 +16,7 @@ import { NetworkGateway } from './network/gateway.js';
 import type { NetworkPolicy } from './network/gateway.js';
 import { NetworkBridge } from './network/bridge.js';
 import { SOCKET_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from './network/socket-shim.js';
+import type { SecurityOptions } from './security.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -30,6 +31,8 @@ export interface SandboxOptions {
   shellWasmPath?: string;
   /** Network policy for curl/wget builtins. If omitted, network access is disabled. */
   network?: NetworkPolicy;
+  /** Security policy and limits. */
+  security?: SecurityOptions;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -47,6 +50,7 @@ export class Sandbox {
   private envSnapshots: Map<string, Map<string, string>> = new Map();
   private bridge: NetworkBridge | null = null;
   private networkPolicy: NetworkPolicy | undefined;
+  private security: SecurityOptions | undefined;
 
   private constructor(
     vfs: VFS,
@@ -58,6 +62,7 @@ export class Sandbox {
     mgr: ProcessManager,
     bridge?: NetworkBridge,
     networkPolicy?: NetworkPolicy,
+    security?: SecurityOptions,
   ) {
     this.vfs = vfs;
     this.runner = runner;
@@ -68,6 +73,7 @@ export class Sandbox {
     this.mgr = mgr;
     this.bridge = bridge ?? null;
     this.networkPolicy = networkPolicy;
+    this.security = security;
   }
 
   static async create(options: SandboxOptions): Promise<Sandbox> {
@@ -115,7 +121,7 @@ export class Sandbox {
       runner.setEnv('PYTHONPATH', '/usr/lib/python');
     }
 
-    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, bridge, options.network);
+    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, bridge, options.network, options.security);
   }
 
   private static async detectAdapter(): Promise<PlatformAdapter> {
@@ -129,13 +135,15 @@ export class Sandbox {
 
   async run(command: string): Promise<RunResult> {
     this.assertAlive();
+    const effectiveTimeout = this.security?.limits?.timeoutMs ?? this.timeoutMs;
     const timer = new Promise<RunResult>((resolve) => {
       setTimeout(() => resolve({
         exitCode: 124,
         stdout: '',
         stderr: 'command timed out\n',
-        executionTimeMs: this.timeoutMs,
-      }), this.timeoutMs);
+        executionTimeMs: effectiveTimeout,
+        errorClass: 'TIMEOUT',
+      }), effectiveTimeout);
     });
     return Promise.race([this.runner.run(command), timer]);
   }
@@ -231,7 +239,7 @@ export class Sandbox {
     return new Sandbox(
       childVfs, childRunner, this.timeoutMs,
       this.adapter, this.wasmDir, this.shellWasmPath,
-      childMgr, childBridge, this.networkPolicy,
+      childMgr, childBridge, this.networkPolicy, this.security,
     );
   }
 

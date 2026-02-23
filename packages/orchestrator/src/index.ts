@@ -16,3 +16,5 @@ export { NetworkGateway, NetworkAccessDenied } from './network/gateway.js';
 export type { NetworkPolicy } from './network/gateway.js';
 export { NetworkBridge } from './network/bridge.js';
 export type { SyncFetchResult } from './network/bridge.js';
+export type { SecurityOptions, SecurityLimits, ErrorClass, AuditEvent, AuditEventHandler } from './security.js';
+export { CancelledError } from './security.js';

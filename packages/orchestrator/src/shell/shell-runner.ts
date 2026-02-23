@@ -16,6 +16,7 @@ import { VfsError } from '../vfs/inode.js';
 import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 import { NetworkGateway, NetworkAccessDenied } from '../network/gateway.js';
+import type { ErrorClass } from '../security.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
 const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false']);
@@ -82,6 +83,8 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   executionTimeMs: number;
+  truncated?: { stdout: boolean; stderr: boolean };
+  errorClass?: ErrorClass;
 }
 
 const EMPTY_RESULT: RunResult = {
