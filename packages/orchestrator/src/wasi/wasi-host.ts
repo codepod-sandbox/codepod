@@ -14,7 +14,6 @@ import type { VFS } from '../vfs/vfs.js';
 import { fdErrorToWasi, vfsErrnoToWasi } from './errors.js';
 import type { NetworkBridge } from '../network/bridge.js';
 import {
-  WASI_EAGAIN,
   WASI_EBADF,
   WASI_EINVAL,
   WASI_ENOSYS,
@@ -33,6 +32,9 @@ import {
   WASI_WHENCE_END,
   WASI_WHENCE_SET,
 } from './types.js';
+
+/** Control fd for Python socket shim communication. */
+const CONTROL_FD = 0xFFFFFFFE;
 
 export class WasiExitError extends Error {
   code: number;
@@ -123,13 +125,9 @@ export class WasiHost {
   private dirFds: Map<number, string> = new Map();
 
   private networkBridge: NetworkBridge | null;
-  private sockConnections: Map<number, {
-    host: string;
-    port: number;
-    requestBuf: Uint8Array[];
-    responseBuf: Uint8Array | null;
-    responseOffset: number;
-  }> = new Map();
+  private controlConnections: Map<string, { host: string; port: number; scheme: string }> = new Map();
+  private controlResponseBuf: Uint8Array | null = null;
+  private nextControlConnId = 0;
 
   constructor(options: WasiHostOptions) {
     this.vfs = options.vfs;
@@ -173,6 +171,45 @@ export class WasiHost {
 
   getExitCode(): number | null {
     return this.exitCode;
+  }
+
+  /** Handle a control fd command. Public for testing. */
+  handleControlCommand(cmd: Record<string, unknown>): Record<string, unknown> {
+    if (!this.networkBridge) {
+      return { ok: false, error: 'networking not configured' };
+    }
+
+    switch (cmd.cmd) {
+      case 'connect': {
+        const host = cmd.host as string;
+        const port = cmd.port as number;
+        const scheme = port === 443 ? 'https' : 'http';
+        const id = `c${this.nextControlConnId++}`;
+        this.controlConnections.set(id, { host, port, scheme });
+        return { ok: true, id };
+      }
+      case 'request': {
+        const conn = this.controlConnections.get(cmd.id as string);
+        if (!conn) return { ok: false, error: 'unknown connection id' };
+        const url = `${conn.scheme}://${conn.host}:${conn.port}${cmd.path as string}`;
+        const result = this.networkBridge.fetchSync(
+          url, cmd.method as string, (cmd.headers as Record<string, string>) ?? {}, (cmd.body as string) || undefined,
+        );
+        return {
+          ok: true,
+          status: result.status,
+          headers: result.headers,
+          body: result.body,
+          error: result.error,
+        };
+      }
+      case 'close': {
+        this.controlConnections.delete(cmd.id as string);
+        return { ok: true };
+      }
+      default:
+        return { ok: false, error: `unknown command: ${cmd.cmd}` };
+    }
   }
 
   /**
@@ -247,9 +284,9 @@ export class WasiHost {
         poll_oneoff: this.stub.bind(this),
         proc_raise: this.stub.bind(this),
         sock_accept: this.stub.bind(this),
-        sock_recv: this.sockRecv.bind(this),
-        sock_send: this.sockSend.bind(this),
-        sock_shutdown: this.sockShutdown.bind(this),
+        sock_recv: this.stub.bind(this),
+        sock_send: this.stub.bind(this),
+        sock_shutdown: this.stub.bind(this),
         clock_res_get: this.stub.bind(this),
       },
     };
@@ -371,6 +408,19 @@ export class WasiHost {
       } else if (fd === 2) {
         this.stderrBuf.push(data);
         totalWritten += data.byteLength;
+      } else if (fd === CONTROL_FD) {
+        // Control fd: parse JSON command, buffer response
+        const cmdStr = this.decoder.decode(data).trim();
+        if (cmdStr) {
+          try {
+            const cmd = JSON.parse(cmdStr);
+            const resp = this.handleControlCommand(cmd);
+            this.controlResponseBuf = this.encoder.encode(JSON.stringify(resp));
+          } catch {
+            this.controlResponseBuf = this.encoder.encode(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          }
+        }
+        totalWritten += data.byteLength;
       } else {
         try {
           totalWritten += this.fdTable.write(fd, data);
@@ -415,6 +465,17 @@ export class WasiHost {
         continue;
       }
 
+      if (fd === CONTROL_FD) {
+        if (!this.controlResponseBuf) break;
+        const remaining = this.controlResponseBuf.byteLength;
+        const toRead = Math.min(iov.len, remaining);
+        const bytes = this.getBytes();
+        bytes.set(this.controlResponseBuf.subarray(0, toRead), iov.buf);
+        totalRead += toRead;
+        this.controlResponseBuf = null; // consumed
+        break;
+      }
+
       try {
         const buf = new Uint8Array(iov.len);
         const n = this.fdTable.read(fd, buf);
@@ -445,7 +506,6 @@ export class WasiHost {
     try {
       this.fdTable.close(fd);
       this.dirFds.delete(fd);
-      this.sockConnections.delete(fd);
       return WASI_ESUCCESS;
     } catch (err) {
       return fdErrorToWasi(err);
@@ -528,6 +588,8 @@ export class WasiHost {
       filetype = WASI_FILETYPE_DIRECTORY;
     } else if (this.fdTable.isOpen(fd)) {
       filetype = WASI_FILETYPE_REGULAR_FILE;
+    } else if (fd === CONTROL_FD) {
+      filetype = WASI_FILETYPE_CHARACTER_DEVICE;
     } else {
       return WASI_EBADF;
     }
@@ -844,109 +906,6 @@ export class WasiHost {
 
   private schedYield(): number {
     return WASI_ESUCCESS;
-  }
-
-  // ---- Socket implementations ----
-
-  /**
-   * WASI sock_send implementation.
-   *
-   * Note: sockConnections entries must be populated externally (via a future
-   * sock_connect mechanism). The sock_* methods are infrastructure for when
-   * WASI networking is fully supported. Currently, connections are established
-   * by higher-level code that sets up the sockConnections map entry before
-   * the WASM module calls sock_send/sock_recv.
-   */
-  private sockSend(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nwrittenPtr: number): number {
-    if (!this.networkBridge) return WASI_ENOSYS;
-    const view = this.getView();
-    const bytes = this.getBytes();
-    const iovecs = readIovecs(view, iovsPtr, iovsLen);
-    const conn = this.sockConnections.get(fd);
-    if (!conn) return WASI_EBADF;
-
-    let totalWritten = 0;
-    for (const iov of iovecs) {
-      const data = bytes.slice(iov.buf, iov.buf + iov.len);
-      conn.requestBuf.push(data);
-      totalWritten += data.byteLength;
-    }
-
-    // Try to parse accumulated request as HTTP
-    const fullRequest = concatBuffers(conn.requestBuf);
-    const requestStr = this.decoder.decode(fullRequest);
-    if (requestStr.includes('\r\n\r\n')) {
-      const result = this.processHttpRequest(requestStr, conn.host, conn.port);
-      conn.responseBuf = this.encoder.encode(result);
-      conn.responseOffset = 0;
-      conn.requestBuf = [];
-    }
-
-    const viewAfter = this.getView();
-    viewAfter.setUint32(nwrittenPtr, totalWritten, true);
-    return WASI_ESUCCESS;
-  }
-
-  private sockRecv(fd: number, iovsPtr: number, iovsLen: number, _flags: number, nreadPtr: number): number {
-    if (!this.networkBridge) return WASI_ENOSYS;
-    const conn = this.sockConnections.get(fd);
-    if (!conn) return WASI_EBADF;
-    if (!conn.responseBuf) return WASI_EAGAIN;
-
-    const view = this.getView();
-    const bytes = this.getBytes();
-    const iovecs = readIovecs(view, iovsPtr, iovsLen);
-
-    let totalRead = 0;
-    for (const iov of iovecs) {
-      const remaining = conn.responseBuf.byteLength - conn.responseOffset;
-      if (remaining <= 0) break;
-      const toRead = Math.min(iov.len, remaining);
-      bytes.set(conn.responseBuf.subarray(conn.responseOffset, conn.responseOffset + toRead), iov.buf);
-      conn.responseOffset += toRead;
-      totalRead += toRead;
-    }
-
-    const viewAfter = this.getView();
-    viewAfter.setUint32(nreadPtr, totalRead, true);
-    return WASI_ESUCCESS;
-  }
-
-  private sockShutdown(fd: number, _how: number): number {
-    this.sockConnections.delete(fd);
-    return WASI_ESUCCESS;
-  }
-
-  private processHttpRequest(requestStr: string, host: string, port: number): string {
-    const firstLine = requestStr.split('\r\n')[0];
-    const parts = firstLine.split(' ');
-    const method = parts[0] || 'GET';
-    const path = parts[1] || '/';
-    const scheme = port === 443 ? 'https' : 'http';
-    const url = `${scheme}://${host}${path}`;
-
-    const headerLines = requestStr.split('\r\n\r\n')[0].split('\r\n').slice(1);
-    const headers: Record<string, string> = {};
-    for (const line of headerLines) {
-      const colonIdx = line.indexOf(':');
-      if (colonIdx > 0) {
-        headers[line.slice(0, colonIdx).trim()] = line.slice(colonIdx + 1).trim();
-      }
-    }
-
-    const bodyStart = requestStr.indexOf('\r\n\r\n');
-    const body = bodyStart >= 0 ? requestStr.slice(bodyStart + 4) : undefined;
-
-    const result = this.networkBridge!.fetchSync(url, method, headers, body || undefined);
-
-    let response = `HTTP/1.1 ${result.status} OK\r\n`;
-    for (const [k, v] of Object.entries(result.headers)) {
-      response += `${k}: ${v}\r\n`;
-    }
-    response += `Content-Length: ${Buffer.byteLength(result.body)}\r\n`;
-    response += '\r\n';
-    response += result.body;
-    return response;
   }
 
   private stub(): number {
