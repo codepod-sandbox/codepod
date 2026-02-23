@@ -6,3 +6,9 @@ target/
 !packages/orchestrator/assets/*.wasm
 !packages/orchestrator/src/platform/__tests__/fixtures/*.wasm
 !packages/orchestrator/src/shell/__tests__/fixtures/*.wasm
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
