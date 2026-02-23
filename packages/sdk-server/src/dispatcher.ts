@@ -120,12 +120,17 @@ export class Dispatcher {
 
   private async run(params: Record<string, unknown>) {
     const command = this.requireString(params, 'command');
+    if (command.length > 65536) {
+      throw this.rpcError(-32602, 'Command too large');
+    }
     const result = await this.sandbox.run(command);
     return {
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
       executionTimeMs: result.executionTimeMs,
+      truncated: result.truncated,
+      errorClass: result.errorClass,
     };
   }
 

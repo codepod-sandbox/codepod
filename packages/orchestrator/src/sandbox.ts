@@ -140,6 +140,19 @@ export class Sandbox {
 
   async run(command: string): Promise<RunResult> {
     this.assertAlive();
+
+    // Check command size limit
+    const commandLimit = this.security?.limits?.commandBytes ?? 65536;
+    if (new TextEncoder().encode(command).byteLength > commandLimit) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'command too large\n',
+        executionTimeMs: 0,
+        errorClass: 'LIMIT_EXCEEDED',
+      };
+    }
+
     const effectiveTimeout = this.security?.limits?.timeoutMs ?? this.timeoutMs;
     const timer = new Promise<RunResult>((resolve) => {
       setTimeout(() => resolve({

@@ -260,6 +260,32 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('command size limit', () => {
+    it('rejects command exceeding commandBytes limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { commandBytes: 50 } },
+      });
+      const result = await sandbox.run('echo ' + 'x'.repeat(100));
+      expect(result.errorClass).toBe('LIMIT_EXCEEDED');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('allows command under the limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { commandBytes: 1000 } },
+      });
+      const result = await sandbox.run('echo hello');
+      expect(result.exitCode).toBe(0);
+      expect(result.errorClass).toBeUndefined();
+    });
+  });
+
   describe('SecurityOptions', () => {
     it('accepts security options on create', async () => {
       sandbox = await Sandbox.create({
