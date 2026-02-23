@@ -16,8 +16,9 @@ for HTTP client use (requests, urllib, http.client).
 import os as _os
 import json as _json
 
-# Control fd for host communication — 0xFFFFFFFE (one below 32-bit WASI max)
-CONTROL_FD = 0xFFFFFFFE
+# Control fd for host communication — must match CONTROL_FD in wasi-host.ts
+# and fit in a signed 32-bit int (RustPython's os.write uses i32 for fd).
+CONTROL_FD = 1023
 
 # Constants expected by http.client and urllib3
 AF_INET = 2
@@ -299,4 +300,27 @@ class _SocketFile:
         if not line:
             raise StopIteration
         return line
+`;
+
+/**
+ * sitecustomize.py source that pre-loads our socket shim into sys.modules.
+ *
+ * RustPython's frozen `socket` module takes priority over PYTHONPATH files.
+ * By loading our shim in sitecustomize.py (which runs at interpreter startup),
+ * we inject it into sys.modules["socket"] before any other code can import
+ * the frozen version.
+ */
+export const SITE_CUSTOMIZE_SOURCE = `\
+import sys
+import types
+import importlib.machinery
+_spec = importlib.machinery.ModuleSpec("socket", None, origin="/usr/lib/python/socket.py")
+_mod = types.ModuleType("socket")
+_mod.__spec__ = _spec
+_mod.__file__ = "/usr/lib/python/socket.py"
+with open("/usr/lib/python/socket.py") as _f:
+    _code = _f.read()
+exec(compile(_code, "/usr/lib/python/socket.py", "exec"), _mod.__dict__)
+sys.modules["socket"] = _mod
+del _spec, _mod, _f, _code
 `;

@@ -33,8 +33,11 @@ import {
   WASI_WHENCE_SET,
 } from './types.js';
 
-/** Control fd for Python socket shim communication. */
-const CONTROL_FD = 0xFFFFFFFE;
+/** Control fd for Python socket shim communication.
+ *  Must fit in a signed 32-bit int (RustPython's os.write uses i32 for fd).
+ *  Must not collide with fds allocated by FdTable (which start at 3) or
+ *  directory pseudo-fds (which start at 100). */
+const CONTROL_FD = 1023;
 
 export class WasiExitError extends Error {
   code: number;

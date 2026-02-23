@@ -18,7 +18,7 @@ describe('socket shim source', () => {
     expect(SOCKET_SHIM_SOURCE).toContain('def create_connection(');
     expect(SOCKET_SHIM_SOURCE).toContain('def getaddrinfo(');
     expect(SOCKET_SHIM_SOURCE).toContain('CONTROL_FD');
-    expect(SOCKET_SHIM_SOURCE).toContain('0xFFFFFFFE');
+    expect(SOCKET_SHIM_SOURCE).toContain('CONTROL_FD = 1023');
   });
 
   it('contains Content-Length aware flush logic', () => {
