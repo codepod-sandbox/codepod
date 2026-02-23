@@ -1,4 +1,4 @@
-import { VFS, ProcessManager, ShellRunner, BrowserAdapter } from '@wasmsand/orchestrator';
+import { VFS, ProcessManager, ShellRunner, BrowserAdapter } from '@wasmsand/sandbox';
 import { createTerminal } from './terminal.js';
 import '@xterm/xterm/css/xterm.css';
 

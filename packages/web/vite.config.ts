@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
-      '@wasmsand/orchestrator': resolve(__dirname, '../orchestrator/src/index.ts'),
+      '@wasmsand/sandbox': resolve(__dirname, '../orchestrator/src/index.ts'),
     },
   },
   server: {

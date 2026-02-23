@@ -7,7 +7,7 @@
   "scripts": {
     "test": "bun test",
     "build": "bun run build:rust && bun run build:ts",
-    "build:ts": "tsup --config packages/orchestrator/tsup.config.ts",
+    "build:ts": "cd packages/orchestrator && tsup",
     "build:rust": "cargo build --target wasm32-wasip1 --release"
   }
 }

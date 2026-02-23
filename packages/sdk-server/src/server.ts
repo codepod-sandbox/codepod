@@ -9,8 +9,8 @@
  */
 
 import { createInterface } from 'node:readline';
-import { Sandbox } from '@wasmsand/orchestrator';
-import { NodeAdapter } from '@wasmsand/orchestrator/dist/platform/node-adapter.js';
+import { Sandbox } from '@wasmsand/sandbox';
+import { NodeAdapter } from '@wasmsand/sandbox/node';
 import { Dispatcher } from './dispatcher.js';
 
 interface JsonRpcRequest {

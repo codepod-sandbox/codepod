@@ -1,14 +1,33 @@
 {
-  "name": "@wasmsand/orchestrator",
+  "name": "@wasmsand/sandbox",
   "version": "0.0.1",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node-adapter.d.ts",
+      "default": "./dist/node-adapter.js"
+    },
+    "./browser": {
+      "types": "./dist/browser-adapter.d.ts",
+      "default": "./dist/browser-adapter.js"
+    }
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "wasm"
+  ],
   "scripts": {
     "test": "bun test",
     "build": "tsup"
   },
   "devDependencies": {
+    "@types/node": "^22.0",
     "tsup": "^8.0",
     "typescript": "^5.7"
   },
