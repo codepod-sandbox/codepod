@@ -60,6 +60,24 @@ class Sandbox:
         self.commands = Commands(self._client)
         self.files = Files(self._client)
 
+    def snapshot(self) -> str:
+        """Save current VFS + env state. Returns snapshot ID."""
+        result = self._client.call("snapshot.create", {})
+        return result["id"]
+
+    def restore(self, snapshot_id: str) -> None:
+        """Restore to a previous snapshot."""
+        self._client.call("snapshot.restore", {"id": snapshot_id})
+
+    def fork(self) -> "Sandbox":
+        """Create an independent forked sandbox."""
+        result = self._client.call("sandbox.fork", {})
+        forked = object.__new__(Sandbox)
+        forked._client = self._client
+        forked.commands = Commands(self._client)
+        forked.files = Files(self._client)
+        return forked
+
     def kill(self) -> None:
         try:
             self._client.call("kill", {})

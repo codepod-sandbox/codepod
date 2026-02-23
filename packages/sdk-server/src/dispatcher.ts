@@ -30,6 +30,9 @@ export interface SandboxLike {
   setEnv(name: string, value: string): void;
   getEnv(name: string): string | undefined;
   destroy(): void;
+  snapshot(): string;
+  restore(id: string): void;
+  fork(): Promise<SandboxLike>;
 }
 
 export interface RpcError {
@@ -40,6 +43,8 @@ export interface RpcError {
 export class Dispatcher {
   private sandbox: SandboxLike;
   private killed = false;
+  private forks: Map<string, SandboxLike> = new Map();
+  private nextForkId = 1;
 
   constructor(sandbox: SandboxLike) {
     this.sandbox = sandbox;
@@ -68,6 +73,12 @@ export class Dispatcher {
           return this.envGet(params);
         case 'kill':
           return this.kill();
+        case 'snapshot.create':
+          return this.snapshotCreate();
+        case 'snapshot.restore':
+          return this.snapshotRestore(params);
+        case 'sandbox.fork':
+          return await this.sandboxFork();
         default:
           throw this.rpcError(-32601, `Method not found: ${method}`);
       }
@@ -185,5 +196,23 @@ export class Dispatcher {
     this.sandbox.destroy();
     this.killed = true;
     return { ok: true };
+  }
+
+  private snapshotCreate() {
+    const id = this.sandbox.snapshot();
+    return { id };
+  }
+
+  private snapshotRestore(params: Record<string, unknown>) {
+    const id = this.requireString(params, 'id');
+    this.sandbox.restore(id);
+    return { ok: true };
+  }
+
+  private async sandboxFork() {
+    const child = await this.sandbox.fork();
+    const sandboxId = String(this.nextForkId++);
+    this.forks.set(sandboxId, child);
+    return { sandboxId };
   }
 }
