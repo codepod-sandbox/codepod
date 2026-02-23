@@ -20,8 +20,8 @@ const MAX_SYMLINK_DEPTH = 40;
 export interface VfsOptions {
   /** Maximum total bytes stored in the VFS. Undefined = no limit. */
   fsLimitBytes?: number;
-  /** Maximum number of files/directories/symlinks. Undefined = no limit. */
-  maxFileCount?: number;
+  /** Maximum number of files/directories. Undefined = no limit. */
+  fileCount?: number;
   /**
    * Paths that are writable. Everything else is read-only.
    * Defaults to ['/home/user', '/tmp']. Set to undefined to disable.
@@ -60,8 +60,8 @@ export class VFS {
   private nextSnapId = 1;
   private totalBytes = 0;
   private fsLimitBytes: number | undefined;
-  private fileCount = 0;
-  private maxFileCount: number | undefined;
+  private fileCountLimit: number | undefined;
+  private currentFileCount = 0;
   /** Writable path prefixes. Writes outside these paths are rejected with EROFS. */
   private writablePaths: string[] | undefined;
   /** When true, bypass writable-path checks (used during init). */
@@ -70,7 +70,7 @@ export class VFS {
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
     this.fsLimitBytes = options?.fsLimitBytes;
-    this.maxFileCount = options?.maxFileCount;
+    this.fileCountLimit = options?.fileCount;
     this.writablePaths = options?.writablePaths !== undefined ? options.writablePaths : ['/home/user', '/tmp'];
     this.initializing = true;
     this.initDefaultLayout();
@@ -81,8 +81,8 @@ export class VFS {
   private static fromRoot(root: DirInode, options?: {
     fsLimitBytes?: number;
     totalBytes?: number;
-    maxFileCount?: number;
-    fileCount?: number;
+    fileCountLimit?: number;
+    currentFileCount?: number;
     writablePaths?: string[];
   }): VFS {
     const vfs = Object.create(VFS.prototype) as VFS;
@@ -91,8 +91,8 @@ export class VFS {
     vfs.nextSnapId = 1;
     vfs.totalBytes = options?.totalBytes ?? 0;
     vfs.fsLimitBytes = options?.fsLimitBytes;
-    vfs.maxFileCount = options?.maxFileCount;
-    vfs.fileCount = options?.fileCount ?? 0;
+    vfs.fileCountLimit = options?.fileCountLimit;
+    vfs.currentFileCount = options?.currentFileCount ?? 0;
     vfs.writablePaths = options?.writablePaths;
     vfs.initializing = false;
     return vfs;
@@ -118,8 +118,8 @@ export class VFS {
 
   /** Throw ENOSPC if the file-count limit has been reached. */
   private assertFileCountLimit(): void {
-    if (this.maxFileCount !== undefined && this.fileCount >= this.maxFileCount) {
-      throw new VfsError('ENOSPC', `file count limit reached (max: ${this.maxFileCount})`);
+    if (this.fileCountLimit !== undefined && this.currentFileCount >= this.fileCountLimit) {
+      throw new VfsError('ENOSPC', 'file count limit exceeded');
     }
   }
 
@@ -138,6 +138,7 @@ export class VFS {
       } else {
         const newDir = createDirInode();
         current.children.set(segment, newDir);
+        this.currentFileCount++;
         current = newDir;
       }
     }
@@ -307,7 +308,7 @@ export class VFS {
     } else {
       this.assertFileCountLimit();
       parent.children.set(name, createFileInode(data));
-      this.fileCount++;
+      this.currentFileCount++;
     }
     this.totalBytes += delta;
   }
@@ -322,7 +323,7 @@ export class VFS {
 
     this.assertFileCountLimit();
     parent.children.set(name, createDirInode());
-    this.fileCount++;
+    this.currentFileCount++;
   }
 
   mkdirp(path: string): void {
@@ -344,7 +345,7 @@ export class VFS {
         this.assertFileCountLimit();
         const newDir = createDirInode();
         current.children.set(segment, newDir);
-        this.fileCount++;
+        this.currentFileCount++;
         current = newDir;
       }
     }
@@ -383,7 +384,7 @@ export class VFS {
       this.totalBytes -= child.content.byteLength;
     }
     parent.children.delete(name);
-    this.fileCount--;
+    this.currentFileCount--;
   }
 
   rmdir(path: string): void {
@@ -402,7 +403,7 @@ export class VFS {
     }
 
     parent.children.delete(name);
-    this.fileCount--;
+    this.currentFileCount--;
   }
 
   rename(oldPath: string, newPath: string): void {
@@ -431,7 +432,7 @@ export class VFS {
 
     this.assertFileCountLimit();
     parent.children.set(name, createSymlinkInode(target));
-    this.fileCount++;
+    this.currentFileCount++;
   }
 
   chmod(path: string, mode: number): void {
@@ -484,8 +485,8 @@ export class VFS {
     return VFS.fromRoot(deepCloneRoot(this.root), {
       fsLimitBytes: this.fsLimitBytes,
       totalBytes: this.totalBytes,
-      maxFileCount: this.maxFileCount,
-      fileCount: this.fileCount,
+      fileCountLimit: this.fileCountLimit,
+      currentFileCount: this.currentFileCount,
       writablePaths: this.writablePaths,
     });
   }

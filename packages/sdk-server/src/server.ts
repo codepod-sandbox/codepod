@@ -43,7 +43,8 @@ function log(msg: string): void {
   process.stderr.write(`[sdk-server] ${msg}\n`);
 }
 
-const MAX_LINE_BYTES = 8 * 1024 * 1024; // 8 MB
+// Max request size: 8MB. Prevents OOM and oversized payload attacks.
+const MAX_LINE_BYTES = 8 * 1024 * 1024;
 
 async function main(): Promise<void> {
   let dispatcher: Dispatcher | null = null;

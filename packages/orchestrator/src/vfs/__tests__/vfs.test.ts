@@ -180,8 +180,11 @@ describe('VFS size limit', () => {
 });
 
 describe('file count limit', () => {
+  // Default layout creates 7 dirs: /home, /home/user, /tmp, /bin, /usr, /usr/bin, /mnt
+  const DEFAULT_INODES = 7;
+
   it('rejects file creation when file count limit reached', () => {
-    const vfs = new VFS({ maxFileCount: 3 });
+    const vfs = new VFS({ fileCount: DEFAULT_INODES + 3 });
     vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
     vfs.writeFile('/tmp/b.txt', new Uint8Array(1));
     vfs.writeFile('/tmp/c.txt', new Uint8Array(1));
@@ -191,7 +194,7 @@ describe('file count limit', () => {
   });
 
   it('rejects mkdir when file count limit reached', () => {
-    const vfs = new VFS({ maxFileCount: 1 });
+    const vfs = new VFS({ fileCount: DEFAULT_INODES + 1 });
     vfs.mkdir('/tmp/sub');
     expect(() => {
       vfs.mkdir('/tmp/sub2');
@@ -199,7 +202,7 @@ describe('file count limit', () => {
   });
 
   it('allows creation after deletion frees a slot', () => {
-    const vfs = new VFS({ maxFileCount: 1 });
+    const vfs = new VFS({ fileCount: DEFAULT_INODES + 1 });
     vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
     expect(() => {
       vfs.writeFile('/tmp/b.txt', new Uint8Array(1));
@@ -210,13 +213,13 @@ describe('file count limit', () => {
   });
 
   it('overwriting existing file does not increment count', () => {
-    const vfs = new VFS({ maxFileCount: 1 });
+    const vfs = new VFS({ fileCount: DEFAULT_INODES + 1 });
     vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
     vfs.writeFile('/tmp/a.txt', new Uint8Array(2));
     expect(vfs.readFile('/tmp/a.txt')).toEqual(new Uint8Array(2));
   });
 
-  it('no limit when maxFileCount is undefined', () => {
+  it('no limit when fileCount is undefined', () => {
     const vfs = new VFS();
     for (let i = 0; i < 100; i++) {
       vfs.writeFile(`/tmp/f${i}.txt`, new Uint8Array(1));
@@ -234,8 +237,8 @@ describe('cowClone option propagation', () => {
     }).toThrow(/ENOSPC/);
   });
 
-  it('propagates maxFileCount to cloned VFS', () => {
-    const vfs = new VFS({ maxFileCount: 2 });
+  it('propagates fileCount to cloned VFS', () => {
+    const vfs = new VFS({ fileCount: 9 }); // 7 default dirs + 2 files
     vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
     vfs.writeFile('/tmp/b.txt', new Uint8Array(1));
     const child = vfs.cowClone();

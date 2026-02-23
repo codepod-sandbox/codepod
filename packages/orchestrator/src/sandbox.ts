@@ -16,6 +16,8 @@ import { NetworkGateway } from './network/gateway.js';
 import type { NetworkPolicy } from './network/gateway.js';
 import { NetworkBridge } from './network/bridge.js';
 import { SOCKET_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from './network/socket-shim.js';
+import type { SecurityOptions, AuditEventHandler } from './security.js';
+import { CancelledError } from './security.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -30,20 +32,12 @@ export interface SandboxOptions {
   shellWasmPath?: string;
   /** Network policy for curl/wget builtins. If omitted, network access is disabled. */
   network?: NetworkPolicy;
-  /** Resource limits for commands, output, and file count. */
-  limits?: {
-    stdoutBytes?: number;
-    stderrBytes?: number;
-    commandBytes?: number;
-    fileCount?: number;
-  };
+  /** Security policy and limits. */
+  security?: SecurityOptions;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_FS_LIMIT = 256 * 1024 * 1024; // 256 MB
-const DEFAULT_STDOUT_LIMIT = 1_048_576;  // 1 MB
-const DEFAULT_STDERR_LIMIT = 1_048_576;  // 1 MB
-const DEFAULT_COMMAND_LIMIT = 65_536;    // 64 KB
 
 export class Sandbox {
   private vfs: VFS;
@@ -57,7 +51,9 @@ export class Sandbox {
   private envSnapshots: Map<string, Map<string, string>> = new Map();
   private bridge: NetworkBridge | null = null;
   private networkPolicy: NetworkPolicy | undefined;
-  private limits: { stdoutBytes: number; stderrBytes: number; commandBytes: number };
+  private security: SecurityOptions | undefined;
+  private sessionId: string;
+  private auditHandler: AuditEventHandler | undefined;
 
   private constructor(
     vfs: VFS,
@@ -67,9 +63,9 @@ export class Sandbox {
     wasmDir: string,
     shellWasmPath: string,
     mgr: ProcessManager,
-    limits: { stdoutBytes: number; stderrBytes: number; commandBytes: number },
     bridge?: NetworkBridge,
     networkPolicy?: NetworkPolicy,
+    security?: SecurityOptions,
   ) {
     this.vfs = vfs;
     this.runner = runner;
@@ -78,9 +74,21 @@ export class Sandbox {
     this.wasmDir = wasmDir;
     this.shellWasmPath = shellWasmPath;
     this.mgr = mgr;
-    this.limits = limits;
     this.bridge = bridge ?? null;
     this.networkPolicy = networkPolicy;
+    this.security = security;
+    this.sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    this.auditHandler = security?.onAuditEvent;
+  }
+
+  private audit(type: string, data?: Record<string, unknown>): void {
+    if (!this.auditHandler) return;
+    this.auditHandler({
+      type,
+      sessionId: this.sessionId,
+      timestamp: Date.now(),
+      ...data,
+    });
   }
 
   static async create(options: SandboxOptions): Promise<Sandbox> {
@@ -88,7 +96,7 @@ export class Sandbox {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
-    const vfs = new VFS({ fsLimitBytes, maxFileCount: options.limits?.fileCount });
+    const vfs = new VFS({ fsLimitBytes, fileCount: options.security?.limits?.fileCount });
     const gateway = options.network ? new NetworkGateway(options.network) : undefined;
 
     // Create bridge for WASI socket access when network policy exists
@@ -98,7 +106,7 @@ export class Sandbox {
       await bridge.start();
     }
 
-    const mgr = new ProcessManager(vfs, adapter, bridge);
+    const mgr = new ProcessManager(vfs, adapter, bridge, options.security?.toolAllowlist);
 
     // Discover and register tools
     const tools = await adapter.scanTools(options.wasmDir);
@@ -115,6 +123,11 @@ export class Sandbox {
     const shellWasmPath = options.shellWasmPath ?? `${options.wasmDir}/wasmsand-shell.wasm`;
     const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
+    // Apply output limits from security options
+    if (options.security?.limits) {
+      runner.setOutputLimits(options.security.limits.stdoutBytes, options.security.limits.stderrBytes);
+    }
+
     // Bootstrap Python socket shim when networking is enabled
     if (bridge) {
       vfs.withWriteAccess(() => {
@@ -128,13 +141,9 @@ export class Sandbox {
       runner.setEnv('PYTHONPATH', '/usr/lib/python');
     }
 
-    const limits = {
-      stdoutBytes: options.limits?.stdoutBytes ?? DEFAULT_STDOUT_LIMIT,
-      stderrBytes: options.limits?.stderrBytes ?? DEFAULT_STDERR_LIMIT,
-      commandBytes: options.limits?.commandBytes ?? DEFAULT_COMMAND_LIMIT,
-    };
-
-    return new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, limits, bridge, options.network);
+    const sb = new Sandbox(vfs, runner, timeoutMs, adapter, options.wasmDir, shellWasmPath, mgr, bridge, options.network, options.security);
+    sb.audit('sandbox.create');
+    return sb;
   }
 
   private static async detectAdapter(): Promise<PlatformAdapter> {
@@ -149,44 +158,62 @@ export class Sandbox {
   async run(command: string): Promise<RunResult> {
     this.assertAlive();
 
-    if (Buffer.byteLength(command) > this.limits.commandBytes) {
+    // Check command size limit
+    const commandLimit = this.security?.limits?.commandBytes ?? 65536;
+    if (new TextEncoder().encode(command).byteLength > commandLimit) {
+      this.audit('limit.exceeded', { subtype: 'command', command });
       return {
         exitCode: 1,
         stdout: '',
-        stderr: `command too long (${Buffer.byteLength(command)} bytes, limit: ${this.limits.commandBytes})\n`,
+        stderr: 'command too large\n',
         executionTimeMs: 0,
         errorClass: 'LIMIT_EXCEEDED',
       };
     }
 
-    const timer = new Promise<RunResult>((resolve) => {
-      setTimeout(() => resolve({
-        exitCode: 124,
-        stdout: '',
-        stderr: 'command timed out\n',
-        executionTimeMs: this.timeoutMs,
-        errorClass: 'TIMEOUT',
-      }), this.timeoutMs);
-    });
+    this.audit('command.start', { command });
 
-    const result = await Promise.race([this.runner.run(command), timer]);
-    return this.applyOutputLimits(result);
-  }
+    const effectiveTimeout = this.security?.limits?.timeoutMs ?? this.timeoutMs;
+    this.runner.resetCancel(effectiveTimeout);
+    const startTime = performance.now();
 
-  private applyOutputLimits(result: RunResult): RunResult {
-    const stdoutBytes = Buffer.byteLength(result.stdout);
-    const stderrBytes = Buffer.byteLength(result.stderr);
-    const stdoutOver = stdoutBytes > this.limits.stdoutBytes;
-    const stderrOver = stderrBytes > this.limits.stderrBytes;
+    try {
+      const result = await this.runner.run(command);
+      const executionTimeMs = performance.now() - startTime;
 
-    if (!stdoutOver && !stderrOver) return result;
+      // Emit truncation events
+      if (result.truncated?.stdout) {
+        this.audit('limit.exceeded', { subtype: 'stdout', command });
+      }
+      if (result.truncated?.stderr) {
+        this.audit('limit.exceeded', { subtype: 'stderr', command });
+      }
 
-    return {
-      ...result,
-      stdout: stdoutOver ? Buffer.from(result.stdout).subarray(0, this.limits.stdoutBytes).toString() : result.stdout,
-      stderr: stderrOver ? Buffer.from(result.stderr).subarray(0, this.limits.stderrBytes).toString() : result.stderr,
-      truncated: { stdout: stdoutOver, stderr: stderrOver },
-    };
+      // Emit capability denied for tool allowlist blocks
+      if (result.stderr?.includes('not allowed by security policy')) {
+        this.audit('capability.denied', { command, reason: result.stderr.trim() });
+      }
+
+      this.audit('command.complete', { command, exitCode: result.exitCode, executionTimeMs });
+      return result;
+    } catch (e) {
+      if (e instanceof CancelledError) {
+        const executionTimeMs = performance.now() - startTime;
+        if (e.reason === 'TIMEOUT') {
+          this.audit('command.timeout', { command, executionTimeMs });
+        } else {
+          this.audit('command.cancelled', { command, executionTimeMs });
+        }
+        return {
+          exitCode: 124,
+          stdout: '',
+          stderr: `command ${e.reason.toLowerCase()}\n`,
+          executionTimeMs,
+          errorClass: e.reason,
+        };
+      }
+      throw e;
+    }
   }
 
   readFile(path: string): Uint8Array {
@@ -258,7 +285,7 @@ export class Sandbox {
       await childBridge.start();
     }
 
-    const childMgr = new ProcessManager(childVfs, this.adapter, childBridge);
+    const childMgr = new ProcessManager(childVfs, this.adapter, childBridge, this.security?.toolAllowlist);
 
     // Re-register tools from the same wasmDir
     const tools = await this.adapter.scanTools(this.wasmDir);
@@ -280,11 +307,20 @@ export class Sandbox {
     return new Sandbox(
       childVfs, childRunner, this.timeoutMs,
       this.adapter, this.wasmDir, this.shellWasmPath,
-      childMgr, this.limits, childBridge, this.networkPolicy,
+      childMgr, childBridge, this.networkPolicy, this.security,
     );
   }
 
+  /** Cancel the currently running command. */
+  cancel(): void {
+    this.runner.cancel('CANCELLED');
+    // Set deadline to now so Date.now() checks in fdWrite/fdRead fire immediately
+    this.runner.setDeadlineNow();
+    this.mgr.cancelCurrent();
+  }
+
   destroy(): void {
+    this.audit('sandbox.destroy');
     this.destroyed = true;
     this.bridge?.dispose();
   }

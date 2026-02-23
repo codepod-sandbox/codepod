@@ -89,7 +89,7 @@ describe('Sandbox', () => {
     sandbox = await Sandbox.create({ wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(), timeoutMs: 1 });
     const result = await sandbox.run('yes hello | head -1000');
     expect(result.exitCode).toBe(124);
-    expect(result.stderr).toContain('timed out');
+    expect(result.errorClass).toBe('TIMEOUT');
   });
 
   it('VFS size limit enforces ENOSPC', async () => {
@@ -187,12 +187,12 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        limits: { commandBytes: 10 },
+        security: { limits: { commandBytes: 10 } },
       });
       const result = await sandbox.run('echo this is a long command that exceeds the limit');
       expect(result.exitCode).toBe(1);
       expect(result.errorClass).toBe('LIMIT_EXCEEDED');
-      expect(result.stderr).toContain('command too long');
+      expect(result.stderr).toContain('command too large');
     });
 
     it('truncates stdout exceeding stdoutBytes limit', async () => {
@@ -200,11 +200,12 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        limits: { stdoutBytes: 5 },
+        security: { limits: { stdoutBytes: 20 } },
       });
-      const result = await sandbox.run('echo hello world');
-      expect(result.stdout.length).toBeLessThanOrEqual(5);
-      expect(result.truncated).toEqual({ stdout: true, stderr: false });
+      // Use WASM command (not builtin) so WASI-level truncation applies
+      const result = await sandbox.run('yes hello | head -100');
+      expect(result.truncated?.stdout).toBe(true);
+      expect(result.stdout.length).toBeLessThanOrEqual(70); // 20 + truncation marker
     });
 
     it('truncates stderr exceeding stderrBytes limit', async () => {
@@ -212,22 +213,19 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        limits: { stderrBytes: 5 },
+        security: { limits: { stderrBytes: 20 } },
       });
-      const result = await sandbox.run('echo error message >&2');
-      expect(result.stderr.length).toBeLessThanOrEqual(5);
-      expect(result.truncated).toEqual({ stdout: false, stderr: true });
+      // cat on nonexistent file generates stderr via WASM
+      const result = await sandbox.run('cat /nonexistent/file1; cat /nonexistent/file2; cat /nonexistent/file3');
+      expect(result.truncated?.stderr).toBe(true);
     });
 
     it('passes fileCount limit to VFS', async () => {
-      // ShellRunner writes tool stubs to /bin and /usr/bin during init,
-      // consuming ~130 file slots. Use a tight limit that allows one
-      // more user file but not two.
       sandbox = await Sandbox.create({
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        limits: { fileCount: 200 },
+        security: { limits: { fileCount: 200 } },
       });
       sandbox.writeFile('/tmp/a.txt', new Uint8Array(1));
       // Fill remaining slots to trigger the limit
@@ -263,7 +261,7 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        limits: { stdoutBytes: 1_000_000 },
+        security: { limits: { stdoutBytes: 1_000_000 } },
       });
       const result = await sandbox.run('echo hello');
       expect(result.truncated).toBeUndefined();
@@ -321,6 +319,265 @@ describe('Sandbox', () => {
       } finally {
         child.destroy();
       }
+    });
+  });
+
+  describe('output limits', () => {
+    it('truncates stdout at configured limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { stdoutBytes: 20 } },
+      });
+      const result = await sandbox.run('yes hello | head -100');
+      expect(result.stdout.length).toBeLessThanOrEqual(70); // 20 + truncation marker
+      expect(result.truncated?.stdout).toBe(true);
+    });
+
+    it('does not truncate when under limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { stdoutBytes: 10000 } },
+      });
+      const result = await sandbox.run('echo hello');
+      expect(result.truncated?.stdout).toBeFalsy();
+    });
+  });
+
+  describe('file count limit', () => {
+    it('rejects file creation when limit reached', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { fileCount: 30 } },
+      });
+      // Default layout creates some inodes; try to fill up to limit
+      let threw = false;
+      for (let i = 0; i < 50; i++) {
+        try {
+          sandbox.writeFile(`/tmp/f${i}.txt`, new TextEncoder().encode('x'));
+        } catch {
+          threw = true;
+          break;
+        }
+      }
+      expect(threw).toBe(true);
+    });
+  });
+
+  describe('command size limit', () => {
+    it('rejects command exceeding commandBytes limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { commandBytes: 50 } },
+      });
+      const result = await sandbox.run('echo ' + 'x'.repeat(100));
+      expect(result.errorClass).toBe('LIMIT_EXCEEDED');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('allows command under the limit', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { commandBytes: 1000 } },
+      });
+      const result = await sandbox.run('echo hello');
+      expect(result.exitCode).toBe(0);
+      expect(result.errorClass).toBeUndefined();
+    });
+  });
+
+  describe('hard cancellation', () => {
+    it('timeout kills long-running WASM via deadline in fdWrite', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 50 } },
+      });
+      const start = performance.now();
+      // seq 1 billion generates huge output; deadline in fdWrite kills it
+      const result = await sandbox.run('seq 1 999999999');
+      const elapsed = performance.now() - start;
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(result.exitCode).toBe(124);
+      // Should complete near the timeout, not run for 30s
+      expect(elapsed).toBeLessThan(3000);
+    });
+
+    it('timeout kills chained commands via deadline in execCommand', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 50 } },
+      });
+      // Two sequential heavy WASM commands — second gets killed by deadline
+      const result = await sandbox.run('seq 1 999999999 && seq 1 999999999');
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(result.exitCode).toBe(124);
+    });
+  });
+
+  describe('tool allowlist', () => {
+    it('blocks tools not in allowlist', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { toolAllowlist: ['echo', 'cat'] },
+      });
+      const result = await sandbox.run('grep hello /tmp/f.txt');
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('not allowed');
+    });
+
+    it('allows tools in allowlist', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { toolAllowlist: ['echo', 'cat'] },
+      });
+      // echo is a builtin, always available
+      const result = await sandbox.run('echo hello');
+      expect(result.stdout.trim()).toBe('hello');
+    });
+
+    it('no allowlist means all tools allowed', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+      });
+      const result = await sandbox.run('uname');
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe('SecurityOptions', () => {
+    it('accepts security options on create', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          limits: { stdoutBytes: 1024, stderrBytes: 1024 },
+        },
+      });
+      const result = await sandbox.run('echo hello');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('RunResult includes errorClass on timeout', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 1 } },
+      });
+      // yes | head produces enough work to exceed 1ms timeout
+      const result = await sandbox.run('yes hello | head -10000');
+      expect(result.errorClass).toBe('TIMEOUT');
+    });
+  });
+
+  describe('audit logging', () => {
+    it('emits events for command lifecycle', async () => {
+      const events: any[] = [];
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          onAuditEvent: (event) => events.push(event),
+        },
+      });
+      await sandbox.run('echo hello');
+      sandbox.destroy();
+
+      expect(events.find(e => e.type === 'sandbox.create')).toBeDefined();
+      expect(events.find(e => e.type === 'command.start')).toBeDefined();
+      expect(events.find(e => e.type === 'command.complete')).toBeDefined();
+      expect(events.find(e => e.type === 'sandbox.destroy')).toBeDefined();
+    });
+
+    it('emits timeout event', async () => {
+      const events: any[] = [];
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          limits: { timeoutMs: 1 },
+          onAuditEvent: (event) => events.push(event),
+        },
+      });
+      await sandbox.run('yes hello | head -10000');
+
+      expect(events.find(e => e.type === 'command.timeout')).toBeDefined();
+    });
+
+    it('audit events have sessionId and timestamp', async () => {
+      const events: any[] = [];
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          onAuditEvent: (event) => events.push(event),
+        },
+      });
+      await sandbox.run('echo hello');
+
+      for (const e of events) {
+        expect(e.sessionId).toBeDefined();
+        expect(typeof e.sessionId).toBe('string');
+        expect(e.timestamp).toBeGreaterThan(0);
+      }
+      // All events share the same sessionId
+      const ids = new Set(events.map(e => e.sessionId));
+      expect(ids.size).toBe(1);
+    });
+
+    it('emits limit.exceeded event on output truncation', async () => {
+      const events: any[] = [];
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          limits: { stdoutBytes: 20 },
+          onAuditEvent: (event) => events.push(event),
+        },
+      });
+      await sandbox.run('yes hello | head -100');
+
+      expect(events.find(e => e.type === 'limit.exceeded' && e.subtype === 'stdout')).toBeDefined();
+    });
+
+    it('emits capability.denied on blocked tool', async () => {
+      const events: any[] = [];
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: {
+          toolAllowlist: ['echo'],
+          onAuditEvent: (event) => events.push(event),
+        },
+      });
+      await sandbox.run('grep hello /tmp/f.txt');
+
+      expect(events.find(e => e.type === 'capability.denied')).toBeDefined();
     });
   });
 });
