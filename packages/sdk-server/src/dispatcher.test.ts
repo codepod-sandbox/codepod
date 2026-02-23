@@ -309,4 +309,74 @@ describe('Dispatcher', () => {
       expect(result).toHaveProperty('sandboxId');
     });
   });
+
+  describe('fork routing', () => {
+    it('sandbox.fork returns a sandboxId', async () => {
+      const result = await dispatcher.dispatch('sandbox.fork', {});
+      expect(result).toHaveProperty('sandboxId');
+      expect(typeof (result as { sandboxId: string }).sandboxId).toBe('string');
+    });
+
+    it('routes run to forked sandbox via sandboxId', async () => {
+      const forkResult = await dispatcher.dispatch('sandbox.fork', {}) as { sandboxId: string };
+      await dispatcher.dispatch('run', { command: 'echo hello', sandboxId: forkResult.sandboxId });
+      const forkedSandbox = await (sandbox.fork as ReturnType<typeof mock>).mock.results[0].value;
+      expect(forkedSandbox.run).toHaveBeenCalledWith('echo hello');
+    });
+
+    it('routes files.read to forked sandbox via sandboxId', async () => {
+      const forkResult = await dispatcher.dispatch('sandbox.fork', {}) as { sandboxId: string };
+      await dispatcher.dispatch('files.read', { path: '/tmp/test.txt', sandboxId: forkResult.sandboxId });
+      const forkedSandbox = await (sandbox.fork as ReturnType<typeof mock>).mock.results[0].value;
+      expect(forkedSandbox.readFile).toHaveBeenCalledWith('/tmp/test.txt');
+    });
+
+    it('routes to root sandbox when no sandboxId', async () => {
+      await dispatcher.dispatch('run', { command: 'echo hello' });
+      expect(sandbox.run).toHaveBeenCalledWith('echo hello');
+    });
+
+    it('rejects unknown sandboxId', async () => {
+      await expect(
+        dispatcher.dispatch('run', { command: 'echo hello', sandboxId: '999' }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: expect.stringContaining('Unknown sandboxId'),
+      });
+    });
+
+    it('sandbox.fork from a fork works', async () => {
+      const fork1 = await dispatcher.dispatch('sandbox.fork', {}) as { sandboxId: string };
+      const fork2 = await dispatcher.dispatch('sandbox.fork', { sandboxId: fork1.sandboxId }) as { sandboxId: string };
+      expect(fork2.sandboxId).not.toBe(fork1.sandboxId);
+    });
+
+    it('sandbox.destroy removes a fork', async () => {
+      const forkResult = await dispatcher.dispatch('sandbox.fork', {}) as { sandboxId: string };
+      await dispatcher.dispatch('sandbox.destroy', { sandboxId: forkResult.sandboxId });
+      await expect(
+        dispatcher.dispatch('run', { command: 'echo hello', sandboxId: forkResult.sandboxId }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: expect.stringContaining('Unknown sandboxId'),
+      });
+    });
+
+    it('sandbox.destroy requires sandboxId', async () => {
+      await expect(
+        dispatcher.dispatch('sandbox.destroy', {}),
+      ).rejects.toMatchObject({
+        code: -32602,
+      });
+    });
+
+    it('kill destroys all forks', async () => {
+      const forkResult = await dispatcher.dispatch('sandbox.fork', {}) as { sandboxId: string };
+      await dispatcher.dispatch('kill', {});
+      expect(dispatcher.isKilled()).toBe(true);
+      expect(sandbox.destroy).toHaveBeenCalled();
+      const forkedSandbox = await (sandbox.fork as ReturnType<typeof mock>).mock.results[0].value;
+      expect(forkedSandbox.destroy).toHaveBeenCalled();
+    });
+  });
 });

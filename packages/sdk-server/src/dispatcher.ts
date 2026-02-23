@@ -74,11 +74,13 @@ export class Dispatcher {
         case 'kill':
           return this.kill();
         case 'snapshot.create':
-          return this.snapshotCreate();
+          return this.snapshotCreate(params);
         case 'snapshot.restore':
           return this.snapshotRestore(params);
         case 'sandbox.fork':
-          return await this.sandboxFork();
+          return await this.sandboxFork(params);
+        case 'sandbox.destroy':
+          return this.sandboxDestroy(params);
         default:
           throw this.rpcError(-32601, `Method not found: ${method}`);
       }
@@ -110,6 +112,15 @@ export class Dispatcher {
     return { code, message };
   }
 
+  private resolveSandbox(params: Record<string, unknown>): SandboxLike {
+    const id = params.sandboxId;
+    if (id === undefined || id === null) return this.sandbox;
+    if (typeof id !== 'string') throw this.rpcError(-32602, 'sandboxId must be a string');
+    const fork = this.forks.get(id);
+    if (!fork) throw this.rpcError(-32602, `Unknown sandboxId: ${id}`);
+    return fork;
+  }
+
   /** Extract the basename from a path (last segment after '/'). */
   private basename(path: string): string {
     const parts = path.split('/');
@@ -119,8 +130,9 @@ export class Dispatcher {
   // ── RPC method implementations ───────────────────────────────────
 
   private async run(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const command = this.requireString(params, 'command');
-    const result = await this.sandbox.run(command);
+    const result = await sb.run(command);
     return {
       exitCode: result.exitCode,
       stdout: result.stdout,
@@ -130,48 +142,54 @@ export class Dispatcher {
   }
 
   private filesWrite(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
     const data = this.requireString(params, 'data');
     const bytes = Buffer.from(data, 'base64');
-    this.sandbox.writeFile(path, new Uint8Array(bytes));
+    sb.writeFile(path, new Uint8Array(bytes));
     return { ok: true };
   }
 
   private filesRead(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
-    const content = this.sandbox.readFile(path);
+    const content = sb.readFile(path);
     const encoded = Buffer.from(content).toString('base64');
     return { data: encoded };
   }
 
   private filesList(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
-    const entries = this.sandbox.readDir(path);
+    const entries = sb.readDir(path);
     const enriched = entries.map((entry) => {
       const fullPath = path.endsWith('/')
         ? `${path}${entry.name}`
         : `${path}/${entry.name}`;
-      const st = this.sandbox.stat(fullPath);
+      const st = sb.stat(fullPath);
       return { name: entry.name, type: entry.type, size: st.size };
     });
     return { entries: enriched };
   }
 
   private filesMkdir(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
-    this.sandbox.mkdir(path);
+    sb.mkdir(path);
     return { ok: true };
   }
 
   private filesRm(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
-    this.sandbox.rm(path);
+    sb.rm(path);
     return { ok: true };
   }
 
   private filesStat(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const path = this.requireString(params, 'path');
-    const st = this.sandbox.stat(path);
+    const st = sb.stat(path);
     return {
       name: this.basename(path),
       type: st.type,
@@ -180,39 +198,57 @@ export class Dispatcher {
   }
 
   private envSet(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const name = this.requireString(params, 'name');
     const value = this.requireString(params, 'value');
-    this.sandbox.setEnv(name, value);
+    sb.setEnv(name, value);
     return { ok: true };
   }
 
   private envGet(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const name = this.requireString(params, 'name');
-    const value = this.sandbox.getEnv(name);
+    const value = sb.getEnv(name);
     return { value: value ?? null };
   }
 
   private kill() {
+    for (const fork of this.forks.values()) {
+      fork.destroy();
+    }
+    this.forks.clear();
     this.sandbox.destroy();
     this.killed = true;
     return { ok: true };
   }
 
-  private snapshotCreate() {
-    const id = this.sandbox.snapshot();
+  private snapshotCreate(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
+    const id = sb.snapshot();
     return { id };
   }
 
   private snapshotRestore(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
     const id = this.requireString(params, 'id');
-    this.sandbox.restore(id);
+    sb.restore(id);
     return { ok: true };
   }
 
-  private async sandboxFork() {
-    const child = await this.sandbox.fork();
+  private async sandboxFork(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
+    const child = await sb.fork();
     const sandboxId = String(this.nextForkId++);
     this.forks.set(sandboxId, child);
     return { sandboxId };
+  }
+
+  private sandboxDestroy(params: Record<string, unknown>) {
+    const id = this.requireString(params, 'sandboxId');
+    const fork = this.forks.get(id);
+    if (!fork) throw this.rpcError(-32602, `Unknown sandboxId: ${id}`);
+    fork.destroy();
+    this.forks.delete(id);
+    return { ok: true };
   }
 }
