@@ -106,7 +106,7 @@ async function main(): Promise<void> {
           timeoutMs,
           fsLimitBytes,
           shellWasmPath,
-          limits,
+          security: limits ? { limits } : undefined,
         });
 
         dispatcher = new Dispatcher(sandbox);
