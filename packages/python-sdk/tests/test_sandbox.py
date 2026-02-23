@@ -12,9 +12,9 @@ class TestSandbox:
             result = sbx.commands.run("echo hello")
             assert result.exit_code == 0
 
-    def test_missing_node_raises(self, monkeypatch):
+    def test_missing_bun_raises(self, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda _: None)
-        with pytest.raises(RuntimeError, match="Node.js not found"):
+        with pytest.raises(RuntimeError, match="Bun not found"):
             Sandbox()
 
 

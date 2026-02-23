@@ -11,16 +11,15 @@ class RpcError(Exception):
 
 
 class RpcClient:
-    def __init__(self, node_path: str, server_script: str, node_args: list[str] | None = None):
-        self._node_path = node_path
+    def __init__(self, runtime_path: str, server_script: str):
+        self._runtime_path = runtime_path
         self._server_script = server_script
-        self._node_args = node_args or []
         self._proc: subprocess.Popen | None = None
         self._next_id = 1
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
-            [self._node_path, *self._node_args, self._server_script],
+            [self._runtime_path, self._server_script],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

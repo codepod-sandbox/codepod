@@ -1,4 +1,5 @@
 import os
+import shutil
 import pytest
 from wasmsand._rpc import RpcClient, RpcError
 
@@ -16,7 +17,9 @@ SHELL_WASM = os.path.join(
 @pytest.fixture
 def client():
     """Start RPC client, create sandbox, yield client, kill on teardown."""
-    c = RpcClient("node", SERVER_SCRIPT, node_args=["--import", "tsx"])
+    runtime = shutil.which("bun")
+    assert runtime is not None, "Bun not found on PATH"
+    c = RpcClient(runtime, SERVER_SCRIPT)
     c.start()
     result = c.call("create", {"wasmDir": WASM_DIR, "shellWasmPath": SHELL_WASM})
     assert result["ok"] is True
