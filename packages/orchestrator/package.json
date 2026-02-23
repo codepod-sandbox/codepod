@@ -14,7 +14,8 @@
     "./browser": {
       "types": "./dist/browser-adapter.d.ts",
       "default": "./dist/browser-adapter.js"
-    }
+    },
+    "./wasm/*": "./wasm/*"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
