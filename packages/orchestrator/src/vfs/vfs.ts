@@ -20,6 +20,8 @@ const MAX_SYMLINK_DEPTH = 40;
 export interface VfsOptions {
   /** Maximum total bytes stored in the VFS. Undefined = no limit. */
   fsLimitBytes?: number;
+  /** Maximum number of files/directories/symlinks. Undefined = no limit. */
+  maxFileCount?: number;
   /**
    * Paths that are writable. Everything else is read-only.
    * Defaults to ['/home/user', '/tmp']. Set to undefined to disable.
@@ -58,6 +60,8 @@ export class VFS {
   private nextSnapId = 1;
   private totalBytes = 0;
   private fsLimitBytes: number | undefined;
+  private fileCount = 0;
+  private maxFileCount: number | undefined;
   /** Writable path prefixes. Writes outside these paths are rejected with EROFS. */
   private writablePaths: string[] | undefined;
   /** When true, bypass writable-path checks (used during init). */
@@ -66,6 +70,7 @@ export class VFS {
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
     this.fsLimitBytes = options?.fsLimitBytes;
+    this.maxFileCount = options?.maxFileCount;
     this.writablePaths = options?.writablePaths !== undefined ? options.writablePaths : ['/home/user', '/tmp'];
     this.initializing = true;
     this.initDefaultLayout();
@@ -80,6 +85,8 @@ export class VFS {
     vfs.nextSnapId = 1;
     vfs.totalBytes = 0;
     vfs.fsLimitBytes = undefined;
+    vfs.fileCount = 0;
+    vfs.maxFileCount = undefined;
     vfs.writablePaths = undefined;
     vfs.initializing = false;
     return vfs;
@@ -101,6 +108,13 @@ export class VFS {
       if (normalized === prefix || normalized.startsWith(prefix + '/')) return;
     }
     throw new VfsError('EROFS', `read-only file system: ${path}`);
+  }
+
+  /** Throw ENOSPC if the file-count limit has been reached. */
+  private assertFileCountLimit(): void {
+    if (this.maxFileCount !== undefined && this.fileCount >= this.maxFileCount) {
+      throw new VfsError('ENOSPC', `file count limit reached (max: ${this.maxFileCount})`);
+    }
   }
 
   /** Internal mkdir that silently skips existing directories. Used during init. */
@@ -285,7 +299,9 @@ export class VFS {
       existing.content = data;
       existing.metadata.mtime = new Date();
     } else {
+      this.assertFileCountLimit();
       parent.children.set(name, createFileInode(data));
+      this.fileCount++;
     }
     this.totalBytes += delta;
   }
@@ -298,7 +314,9 @@ export class VFS {
       throw new VfsError('EEXIST', `file exists: ${path}`);
     }
 
+    this.assertFileCountLimit();
     parent.children.set(name, createDirInode());
+    this.fileCount++;
   }
 
   mkdirp(path: string): void {
@@ -317,8 +335,10 @@ export class VFS {
         }
         current = existing;
       } else {
+        this.assertFileCountLimit();
         const newDir = createDirInode();
         current.children.set(segment, newDir);
+        this.fileCount++;
         current = newDir;
       }
     }
@@ -357,6 +377,7 @@ export class VFS {
       this.totalBytes -= child.content.byteLength;
     }
     parent.children.delete(name);
+    this.fileCount--;
   }
 
   rmdir(path: string): void {
@@ -375,6 +396,7 @@ export class VFS {
     }
 
     parent.children.delete(name);
+    this.fileCount--;
   }
 
   rename(oldPath: string, newPath: string): void {
@@ -401,7 +423,9 @@ export class VFS {
       throw new VfsError('EEXIST', `file exists: ${path}`);
     }
 
+    this.assertFileCountLimit();
     parent.children.set(name, createSymlinkInode(target));
+    this.fileCount++;
   }
 
   chmod(path: string, mode: number): void {
