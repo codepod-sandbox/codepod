@@ -200,13 +200,69 @@ export class ShellRunner {
    */
   async run(command: string): Promise<RunResult> {
     const startTime = performance.now();
-    const ast = await this.parse(command);
+
+    // Pre-process: the Rust parser swallows NAME=VALUE tokens after `export`,
+    // so we handle `export NAME=VALUE ...` by converting assignments into
+    // env.set calls and stripping them from the command before parsing.
+    const preprocessed = this.preprocessExport(command);
+    if (preprocessed === null) {
+      // Fully handled (e.g. `export FOO=bar` with no remaining command)
+      const elapsed = performance.now() - startTime;
+      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: elapsed };
+    }
+
+    const ast = await this.parse(preprocessed);
     if (ast === null) {
       return EMPTY_RESULT;
     }
     const result = await this.execCommand(ast);
     result.executionTimeMs = performance.now() - startTime;
     return result;
+  }
+
+  /**
+   * Pre-process `export` commands. The Rust shell parser swallows NAME=VALUE
+   * tokens after `export`, so we extract and apply them before parsing.
+   *
+   * Returns the (possibly modified) command to parse, or null if the command
+   * was fully handled (pure `export NAME=VALUE` with no other words).
+   */
+  private preprocessExport(command: string): string | null {
+    const trimmed = command.trim();
+    if (!trimmed.startsWith('export')) return command;
+
+    // Match: export [NAME=VALUE ...] [NAME ...]
+    const match = trimmed.match(/^export(\s+|$)/);
+    if (!match) return command;
+
+    const rest = trimmed.slice(match[0].length).trim();
+
+    // `export` with no arguments — pass through to builtinExport
+    if (rest === '') return command;
+
+    // Split tokens and process assignments
+    const tokens = rest.split(/\s+/);
+    let hasAssignment = false;
+    const remaining: string[] = [];
+
+    for (const token of tokens) {
+      const eqIdx = token.indexOf('=');
+      if (eqIdx > 0 && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token.slice(0, eqIdx))) {
+        // This is a NAME=VALUE assignment
+        this.env.set(token.slice(0, eqIdx), token.slice(eqIdx + 1));
+        hasAssignment = true;
+      } else {
+        remaining.push(token);
+      }
+    }
+
+    if (remaining.length === 0 && hasAssignment) {
+      // All tokens were assignments — fully handled
+      return null;
+    }
+
+    // Rebuild: `export` + remaining non-assignment tokens
+    return 'export ' + remaining.join(' ');
   }
 
   /**

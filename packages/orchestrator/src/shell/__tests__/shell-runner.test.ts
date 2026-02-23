@@ -202,4 +202,59 @@ describe('ShellRunner', () => {
       expect(runner.getEnv('PWD')).toBe('/home');
     });
   });
+
+  describe('export builtin', () => {
+    it('export FOO=bar sets the variable', async () => {
+      await runner.run('export FOO=bar');
+      expect(runner.getEnv('FOO')).toBe('bar');
+    });
+
+    it('export with no args lists all env vars', async () => {
+      runner.setEnv('A', '1');
+      runner.setEnv('B', '2');
+      const result = await runner.run('export');
+      expect(result.stdout).toContain('A=1');
+      expect(result.stdout).toContain('B=2');
+    });
+
+    it('export FOO with no value is a no-op', async () => {
+      runner.setEnv('FOO', 'existing');
+      await runner.run('export FOO');
+      expect(runner.getEnv('FOO')).toBe('existing');
+    });
+  });
+
+  describe('unset builtin', () => {
+    it('removes a variable from env', async () => {
+      runner.setEnv('FOO', 'bar');
+      await runner.run('unset FOO');
+      expect(runner.getEnv('FOO')).toBeUndefined();
+    });
+
+    it('unset non-existent variable is a no-op', async () => {
+      const result = await runner.run('unset NONEXISTENT');
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe('date builtin', () => {
+    it('returns a date string with no args', async () => {
+      const result = await runner.run('date');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBeTruthy();
+      expect(result.stdout).toMatch(/\d{4}/);
+    });
+
+    it('supports +%Y-%m-%d format', async () => {
+      const result = await runner.run('date +%Y-%m-%d');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+
+    it('supports +%H:%M:%S format', async () => {
+      const result = await runner.run('date +%H:%M:%S');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    });
+  });
 });
