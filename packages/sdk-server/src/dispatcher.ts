@@ -13,6 +13,8 @@ export interface SandboxLike {
     stdout: string;
     stderr: string;
     executionTimeMs: number;
+    truncated?: { stdout: boolean; stderr: boolean };
+    errorClass?: 'TIMEOUT' | 'CANCELLED' | 'CAPABILITY_DENIED' | 'LIMIT_EXCEEDED';
   }>;
   readFile(path: string): Uint8Array;
   writeFile(path: string, data: Uint8Array): void;
@@ -130,15 +132,18 @@ export class Dispatcher {
   // ── RPC method implementations ───────────────────────────────────
 
   private async run(params: Record<string, unknown>) {
-    const sb = this.resolveSandbox(params);
     const command = this.requireString(params, 'command');
+    const sb = this.resolveSandbox(params);
     const result = await sb.run(command);
-    return {
+    const response: Record<string, unknown> = {
       exitCode: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
       executionTimeMs: result.executionTimeMs,
     };
+    if (result.truncated) response.truncated = result.truncated;
+    if (result.errorClass) response.errorClass = result.errorClass;
+    return response;
   }
 
   private filesWrite(params: Record<string, unknown>) {

@@ -379,4 +379,28 @@ describe('Dispatcher', () => {
       expect(forkedSandbox.destroy).toHaveBeenCalled();
     });
   });
+
+  it('passes through truncated and errorClass fields', async () => {
+    (sandbox.run as ReturnType<typeof mock>).mockImplementation(async () => ({
+      exitCode: 124,
+      stdout: 'trunc',
+      stderr: '',
+      executionTimeMs: 30000,
+      truncated: { stdout: true, stderr: false },
+      errorClass: 'TIMEOUT' as const,
+    }));
+
+    const result = await dispatcher.dispatch('run', { command: 'yes' });
+    expect(result).toMatchObject({
+      exitCode: 124,
+      truncated: { stdout: true, stderr: false },
+      errorClass: 'TIMEOUT',
+    });
+  });
+
+  it('omits truncated when not present', async () => {
+    const result = await dispatcher.dispatch('run', { command: 'echo hello' });
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('errorClass');
+  });
 });
