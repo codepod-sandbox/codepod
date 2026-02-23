@@ -43,8 +43,7 @@ function log(msg: string): void {
   process.stderr.write(`[sdk-server] ${msg}\n`);
 }
 
-// Max request size: 400MB base64 ≈ 300MB decoded. Prevents OOM before VFS limit kicks in.
-const MAX_LINE_BYTES = 400 * 1024 * 1024;
+const MAX_LINE_BYTES = 8 * 1024 * 1024; // 8 MB
 
 async function main(): Promise<void> {
   let dispatcher: Dispatcher | null = null;
