@@ -41,7 +41,16 @@ def _dev_paths() -> tuple[str, str, str, str]:
 
 
 class Sandbox:
-    def __init__(self, *, timeout_ms: int = 30_000, fs_limit_bytes: int = 256 * 1024 * 1024):
+    def __init__(self, *, timeout_ms: int = 30_000, fs_limit_bytes: int = 256 * 1024 * 1024,
+                 _sandbox_id: str | None = None, _client: RpcClient | None = None):
+        if _client is not None:
+            # Internal constructor for forked sandboxes
+            self._client = _client
+            self._sandbox_id = _sandbox_id
+            self.commands = Commands(self._client, self._sandbox_id)
+            self.files = Files(self._client, self._sandbox_id)
+            return
+
         if _is_bundled():
             runtime, server, wasm_dir, shell_wasm = _bundled_paths()
         else:
@@ -49,6 +58,7 @@ class Sandbox:
 
         self._client = RpcClient(runtime, server)
         self._client.start()
+        self._sandbox_id = None
 
         self._client.call("create", {
             "wasmDir": wasm_dir,
@@ -60,23 +70,33 @@ class Sandbox:
         self.commands = Commands(self._client)
         self.files = Files(self._client)
 
+    def _with_id(self, params: dict) -> dict:
+        if self._sandbox_id is not None:
+            params["sandboxId"] = self._sandbox_id
+        return params
+
     def snapshot(self) -> str:
         """Save current VFS + env state. Returns snapshot ID."""
-        result = self._client.call("snapshot.create", {})
+        result = self._client.call("snapshot.create", self._with_id({}))
         return result["id"]
 
     def restore(self, snapshot_id: str) -> None:
         """Restore to a previous snapshot."""
-        self._client.call("snapshot.restore", {"id": snapshot_id})
+        self._client.call("snapshot.restore", self._with_id({"id": snapshot_id}))
 
     def fork(self) -> "Sandbox":
         """Create an independent forked sandbox."""
-        result = self._client.call("sandbox.fork", {})
-        forked = object.__new__(Sandbox)
-        forked._client = self._client
-        forked.commands = Commands(self._client)
-        forked.files = Files(self._client)
-        return forked
+        result = self._client.call("sandbox.fork", self._with_id({}))
+        return Sandbox(
+            _sandbox_id=result["sandboxId"],
+            _client=self._client,
+        )
+
+    def destroy(self) -> None:
+        """Destroy this forked sandbox. Only valid on forked instances."""
+        if self._sandbox_id is None:
+            raise RuntimeError("Cannot destroy root sandbox; use kill() instead")
+        self._client.call("sandbox.destroy", {"sandboxId": self._sandbox_id})
 
     def kill(self) -> None:
         try:
@@ -89,4 +109,10 @@ class Sandbox:
         return self
 
     def __exit__(self, *exc) -> None:
-        self.kill()
+        if self._sandbox_id is not None:
+            try:
+                self.destroy()
+            except Exception:
+                pass
+        else:
+            self.kill()

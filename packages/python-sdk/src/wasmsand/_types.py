@@ -7,6 +7,8 @@ class CommandResult:
     stderr: str
     exit_code: int
     execution_time_ms: float
+    truncated: dict[str, bool] | None = None
+    error_class: str | None = None
 
 
 @dataclass
