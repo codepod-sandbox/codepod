@@ -223,3 +223,33 @@ describe('file count limit', () => {
     }
   });
 });
+
+describe('cowClone option propagation', () => {
+  it('propagates fsLimitBytes to cloned VFS', () => {
+    const vfs = new VFS({ fsLimitBytes: 1024 });
+    vfs.writeFile('/tmp/a.txt', new Uint8Array(800));
+    const child = vfs.cowClone();
+    expect(() => {
+      child.writeFile('/tmp/b.txt', new Uint8Array(300));
+    }).toThrow(/ENOSPC/);
+  });
+
+  it('propagates maxFileCount to cloned VFS', () => {
+    const vfs = new VFS({ maxFileCount: 2 });
+    vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
+    vfs.writeFile('/tmp/b.txt', new Uint8Array(1));
+    const child = vfs.cowClone();
+    expect(() => {
+      child.writeFile('/tmp/c.txt', new Uint8Array(1));
+    }).toThrow(/ENOSPC/);
+  });
+
+  it('propagates writablePaths to cloned VFS', () => {
+    const vfs = new VFS({ writablePaths: ['/tmp'] });
+    const child = vfs.cowClone();
+    expect(() => {
+      child.writeFile('/home/user/test.txt', new Uint8Array(1));
+    }).toThrow(/EROFS/);
+    child.writeFile('/tmp/test.txt', new Uint8Array(1)); // should succeed
+  });
+});

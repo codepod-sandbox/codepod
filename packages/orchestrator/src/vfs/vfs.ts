@@ -78,16 +78,22 @@ export class VFS {
   }
 
   /** Create a VFS from an already-populated root (used by cowClone). */
-  private static fromRoot(root: DirInode): VFS {
+  private static fromRoot(root: DirInode, options?: {
+    fsLimitBytes?: number;
+    totalBytes?: number;
+    maxFileCount?: number;
+    fileCount?: number;
+    writablePaths?: string[];
+  }): VFS {
     const vfs = Object.create(VFS.prototype) as VFS;
     vfs.root = root;
     vfs.snapshots = new Map();
     vfs.nextSnapId = 1;
-    vfs.totalBytes = 0;
-    vfs.fsLimitBytes = undefined;
-    vfs.fileCount = 0;
-    vfs.maxFileCount = undefined;
-    vfs.writablePaths = undefined;
+    vfs.totalBytes = options?.totalBytes ?? 0;
+    vfs.fsLimitBytes = options?.fsLimitBytes;
+    vfs.maxFileCount = options?.maxFileCount;
+    vfs.fileCount = options?.fileCount ?? 0;
+    vfs.writablePaths = options?.writablePaths;
     vfs.initializing = false;
     return vfs;
   }
@@ -475,6 +481,12 @@ export class VFS {
    * to the other — natural COW semantics.
    */
   cowClone(): VFS {
-    return VFS.fromRoot(deepCloneRoot(this.root));
+    return VFS.fromRoot(deepCloneRoot(this.root), {
+      fsLimitBytes: this.fsLimitBytes,
+      totalBytes: this.totalBytes,
+      maxFileCount: this.maxFileCount,
+      fileCount: this.fileCount,
+      writablePaths: this.writablePaths,
+    });
   }
 }
