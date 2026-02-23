@@ -25,6 +25,8 @@ export interface VfsOptions {
    * Defaults to ['/home/user', '/tmp']. Set to undefined to disable.
    */
   writablePaths?: string[] | undefined;
+  /** Maximum number of files/directories. Undefined = no limit. */
+  fileCount?: number;
 }
 
 /**
@@ -58,6 +60,8 @@ export class VFS {
   private nextSnapId = 1;
   private totalBytes = 0;
   private fsLimitBytes: number | undefined;
+  private fileCountLimit: number | undefined;
+  private currentFileCount = 0;
   /** Writable path prefixes. Writes outside these paths are rejected with EROFS. */
   private writablePaths: string[] | undefined;
   /** When true, bypass writable-path checks (used during init). */
@@ -66,6 +70,7 @@ export class VFS {
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
     this.fsLimitBytes = options?.fsLimitBytes;
+    this.fileCountLimit = options?.fileCount;
     this.writablePaths = options?.writablePaths !== undefined ? options.writablePaths : ['/home/user', '/tmp'];
     this.initializing = true;
     this.initDefaultLayout();
@@ -118,6 +123,7 @@ export class VFS {
       } else {
         const newDir = createDirInode();
         current.children.set(segment, newDir);
+        this.currentFileCount++;
         current = newDir;
       }
     }
@@ -285,7 +291,11 @@ export class VFS {
       existing.content = data;
       existing.metadata.mtime = new Date();
     } else {
+      if (this.fileCountLimit !== undefined && this.currentFileCount >= this.fileCountLimit) {
+        throw new VfsError('ENOSPC', 'file count limit exceeded');
+      }
       parent.children.set(name, createFileInode(data));
+      this.currentFileCount++;
     }
     this.totalBytes += delta;
   }
@@ -298,7 +308,12 @@ export class VFS {
       throw new VfsError('EEXIST', `file exists: ${path}`);
     }
 
+    if (this.fileCountLimit !== undefined && this.currentFileCount >= this.fileCountLimit) {
+      throw new VfsError('ENOSPC', 'file count limit exceeded');
+    }
+
     parent.children.set(name, createDirInode());
+    this.currentFileCount++;
   }
 
   mkdirp(path: string): void {
@@ -357,6 +372,7 @@ export class VFS {
       this.totalBytes -= child.content.byteLength;
     }
     parent.children.delete(name);
+    this.currentFileCount--;
   }
 
   rmdir(path: string): void {

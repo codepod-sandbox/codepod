@@ -260,6 +260,28 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('file count limit', () => {
+    it('rejects file creation when limit reached', async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { fileCount: 30 } },
+      });
+      // Default layout creates some inodes; try to fill up to limit
+      let threw = false;
+      for (let i = 0; i < 50; i++) {
+        try {
+          sandbox.writeFile(`/tmp/f${i}.txt`, new TextEncoder().encode('x'));
+        } catch {
+          threw = true;
+          break;
+        }
+      }
+      expect(threw).toBe(true);
+    });
+  });
+
   describe('command size limit', () => {
     it('rejects command exceeding commandBytes limit', async () => {
       sandbox = await Sandbox.create({

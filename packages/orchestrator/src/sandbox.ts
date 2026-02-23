@@ -81,7 +81,7 @@ export class Sandbox {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
-    const vfs = new VFS({ fsLimitBytes });
+    const vfs = new VFS({ fsLimitBytes, fileCount: options.security?.limits?.fileCount });
     const gateway = options.network ? new NetworkGateway(options.network) : undefined;
 
     // Create bridge for WASI socket access when network policy exists
