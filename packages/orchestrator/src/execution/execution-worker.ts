@@ -1,0 +1,110 @@
+/**
+ * Execution Worker entrypoint.
+ *
+ * Runs inside a Worker thread. Receives init + run messages from the main
+ * thread, executes commands via ShellRunner, and posts results back.
+ * VFS access goes through VfsProxy (SAB + Atomics).
+ */
+
+import { parentPort } from 'node:worker_threads';
+import { VfsProxy } from './vfs-proxy.js';
+import { ProcessManager } from '../process/manager.js';
+import { ShellRunner } from '../shell/shell-runner.js';
+import type { RunResult } from '../shell/shell-runner.js';
+import { CancelledError } from '../security.js';
+
+if (!parentPort) throw new Error('Must run as Worker thread');
+
+interface InitMessage {
+  type: 'init';
+  sab: SharedArrayBuffer;
+  wasmDir: string;
+  shellWasmPath: string;
+  toolRegistry: [string, string][];
+  networkEnabled: boolean;
+}
+
+interface RunMessage {
+  type: 'run';
+  command: string;
+  env: [string, string][];
+  timeoutMs?: number;
+}
+
+let runner: ShellRunner | null = null;
+
+parentPort.on('message', async (msg: InitMessage | RunMessage) => {
+  if (msg.type === 'init') {
+    const { sab, wasmDir, shellWasmPath, toolRegistry } = msg;
+
+    const { NodeAdapter } = await import('../platform/node-adapter.js');
+    const adapter = new NodeAdapter();
+
+    const vfs = new VfsProxy(sab, { parentPort: parentPort! });
+    const mgr = new ProcessManager(vfs, adapter);
+
+    for (const [name, path] of toolRegistry) {
+      mgr.registerTool(name, path);
+    }
+
+    runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, undefined, {
+      skipPopulateBin: true,
+    });
+
+    parentPort!.postMessage({ type: 'ready' });
+    return;
+  }
+
+  if (msg.type === 'run') {
+    if (!runner) {
+      parentPort!.postMessage({
+        type: 'result',
+        result: { exitCode: 1, stdout: '', stderr: 'Worker not initialized\n', executionTimeMs: 0 },
+      });
+      return;
+    }
+
+    // Apply env vars from main thread
+    for (const [k, v] of msg.env) {
+      runner.setEnv(k, v);
+    }
+
+    // Set deadline for cooperative cancellation
+    if (msg.timeoutMs !== undefined) {
+      runner.resetCancel(msg.timeoutMs);
+    }
+
+    try {
+      const result = await runner.run(msg.command);
+      const envMap = runner.getEnvMap();
+      parentPort!.postMessage({
+        type: 'result',
+        result,
+        env: Array.from(envMap.entries()),
+      });
+    } catch (err) {
+      if (err instanceof CancelledError) {
+        parentPort!.postMessage({
+          type: 'result',
+          result: {
+            exitCode: 124,
+            stdout: '',
+            stderr: `command ${err.reason.toLowerCase()}\n`,
+            executionTimeMs: 0,
+            errorClass: err.reason,
+          },
+        });
+      } else {
+        parentPort!.postMessage({
+          type: 'result',
+          result: {
+            exitCode: 1,
+            stdout: '',
+            stderr: `Worker execution error: ${(err as Error).message}\n`,
+            executionTimeMs: 0,
+          },
+        });
+      }
+    }
+  }
+});

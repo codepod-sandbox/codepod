@@ -129,6 +129,7 @@ export class ShellRunner {
     adapter: PlatformAdapter,
     shellWasmPath: string,
     gateway?: NetworkGateway,
+    options?: { skipPopulateBin?: boolean },
   ) {
     this.vfs = vfs;
     this.mgr = mgr;
@@ -138,7 +139,9 @@ export class ShellRunner {
 
     // Populate /bin with stubs for registered tools + python3 so that
     // `ls /bin` and `which <tool>` work as expected.
-    this.vfs.withWriteAccess(() => this.populateBin());
+    if (!options?.skipPopulateBin) {
+      this.vfs.withWriteAccess(() => this.populateBin());
+    }
 
     // Set default environment variables so the shell starts in /home/user.
     this.env.set('HOME', '/home/user');
