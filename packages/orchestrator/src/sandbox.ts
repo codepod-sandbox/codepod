@@ -174,15 +174,17 @@ export class Sandbox {
   }
 
   private applyOutputLimits(result: RunResult): RunResult {
-    const stdoutOver = result.stdout.length > this.limits.stdoutBytes;
-    const stderrOver = result.stderr.length > this.limits.stderrBytes;
+    const stdoutBytes = Buffer.byteLength(result.stdout);
+    const stderrBytes = Buffer.byteLength(result.stderr);
+    const stdoutOver = stdoutBytes > this.limits.stdoutBytes;
+    const stderrOver = stderrBytes > this.limits.stderrBytes;
 
     if (!stdoutOver && !stderrOver) return result;
 
     return {
       ...result,
-      stdout: stdoutOver ? result.stdout.slice(0, this.limits.stdoutBytes) : result.stdout,
-      stderr: stderrOver ? result.stderr.slice(0, this.limits.stderrBytes) : result.stderr,
+      stdout: stdoutOver ? Buffer.from(result.stdout).subarray(0, this.limits.stdoutBytes).toString() : result.stdout,
+      stderr: stderrOver ? Buffer.from(result.stderr).subarray(0, this.limits.stderrBytes).toString() : result.stderr,
       truncated: { stdout: stdoutOver, stderr: stderrOver },
     };
   }

@@ -80,11 +80,18 @@ async function main(): Promise<void> {
           timeoutMs,
           fsLimitBytes,
           shellWasmPath,
+          limits,
         } = params as {
           wasmDir?: string;
           timeoutMs?: number;
           fsLimitBytes?: number;
           shellWasmPath?: string;
+          limits?: {
+            stdoutBytes?: number;
+            stderrBytes?: number;
+            commandBytes?: number;
+            fileCount?: number;
+          };
         };
 
         if (!wasmDir || typeof wasmDir !== 'string') {
@@ -98,6 +105,7 @@ async function main(): Promise<void> {
           timeoutMs,
           fsLimitBytes,
           shellWasmPath,
+          limits,
         });
 
         dispatcher = new Dispatcher(sandbox);
