@@ -19,6 +19,7 @@ import { SOCKET_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from './network/socket-shim
 import type { SecurityOptions, AuditEventHandler } from './security.js';
 import { CancelledError } from './security.js';
 import type { WorkerExecutor } from './execution/worker-executor.js';
+import { PackageManager } from './pkg/manager.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -119,6 +120,26 @@ export class Sandbox {
     // Apply memory limit
     if (options.security?.limits?.memoryBytes !== undefined) {
       runner.setMemoryLimit(options.security.limits.memoryBytes);
+    }
+
+    // Wire PackageManager if packagePolicy is configured
+    if (options.security?.packagePolicy) {
+      const packageManager = new PackageManager(vfs, options.security.packagePolicy);
+      runner.setPackageManager(packageManager);
+    }
+
+    // Wire audit handler so builtins can emit audit events
+    if (options.security?.onAuditEvent) {
+      const sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      const handler = options.security.onAuditEvent;
+      runner.setAuditHandler((type: string, data?: Record<string, unknown>) => {
+        handler({
+          type,
+          sessionId,
+          timestamp: Date.now(),
+          ...data,
+        });
+      });
     }
 
     // Bootstrap Python socket shim when networking is enabled

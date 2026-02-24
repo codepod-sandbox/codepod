@@ -44,6 +44,22 @@ export class PackageManager {
     this.loadMetadata();
   }
 
+  /** Check whether a URL's host is allowed by the package policy. Throws PkgError if denied. */
+  checkHost(sourceUrl: string): void {
+    if (!this.policy.enabled) {
+      throw new PkgError('E_PKG_DISABLED', 'Package installation is disabled');
+    }
+    if (this.policy.allowedHosts !== undefined) {
+      const host = new URL(sourceUrl).hostname;
+      if (!this.matchesHostList(host, this.policy.allowedHosts)) {
+        throw new PkgError(
+          'E_PKG_HOST_DENIED',
+          `Host '${host}' is not in the allowed hosts list`,
+        );
+      }
+    }
+  }
+
   /** Install a WASI binary package into the VFS. */
   install(name: string, wasmBytes: Uint8Array, sourceUrl: string): void {
     if (!this.policy.enabled) {
