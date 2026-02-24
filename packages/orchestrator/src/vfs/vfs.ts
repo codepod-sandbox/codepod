@@ -71,6 +71,8 @@ export class VFS {
   private initializing = false;
   /** Mounted virtual providers keyed by mount path (e.g. '/dev', '/proc'). */
   private providers: Map<string, VirtualProvider> = new Map();
+  /** Optional callback invoked after mutating VFS operations. */
+  private onChangeCallback: (() => void) | null = null;
 
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
@@ -128,6 +130,18 @@ export class VFS {
   /** Register a virtual provider at the given mount path. */
   registerProvider(mountPath: string, provider: VirtualProvider): void {
     this.providers.set(mountPath, provider);
+  }
+
+  /** Set a callback to be invoked after mutating VFS operations. */
+  setOnChange(cb: (() => void) | null): void {
+    this.onChangeCallback = cb;
+  }
+
+  /** Notify the onChange callback if set and not during init/restore. */
+  private notifyChange(): void {
+    if (!this.initializing && this.onChangeCallback) {
+      this.onChangeCallback();
+    }
   }
 
   /**
@@ -378,6 +392,7 @@ export class VFS {
       this.currentFileCount++;
     }
     this.totalBytes += delta;
+    this.notifyChange();
   }
 
   mkdir(path: string): void {
@@ -391,6 +406,7 @@ export class VFS {
     this.assertFileCountLimit();
     parent.children.set(name, createDirInode());
     this.currentFileCount++;
+    this.notifyChange();
   }
 
   mkdirp(path: string): void {
@@ -416,6 +432,7 @@ export class VFS {
         current = newDir;
       }
     }
+    this.notifyChange();
   }
 
   readdir(path: string): DirEntry[] {
@@ -457,6 +474,7 @@ export class VFS {
     }
     parent.children.delete(name);
     this.currentFileCount--;
+    this.notifyChange();
   }
 
   rmdir(path: string): void {
@@ -476,6 +494,7 @@ export class VFS {
 
     parent.children.delete(name);
     this.currentFileCount--;
+    this.notifyChange();
   }
 
   rename(oldPath: string, newPath: string): void {
@@ -492,6 +511,7 @@ export class VFS {
 
     oldParent.children.delete(oldName);
     newParent.children.set(newName, child);
+    this.notifyChange();
   }
 
   symlink(target: string, path: string): void {
@@ -505,12 +525,14 @@ export class VFS {
     this.assertFileCountLimit();
     parent.children.set(name, createSymlinkInode(target));
     this.currentFileCount++;
+    this.notifyChange();
   }
 
   chmod(path: string, mode: number): void {
     const inode = this.resolve(path);
     inode.metadata.permissions = mode;
     inode.metadata.ctime = new Date();
+    this.notifyChange();
   }
 
   readlink(path: string): string {
@@ -543,6 +565,7 @@ export class VFS {
       throw new Error(`no such snapshot: ${id}`);
     }
     this.root = deepCloneRoot(saved);
+    this.notifyChange();
   }
 
   /**

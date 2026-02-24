@@ -22,6 +22,8 @@ import { CancelledError } from './security.js';
 import type { WorkerExecutor } from './execution/worker-executor.js';
 import { PackageManager } from './pkg/manager.js';
 import { exportState as serializerExportState, importState as serializerImportState } from './persistence/serializer.js';
+import type { PersistenceOptions } from './persistence/types.js';
+import { PersistenceManager } from './persistence/manager.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -38,6 +40,8 @@ export interface SandboxOptions {
   network?: NetworkPolicy;
   /** Security policy and limits. */
   security?: SecurityOptions;
+  /** Persistence configuration. Default mode is 'ephemeral' (no persistence). */
+  persistence?: PersistenceOptions;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -74,6 +78,7 @@ export class Sandbox {
   private sessionId: string;
   private auditHandler: AuditEventHandler | undefined;
   private workerExecutor: WorkerExecutor | null = null;
+  private persistenceManager: PersistenceManager | null = null;
 
   private constructor(parts: SandboxParts) {
     this.vfs = parts.vfs;
@@ -169,6 +174,25 @@ export class Sandbox {
       mgr, bridge, networkPolicy: options.network,
       security: options.security, workerExecutor,
     });
+
+    // Wire persistence if configured
+    const pMode = options.persistence?.mode ?? 'ephemeral';
+    if (pMode !== 'ephemeral') {
+      const backend = options.persistence?.backend ?? await Sandbox.detectBackend();
+      const pm = new PersistenceManager(
+        backend, vfs, options.persistence,
+        () => runner.getEnvMap(),
+        (env) => runner.setEnvMap(env),
+      );
+      sb.persistenceManager = pm;
+
+      if (pMode === 'persistent') {
+        await pm.load();
+        pm.startAutosave(vfs);
+      }
+      // 'session' mode: user calls save()/load() explicitly
+    }
+
     sb.audit('sandbox.create');
     return sb;
   }
@@ -180,6 +204,15 @@ export class Sandbox {
     }
     const { BrowserAdapter } = await import('./platform/browser-adapter.js');
     return new BrowserAdapter();
+  }
+
+  private static async detectBackend(): Promise<import('./persistence/backend.js').PersistenceBackend> {
+    if (typeof globalThis.process !== 'undefined' && globalThis.process.versions?.node) {
+      const { FsBackend } = await import('./persistence/fs-backend.js');
+      return new FsBackend();
+    }
+    const { IdbBackend } = await import('./persistence/idb-backend.js');
+    return new IdbBackend();
   }
 
   private static async createNetworkBridge(
@@ -400,6 +433,33 @@ export class Sandbox {
     }
   }
 
+  /** Persist current state to the configured backend. Requires persistence mode. */
+  async saveState(): Promise<void> {
+    this.assertAlive();
+    if (!this.persistenceManager) {
+      throw new Error('Persistence not configured. Set persistence.mode to "session" or "persistent".');
+    }
+    await this.persistenceManager.save();
+  }
+
+  /** Load persisted state from the configured backend. Returns true if state was restored. */
+  async loadState(): Promise<boolean> {
+    this.assertAlive();
+    if (!this.persistenceManager) {
+      throw new Error('Persistence not configured. Set persistence.mode to "session" or "persistent".');
+    }
+    return this.persistenceManager.load();
+  }
+
+  /** Delete persisted state from the configured backend. */
+  async clearPersistedState(): Promise<void> {
+    this.assertAlive();
+    if (!this.persistenceManager) {
+      throw new Error('Persistence not configured. Set persistence.mode to "session" or "persistent".');
+    }
+    await this.persistenceManager.clear();
+  }
+
   async fork(): Promise<Sandbox> {
     this.assertAlive();
     const childVfs = this.vfs.cowClone();
@@ -443,6 +503,8 @@ export class Sandbox {
   destroy(): void {
     this.audit('sandbox.destroy');
     this.destroyed = true;
+    // Fire-and-forget: dispose is async but destroy is sync
+    this.persistenceManager?.dispose().catch(() => {});
     this.workerExecutor?.dispose();
     this.bridge?.dispose();
   }

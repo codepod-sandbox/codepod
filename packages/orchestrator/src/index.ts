@@ -28,6 +28,13 @@ export { PackageManager, PkgError } from './pkg/manager.js';
 export type { PackageInfo } from './pkg/manager.js';
 export type { PackagePolicy } from './security.js';
 export type { PersistenceOptions } from './persistence/types.js';
+export type { PersistenceBackend } from './persistence/backend.js';
+export { MemoryBackend } from './persistence/backend.js';
+export { IdbBackend } from './persistence/idb-backend.js';
+export { PersistenceManager } from './persistence/manager.js';
+export type { PersistenceManagerOptions } from './persistence/manager.js';
 export { exportState, importState } from './persistence/serializer.js';
+// FsBackend not re-exported — imports node:fs which breaks browser bundlers.
+// Node consumers: import { FsBackend } from '@wasmsand/sandbox/node'
 export { CommandHistory } from './shell/history.js';
 export type { HistoryEntry } from './shell/history.js';

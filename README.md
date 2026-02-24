@@ -152,7 +152,7 @@ The package manager is disabled by default. Enable it with `packagePolicy.enable
 
 Export and import the full sandbox state (filesystem + environment variables) as an opaque binary blob. Useful for long-running agent workflows that need to survive restarts.
 
-**TypeScript:**
+**Manual export/import:**
 
 ```typescript
 // Save state
@@ -162,6 +162,42 @@ const blob = sandbox.exportState();
 const sandbox2 = await Sandbox.create({ wasmDir: './wasm' });
 sandbox2.importState(blob);
 ```
+
+**Automatic persistence (persistent mode):**
+
+State is automatically saved to IndexedDB (browser) or filesystem (Node) with debounced writes:
+
+```typescript
+const sandbox = await Sandbox.create({
+  wasmDir: './wasm',
+  persistence: { mode: 'persistent', namespace: 'my-agent' },
+});
+
+// All VFS changes are auto-saved after a 1s debounce.
+// On next create() with the same namespace, state is auto-loaded.
+sandbox.writeFile('/tmp/work.txt', new TextEncoder().encode('progress'));
+
+// Clean up persisted state when done
+await sandbox.clearPersistedState();
+```
+
+**Session mode (manual save/load with backend):**
+
+```typescript
+const sandbox = await Sandbox.create({
+  wasmDir: './wasm',
+  persistence: { mode: 'session', namespace: 'my-session' },
+});
+
+// Explicitly save and load — no autosave
+await sandbox.saveState();
+await sandbox.loadState();
+```
+
+Persistence modes:
+- `ephemeral` (default) — no persistence, zero overhead
+- `session` — manual `saveState()`/`loadState()` with auto-detected backend
+- `persistent` — auto-load on create, debounced auto-save on VFS changes
 
 **Python:**
 

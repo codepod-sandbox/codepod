@@ -13,6 +13,21 @@
 import type { VfsLike } from '../vfs/vfs-like.js';
 import type { SerializedState } from './types.js';
 
+/** Encode bytes to base64 (works in both Node and browser). */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/** Decode base64 to bytes (works in both Node and browser). */
+function fromBase64(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 /** Magic bytes identifying a serialized state blob. */
 const MAGIC = new Uint8Array([0x57, 0x53, 0x4e, 0x44]); // "WSND"
 
@@ -102,8 +117,8 @@ export function importState(vfs: VfsLike, blob: Uint8Array): { env?: Map<string,
     }
     for (const entry of state.files) {
       if (entry.type === 'file') {
-        const content = Buffer.from(entry.data, 'base64');
-        vfs.writeFile(entry.path, new Uint8Array(content));
+        const content = fromBase64(entry.data);
+        vfs.writeFile(entry.path, content);
       }
     }
   });
@@ -140,7 +155,7 @@ function walkTree(
       walkTree(vfs, childPath, out);
     } else if (entry.type === 'file') {
       const content = vfs.readFile(childPath);
-      const b64 = Buffer.from(content).toString('base64');
+      const b64 = toBase64(content);
       out.push({ path: childPath, data: b64, type: 'file' });
     }
     // Skip symlinks — not part of the persistence spec

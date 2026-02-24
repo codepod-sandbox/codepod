@@ -12,6 +12,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+.playwright-mcp/
 
 # Build artifacts
 packages/python-sdk/src/wasmsand/_bundled/

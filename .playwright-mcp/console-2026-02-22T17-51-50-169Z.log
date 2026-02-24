@@ -1,4 +1,0 @@
-[     258ms] Error: Module "node:fs/promises" has been externalized for browser compatibility. Cannot access "node:fs/promises.readFile" in client code.  See https://vite.dev/guide/troubleshooting.html#module-externalized-for-browser-compatibility for more details.
-    at Object.get (http://localhost:5199/@id/__vite-browser-external:node:fs/promises:3:13)
-    at http://localhost:5199/@fs/Users/sunny/work/wasmsand/.worktrees/browser-tester/packages/orchestrator/src/platform/node-adapter.ts:1:150
-[     252ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://localhost:5199/favicon.ico:0

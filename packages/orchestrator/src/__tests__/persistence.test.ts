@@ -1,12 +1,18 @@
 /**
- * Tests for VFS state persistence: serializer unit tests + Sandbox integration.
+ * Tests for VFS state persistence: serializer, backends, manager, and Sandbox integration.
  */
-import { describe, it, expect, afterEach } from 'bun:test';
+import { describe, it, expect, afterEach, beforeEach } from 'bun:test';
 import { resolve } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { VFS } from '../vfs/vfs.js';
 import { exportState, importState } from '../persistence/serializer.js';
 import { Sandbox } from '../sandbox.js';
 import { NodeAdapter } from '../platform/node-adapter.js';
+import { MemoryBackend } from '../persistence/backend.js';
+import { FsBackend } from '../persistence/fs-backend.js';
+import { PersistenceManager } from '../persistence/manager.js';
 
 const WASM_DIR = resolve(import.meta.dirname, '../platform/__tests__/fixtures');
 const SHELL_WASM = resolve(import.meta.dirname, '../shell/__tests__/fixtures/wasmsand-shell.wasm');
@@ -208,5 +214,354 @@ describe('Sandbox exportState / importState', () => {
     sandbox.destroy();
     expect(() => sandbox.exportState()).toThrow(/destroyed/);
     expect(() => sandbox.importState(new Uint8Array(0))).toThrow(/destroyed/);
+  });
+});
+
+describe('VFS onChange hook', () => {
+  it('fires callback on writeFile', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    let called = 0;
+    vfs.setOnChange(() => called++);
+    vfs.writeFile('/tmp/test.txt', enc('hello'));
+    expect(called).toBe(1);
+  });
+
+  it('fires callback on mkdir, unlink, rmdir, rename, symlink, chmod', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    let called = 0;
+    vfs.setOnChange(() => called++);
+
+    vfs.mkdir('/tmp/subdir');          // +1
+    vfs.writeFile('/tmp/a.txt', enc('a')); // +1
+    vfs.rename('/tmp/a.txt', '/tmp/b.txt'); // +1
+    vfs.chmod('/tmp/b.txt', 0o644);   // +1
+    vfs.symlink('/tmp/b.txt', '/tmp/link'); // +1
+    vfs.unlink('/tmp/link');           // +1
+    vfs.unlink('/tmp/b.txt');          // +1
+    vfs.rmdir('/tmp/subdir');          // +1
+
+    expect(called).toBe(8);
+  });
+
+  it('fires callback on mkdirp', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    let called = 0;
+    vfs.setOnChange(() => called++);
+    vfs.mkdirp('/tmp/a/b/c');
+    expect(called).toBe(1);
+  });
+
+  it('fires callback on restore', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    const snapId = vfs.snapshot();
+    let called = 0;
+    vfs.setOnChange(() => called++);
+    vfs.restore(snapId);
+    expect(called).toBe(1);
+  });
+
+  it('does NOT fire during constructor init', () => {
+    let called = 0;
+    // Constructor creates default dirs — onChange should not fire for those
+    const vfs = new VFS({ writablePaths: undefined });
+    vfs.setOnChange(() => called++);
+    // Reading should not trigger
+    vfs.readFile('/dev/null');
+    vfs.readdir('/tmp');
+    vfs.stat('/tmp');
+    expect(called).toBe(0);
+  });
+
+  it('does NOT fire during withWriteAccess', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    let called = 0;
+    vfs.setOnChange(() => called++);
+    vfs.withWriteAccess(() => {
+      vfs.writeFile('/tmp/init.txt', enc('init'));
+    });
+    expect(called).toBe(0);
+  });
+
+  it('can be cleared by passing null', () => {
+    const vfs = new VFS({ writablePaths: undefined });
+    let called = 0;
+    vfs.setOnChange(() => called++);
+    vfs.writeFile('/tmp/a.txt', enc('a'));
+    expect(called).toBe(1);
+    vfs.setOnChange(null);
+    vfs.writeFile('/tmp/b.txt', enc('b'));
+    expect(called).toBe(1); // unchanged
+  });
+});
+
+describe('FsBackend', () => {
+  let tmpDir: string;
+  let backend: FsBackend;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'wasmsand-test-'));
+    backend = new FsBackend(tmpDir);
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('save/load round-trip', async () => {
+    const data = new Uint8Array([1, 2, 3, 4, 5]);
+    await backend.save('test-ns', data);
+    const loaded = await backend.load('test-ns');
+    expect(loaded).not.toBeNull();
+    expect(Array.from(loaded!)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('load returns null for missing namespace', async () => {
+    const loaded = await backend.load('nonexistent');
+    expect(loaded).toBeNull();
+  });
+
+  it('delete removes persisted state', async () => {
+    await backend.save('del-test', new Uint8Array([99]));
+    expect(await backend.load('del-test')).not.toBeNull();
+    await backend.delete('del-test');
+    expect(await backend.load('del-test')).toBeNull();
+  });
+
+  it('delete is idempotent for missing namespace', async () => {
+    // Should not throw
+    await backend.delete('never-existed');
+  });
+
+  it('sanitizes namespace to safe characters', async () => {
+    const data = new Uint8Array([42]);
+    await backend.save('ns/with:bad chars!', data);
+    const loaded = await backend.load('ns/with:bad chars!');
+    expect(loaded).not.toBeNull();
+    expect(Array.from(loaded!)).toEqual([42]);
+  });
+
+  it('isolates different namespaces', async () => {
+    await backend.save('ns-a', new Uint8Array([1]));
+    await backend.save('ns-b', new Uint8Array([2]));
+    expect(Array.from((await backend.load('ns-a'))!)).toEqual([1]);
+    expect(Array.from((await backend.load('ns-b'))!)).toEqual([2]);
+  });
+});
+
+describe('PersistenceManager', () => {
+  it('save/load round-trip with MemoryBackend', async () => {
+    const backend = new MemoryBackend();
+    const vfs = new VFS({ writablePaths: undefined });
+    const env = new Map([['FOO', 'bar']]);
+    let currentEnv = env;
+
+    const pm = new PersistenceManager(backend, vfs, { namespace: 'test' },
+      () => currentEnv,
+      (e) => { currentEnv = e; },
+    );
+
+    vfs.writeFile('/tmp/hello.txt', enc('world'));
+    await pm.save();
+
+    // Create a fresh VFS and load
+    const vfs2 = new VFS({ writablePaths: undefined });
+    let env2 = new Map<string, string>();
+    const pm2 = new PersistenceManager(backend, vfs2, { namespace: 'test' },
+      () => env2,
+      (e) => { env2 = e; },
+    );
+
+    const restored = await pm2.load();
+    expect(restored).toBe(true);
+    expect(dec(vfs2.readFile('/tmp/hello.txt'))).toBe('world');
+    expect(env2.get('FOO')).toBe('bar');
+  });
+
+  it('load returns false when no persisted state exists', async () => {
+    const backend = new MemoryBackend();
+    const vfs = new VFS({ writablePaths: undefined });
+    const pm = new PersistenceManager(backend, vfs, { namespace: 'empty' },
+      () => new Map(),
+      () => {},
+    );
+    expect(await pm.load()).toBe(false);
+  });
+
+  it('clear deletes persisted state', async () => {
+    const backend = new MemoryBackend();
+    const vfs = new VFS({ writablePaths: undefined });
+    const pm = new PersistenceManager(backend, vfs, { namespace: 'clear-test' },
+      () => new Map(),
+      () => {},
+    );
+    await pm.save();
+    expect(await backend.load('clear-test')).not.toBeNull();
+    await pm.clear();
+    expect(await backend.load('clear-test')).toBeNull();
+  });
+
+  it('autosave fires after debounce', async () => {
+    const backend = new MemoryBackend();
+    const vfs = new VFS({ writablePaths: undefined });
+    const pm = new PersistenceManager(backend, vfs, { namespace: 'auto', autosaveMs: 50 },
+      () => new Map(),
+      () => {},
+    );
+    pm.startAutosave(vfs);
+
+    vfs.writeFile('/tmp/auto.txt', enc('triggered'));
+
+    // Should not be saved yet (debounce)
+    expect(await backend.load('auto')).toBeNull();
+
+    // Wait for debounce to fire
+    await new Promise(r => setTimeout(r, 120));
+
+    const saved = await backend.load('auto');
+    expect(saved).not.toBeNull();
+
+    await pm.dispose();
+  });
+
+  it('dispose flushes pending save', async () => {
+    const backend = new MemoryBackend();
+    const vfs = new VFS({ writablePaths: undefined });
+    const pm = new PersistenceManager(backend, vfs, { namespace: 'dispose-flush', autosaveMs: 5000 },
+      () => new Map(),
+      () => {},
+    );
+    pm.startAutosave(vfs);
+
+    vfs.writeFile('/tmp/flush.txt', enc('flush-me'));
+
+    // Dispose immediately — should flush
+    await pm.dispose();
+
+    const saved = await backend.load('dispose-flush');
+    expect(saved).not.toBeNull();
+  });
+
+  it('namespace isolation', async () => {
+    const backend = new MemoryBackend();
+
+    const vfs1 = new VFS({ writablePaths: undefined });
+    vfs1.writeFile('/tmp/f.txt', enc('ns1'));
+    const pm1 = new PersistenceManager(backend, vfs1, { namespace: 'ns1' },
+      () => new Map(),
+      () => {},
+    );
+    await pm1.save();
+
+    const vfs2 = new VFS({ writablePaths: undefined });
+    vfs2.writeFile('/tmp/f.txt', enc('ns2'));
+    const pm2 = new PersistenceManager(backend, vfs2, { namespace: 'ns2' },
+      () => new Map(),
+      () => {},
+    );
+    await pm2.save();
+
+    // Load ns1 into fresh VFS
+    const vfsR = new VFS({ writablePaths: undefined });
+    const pmR = new PersistenceManager(backend, vfsR, { namespace: 'ns1' },
+      () => new Map(),
+      () => {},
+    );
+    await pmR.load();
+    expect(dec(vfsR.readFile('/tmp/f.txt'))).toBe('ns1');
+  });
+
+  it('gracefully handles backend errors on load', async () => {
+    const failBackend: MemoryBackend & { load: any } = new MemoryBackend();
+    failBackend.load = async () => { throw new Error('disk on fire'); };
+    const vfs = new VFS({ writablePaths: undefined });
+    const pm = new PersistenceManager(failBackend, vfs, { namespace: 'fail' },
+      () => new Map(),
+      () => {},
+    );
+    // Should not throw, should return false
+    expect(await pm.load()).toBe(false);
+  });
+});
+
+describe('Sandbox persistent mode integration', () => {
+  it('persistent mode: write, autosave, restore in new sandbox', async () => {
+    const backend = new MemoryBackend();
+
+    const sb1 = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+      persistence: { mode: 'persistent', namespace: 'integ', autosaveMs: 50, backend },
+    });
+
+    sb1.writeFile('/tmp/persist.txt', enc('persisted'));
+    sb1.setEnv('PERSIST_KEY', 'persist_val');
+
+    // Wait for autosave debounce
+    await new Promise(r => setTimeout(r, 120));
+    sb1.destroy();
+
+    // Create a new sandbox with same backend/namespace — should auto-load
+    const sb2 = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+      persistence: { mode: 'persistent', namespace: 'integ', backend },
+    });
+    try {
+      expect(dec(sb2.readFile('/tmp/persist.txt'))).toBe('persisted');
+      expect(sb2.getEnv('PERSIST_KEY')).toBe('persist_val');
+    } finally {
+      sb2.destroy();
+    }
+  });
+
+  it('session mode: manual save/load', async () => {
+    const backend = new MemoryBackend();
+
+    const sb1 = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+      persistence: { mode: 'session', namespace: 'sess', backend },
+    });
+
+    sb1.writeFile('/tmp/session.txt', enc('session-data'));
+    await sb1.saveState();
+    sb1.destroy();
+
+    const sb2 = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+      persistence: { mode: 'session', namespace: 'sess', backend },
+    });
+    try {
+      const restored = await sb2.loadState();
+      expect(restored).toBe(true);
+      expect(dec(sb2.readFile('/tmp/session.txt'))).toBe('session-data');
+    } finally {
+      sb2.destroy();
+    }
+  });
+
+  it('ephemeral mode: save/load throws', async () => {
+    const sb = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+    });
+    try {
+      await expect(sb.saveState()).rejects.toThrow(/not configured/);
+      await expect(sb.loadState()).rejects.toThrow(/not configured/);
+      await expect(sb.clearPersistedState()).rejects.toThrow(/not configured/);
+    } finally {
+      sb.destroy();
+    }
+  });
+
+  it('clearPersistedState removes saved data', async () => {
+    const backend = new MemoryBackend();
+
+    const sb = await Sandbox.create({
+      wasmDir: WASM_DIR, shellWasmPath: SHELL_WASM, adapter: new NodeAdapter(),
+      persistence: { mode: 'session', namespace: 'clear', backend },
+    });
+    sb.writeFile('/tmp/clear.txt', enc('gone'));
+    await sb.saveState();
+    expect(await backend.load('clear')).not.toBeNull();
+    await sb.clearPersistedState();
+    expect(await backend.load('clear')).toBeNull();
+    sb.destroy();
   });
 });
