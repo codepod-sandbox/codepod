@@ -1,3 +1,15 @@
+/** Policy governing WASI binary package installation. */
+export interface PackagePolicy {
+  /** Whether package installation is enabled. */
+  enabled: boolean;
+  /** Allowed source hosts for packages. If set, only these hosts are accepted. */
+  allowedHosts?: string[];
+  /** Maximum size in bytes for a single package. */
+  maxPackageBytes?: number;
+  /** Maximum number of installed packages. */
+  maxInstalledPackages?: number;
+}
+
 /** Security configuration for sandbox instances. */
 export interface SecurityOptions {
   /** Tool allowlist. If set, only these tools can be spawned. */
@@ -8,6 +20,8 @@ export interface SecurityOptions {
   onAuditEvent?: AuditEventHandler;
   /** Enable worker thread execution for hard-kill preemption. Node.js only. */
   hardKill?: boolean;
+  /** Package installation policy. */
+  packagePolicy?: PackagePolicy;
 }
 
 export interface SecurityLimits {
