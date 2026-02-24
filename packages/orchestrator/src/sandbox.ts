@@ -104,29 +104,10 @@ export class Sandbox {
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
     const vfs = new VFS({ fsLimitBytes, fileCount: options.security?.limits?.fileCount });
-    const gateway = options.network ? new NetworkGateway(options.network) : undefined;
-
-    // Create bridge for WASI socket access when network policy exists
-    let bridge: NetworkBridge | undefined;
-    if (gateway) {
-      bridge = new NetworkBridge(gateway);
-      await bridge.start();
-    }
-
+    const { gateway, bridge } = await Sandbox.createNetworkBridge(options.network);
     const mgr = new ProcessManager(vfs, adapter, bridge, options.security?.toolAllowlist);
+    const tools = await Sandbox.registerTools(mgr, adapter, options.wasmDir);
 
-    // Discover and register tools
-    const tools = await adapter.scanTools(options.wasmDir);
-    for (const [name, path] of tools) {
-      mgr.registerTool(name, path);
-    }
-
-    // Register python3 if not already discovered
-    if (!tools.has('python3')) {
-      mgr.registerTool('python3', `${options.wasmDir}/python3.wasm`);
-    }
-
-    // Shell parser wasm
     const shellWasmPath = options.shellWasmPath ?? `${options.wasmDir}/wasmsand-shell.wasm`;
     const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
@@ -188,6 +169,31 @@ export class Sandbox {
     }
     const { BrowserAdapter } = await import('./platform/browser-adapter.js');
     return new BrowserAdapter();
+  }
+
+  private static async createNetworkBridge(
+    policy: NetworkPolicy | undefined,
+  ): Promise<{ gateway?: NetworkGateway; bridge?: NetworkBridge }> {
+    if (!policy) return {};
+    const gateway = new NetworkGateway(policy);
+    const bridge = new NetworkBridge(gateway);
+    await bridge.start();
+    return { gateway, bridge };
+  }
+
+  private static async registerTools(
+    mgr: ProcessManager,
+    adapter: PlatformAdapter,
+    wasmDir: string,
+  ): Promise<Map<string, string>> {
+    const tools = await adapter.scanTools(wasmDir);
+    for (const [name, path] of tools) {
+      mgr.registerTool(name, path);
+    }
+    if (!tools.has('python3')) {
+      mgr.registerTool('python3', `${wasmDir}/python3.wasm`);
+    }
+    return tools;
   }
 
   async run(command: string): Promise<RunResult> {
@@ -326,28 +332,10 @@ export class Sandbox {
   async fork(): Promise<Sandbox> {
     this.assertAlive();
     const childVfs = this.vfs.cowClone();
-
-    // Create a new bridge for the forked sandbox if the parent has network policy
-    let childBridge: NetworkBridge | undefined;
-    let childGateway: NetworkGateway | undefined;
-    if (this.networkPolicy) {
-      childGateway = new NetworkGateway(this.networkPolicy);
-      childBridge = new NetworkBridge(childGateway);
-      await childBridge.start();
-    }
-
-    const childMgr = new ProcessManager(childVfs, this.adapter, childBridge, this.security?.toolAllowlist);
-
-    // Re-register tools from the same wasmDir
-    const tools = await this.adapter.scanTools(this.wasmDir);
-    for (const [name, path] of tools) {
-      childMgr.registerTool(name, path);
-    }
-    if (!tools.has('python3')) {
-      childMgr.registerTool('python3', `${this.wasmDir}/python3.wasm`);
-    }
-
-    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, childGateway);
+    const { gateway, bridge } = await Sandbox.createNetworkBridge(this.networkPolicy);
+    const childMgr = new ProcessManager(childVfs, this.adapter, bridge, this.security?.toolAllowlist);
+    await Sandbox.registerTools(childMgr, this.adapter, this.wasmDir);
+    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, gateway);
 
     // Copy env
     const envMap = this.runner.getEnvMap();
@@ -358,7 +346,7 @@ export class Sandbox {
     return new Sandbox({
       vfs: childVfs, runner: childRunner, timeoutMs: this.timeoutMs,
       adapter: this.adapter, wasmDir: this.wasmDir, shellWasmPath: this.shellWasmPath,
-      mgr: childMgr, bridge: childBridge, networkPolicy: this.networkPolicy,
+      mgr: childMgr, bridge, networkPolicy: this.networkPolicy,
       security: this.security,
     });
   }
