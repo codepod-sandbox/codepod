@@ -117,7 +117,7 @@ export class Sandbox {
     }
 
     // Apply memory limit
-    if (options.security?.limits?.memoryBytes) {
+    if (options.security?.limits?.memoryBytes !== undefined) {
       runner.setMemoryLimit(options.security.limits.memoryBytes);
     }
 
@@ -135,32 +135,10 @@ export class Sandbox {
     }
 
     // Create WorkerExecutor for hard-kill preemption when enabled.
-    let workerExecutor: WorkerExecutor | undefined;
-    if (options.security?.hardKill && adapter.supportsWorkerExecution) {
-      const { WorkerExecutor: WE } = await import('./execution/worker-executor.js');
-      const toolRegistry: [string, string][] = [];
-      for (const [name, path] of tools) {
-        toolRegistry.push([name, path]);
-      }
-      if (!tools.has('python3')) {
-        toolRegistry.push(['python3', `${options.wasmDir}/python3.wasm`]);
-      }
-      workerExecutor = new WE({
-        vfs,
-        wasmDir: options.wasmDir,
-        shellWasmPath,
-        toolRegistry,
-        stdoutBytes: options.security?.limits?.stdoutBytes,
-        stderrBytes: options.security?.limits?.stderrBytes,
-        toolAllowlist: options.security?.toolAllowlist,
-        memoryBytes: options.security?.limits?.memoryBytes,
-        bridgeSab: bridge?.getSab(),
-        networkPolicy: options.network ? {
-          allowedHosts: options.network.allowedHosts,
-          blockedHosts: options.network.blockedHosts,
-        } : undefined,
-      });
-    }
+    const workerExecutor = await Sandbox.createWorkerExecutor(
+      vfs, options.wasmDir, shellWasmPath, tools, adapter,
+      options.security, bridge, options.network,
+    );
 
     const sb = new Sandbox({
       vfs, runner, timeoutMs, adapter,
@@ -204,6 +182,39 @@ export class Sandbox {
       mgr.registerTool('python3', `${wasmDir}/python3.wasm`);
     }
     return tools;
+  }
+
+  private static async createWorkerExecutor(
+    vfs: VFS,
+    wasmDir: string,
+    shellWasmPath: string,
+    tools: Map<string, string>,
+    adapter: PlatformAdapter,
+    security?: SecurityOptions,
+    bridge?: NetworkBridge,
+    networkPolicy?: NetworkPolicy,
+  ): Promise<WorkerExecutor | undefined> {
+    if (!security?.hardKill || !adapter.supportsWorkerExecution) return undefined;
+    const { WorkerExecutor: WE } = await import('./execution/worker-executor.js');
+    const toolRegistry: [string, string][] = Array.from(tools);
+    if (!tools.has('python3')) {
+      toolRegistry.push(['python3', `${wasmDir}/python3.wasm`]);
+    }
+    return new WE({
+      vfs,
+      wasmDir,
+      shellWasmPath,
+      toolRegistry,
+      stdoutBytes: security.limits?.stdoutBytes,
+      stderrBytes: security.limits?.stderrBytes,
+      toolAllowlist: security.toolAllowlist,
+      memoryBytes: security.limits?.memoryBytes,
+      bridgeSab: bridge?.getSab(),
+      networkPolicy: networkPolicy ? {
+        allowedHosts: networkPolicy.allowedHosts,
+        blockedHosts: networkPolicy.blockedHosts,
+      } : undefined,
+    });
   }
 
   async run(command: string): Promise<RunResult> {
@@ -354,32 +365,10 @@ export class Sandbox {
     }
 
     // Create WorkerExecutor for the child if parent uses hard-kill
-    let childWorkerExecutor: WorkerExecutor | undefined;
-    if (this.security?.hardKill && this.adapter.supportsWorkerExecution) {
-      const { WorkerExecutor: WE } = await import('./execution/worker-executor.js');
-      const toolRegistry: [string, string][] = [];
-      for (const [name, path] of tools) {
-        toolRegistry.push([name, path]);
-      }
-      if (!tools.has('python3')) {
-        toolRegistry.push(['python3', `${this.wasmDir}/python3.wasm`]);
-      }
-      childWorkerExecutor = new WE({
-        vfs: childVfs,
-        wasmDir: this.wasmDir,
-        shellWasmPath: this.shellWasmPath,
-        toolRegistry,
-        stdoutBytes: this.security?.limits?.stdoutBytes,
-        stderrBytes: this.security?.limits?.stderrBytes,
-        toolAllowlist: this.security?.toolAllowlist,
-        memoryBytes: this.security?.limits?.memoryBytes,
-        bridgeSab: bridge?.getSab(),
-        networkPolicy: this.networkPolicy ? {
-          allowedHosts: this.networkPolicy.allowedHosts,
-          blockedHosts: this.networkPolicy.blockedHosts,
-        } : undefined,
-      });
-    }
+    const childWorkerExecutor = await Sandbox.createWorkerExecutor(
+      childVfs, this.wasmDir, this.shellWasmPath, tools, this.adapter,
+      this.security, bridge, this.networkPolicy,
+    );
 
     return new Sandbox({
       vfs: childVfs, runner: childRunner, timeoutMs: this.timeoutMs,

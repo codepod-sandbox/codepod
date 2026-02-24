@@ -76,11 +76,11 @@ parentPort.on('message', async (msg: InitMessage | RunMessage) => {
       runner.setOutputLimits(msg.stdoutBytes, msg.stderrBytes);
     }
 
-    if (msg.memoryBytes) {
+    if (msg.memoryBytes !== undefined) {
       runner.setMemoryLimit(msg.memoryBytes);
     }
 
-    if (msg.bridgeSab) {
+    if (msg.bridgeSab !== undefined) {
       runner.setEnv('PYTHONPATH', '/usr/lib/python');
     }
 

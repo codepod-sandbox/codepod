@@ -11,13 +11,14 @@ import type { NetworkGateway } from './gateway.js';
 
 const STATUS_IDLE = 0;
 const STATUS_REQUEST_READY = 1;
-const STATUS_RESPONSE_READY = 2;
 const STATUS_ERROR = 3;
 
 export class BridgeClient implements NetworkBridgeLike {
   private int32: Int32Array;
   private uint8: Uint8Array;
   private gateway: NetworkGateway | null;
+  private encoder = new TextEncoder();
+  private decoder = new TextDecoder();
 
   constructor(sab: SharedArrayBuffer, gateway?: NetworkGateway) {
     this.int32 = new Int32Array(sab);
@@ -34,11 +35,8 @@ export class BridgeClient implements NetworkBridgeLike {
       }
     }
 
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-
     const reqJson = JSON.stringify({ url, method, headers, body });
-    const reqEncoded = encoder.encode(reqJson);
+    const reqEncoded = this.encoder.encode(reqJson);
     if (reqEncoded.byteLength > this.uint8.byteLength - 8) {
       return { status: 413, body: '', headers: {}, error: 'request too large' };
     }
@@ -56,7 +54,7 @@ export class BridgeClient implements NetworkBridgeLike {
 
     const status = Atomics.load(this.int32, 0);
     const len = Atomics.load(this.int32, 1);
-    const respJson = decoder.decode(this.uint8.slice(8, 8 + len));
+    const respJson = this.decoder.decode(this.uint8.slice(8, 8 + len));
 
     // Reset to idle
     Atomics.store(this.int32, 0, STATUS_IDLE);

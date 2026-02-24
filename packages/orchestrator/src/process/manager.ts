@@ -94,15 +94,15 @@ export class ProcessManager {
     });
 
     // If memoryBytes is set, inject a bounded memory into the import object
-    const imports = host.getImports();
-    if (opts.memoryBytes) {
+    const imports: Record<string, Record<string, unknown>> = host.getImports();
+    if (opts.memoryBytes !== undefined) {
       const maxPages = Math.ceil(opts.memoryBytes / 65536);
       const moduleImports = WebAssembly.Module.imports(module);
       for (const imp of moduleImports) {
         if (imp.kind === 'memory') {
           const mem = new WebAssembly.Memory({ initial: 1, maximum: maxPages });
           if (!imports[imp.module]) imports[imp.module] = {};
-          (imports[imp.module] as Record<string, WebAssembly.Memory>)[imp.name] = mem;
+          imports[imp.module][imp.name] = mem;
         }
       }
     }
@@ -110,7 +110,7 @@ export class ProcessManager {
     const instance = await this.adapter.instantiate(module, imports);
 
     // Check exported memory against limit
-    if (opts.memoryBytes) {
+    if (opts.memoryBytes !== undefined) {
       const mem = instance.exports.memory as WebAssembly.Memory | undefined;
       if (mem && mem.buffer.byteLength > opts.memoryBytes) {
         return {

@@ -31,7 +31,7 @@ export interface NetworkBridgeLike {
   fetchSync(url: string, method: string, headers: Record<string, string>, body?: string): SyncFetchResult;
 }
 
-export class NetworkBridge {
+export class NetworkBridge implements NetworkBridgeLike {
   private sab: SharedArrayBuffer;
   private int32: Int32Array;
   private uint8: Uint8Array;

@@ -110,8 +110,8 @@ async function main(): Promise<void> {
           security: limits ? { limits } : undefined,
         });
 
-        if (limits?.rpcBytes) {
-          maxLineBytes = limits.rpcBytes;
+        if (limits?.rpcBytes !== undefined) {
+          maxLineBytes = Math.max(1024, Math.min(limits.rpcBytes, 128 * 1024 * 1024));
         }
 
         dispatcher = new Dispatcher(sandbox);
