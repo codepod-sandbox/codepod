@@ -15,12 +15,14 @@ const BROWSER_TOOLS = [
   'ln', 'readlink', 'realpath', 'mktemp', 'tac',
   'xargs', 'expr', 'diff',
   'du', 'df',
+  'gzip', 'gunzip',
   'true', 'false',
 ];
 
 function toolToWasmFile(name: string): string {
   if (name === 'true') return 'true-cmd.wasm';
   if (name === 'false') return 'false-cmd.wasm';
+  if (name === 'gunzip') return 'gzip.wasm';
   return `${name}.wasm`;
 }
 

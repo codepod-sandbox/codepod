@@ -23,12 +23,14 @@ const TOOLS = [
   'basename', 'dirname', 'env', 'printf',
   'find', 'sed', 'awk', 'jq',
   'du', 'df',
+  'gzip', 'gunzip',
   'true', 'false',
 ];
 
 function wasmName(tool: string): string {
   if (tool === 'true') return 'true-cmd.wasm';
   if (tool === 'false') return 'false-cmd.wasm';
+  if (tool === 'gunzip') return 'gzip.wasm';
   return `${tool}.wasm`;
 }
 

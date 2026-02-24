@@ -175,4 +175,9 @@ path = "src/bin/du.rs"
 name = "df"
 path = "src/bin/df.rs"
 
+[[bin]]
+name = "gzip"
+path = "src/bin/gzip.rs"
+
 [dependencies]
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

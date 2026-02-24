@@ -38,6 +38,10 @@ export class NodeAdapter implements PlatformAdapter {
       const name = wasmToToolName(entry);
       tools.set(name, resolve(wasmDir, entry));
     }
+    // gunzip is an alias for gzip (same binary, argv[0] detection)
+    if (tools.has('gzip') && !tools.has('gunzip')) {
+      tools.set('gunzip', tools.get('gzip')!);
+    }
     return tools;
   }
 }

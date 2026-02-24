@@ -25,12 +25,14 @@ const TOOLS = [
   'xargs', 'expr',
   'diff',
   'du', 'df',
+  'gzip', 'gunzip',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
 function wasmName(tool: string): string {
   if (tool === 'true') return 'true-cmd.wasm';
   if (tool === 'false') return 'false-cmd.wasm';
+  if (tool === 'gunzip') return 'gzip.wasm';
   return `${tool}.wasm`;
 }
 
@@ -1122,6 +1124,52 @@ describe('Coreutils Integration', () => {
       const result = await runner.run('du -s');
       expect(result.exitCode).toBe(0);
       expect(result.stdout.trim()).not.toBe('');
+    });
+  });
+
+  describe('gzip / gunzip', () => {
+    it('gzip file creates .gz and removes original', async () => {
+      vfs.writeFile('/home/user/test.txt', new TextEncoder().encode('hello gzip'));
+      const result = await runner.run('gzip /home/user/test.txt');
+      expect(result.exitCode).toBe(0);
+      expect(() => vfs.stat('/home/user/test.txt')).toThrow();
+      expect(vfs.stat('/home/user/test.txt.gz').type).toBe('file');
+    });
+
+    it('gunzip file.gz restores original', async () => {
+      vfs.writeFile('/home/user/test.txt', new TextEncoder().encode('hello gunzip'));
+      await runner.run('gzip /home/user/test.txt');
+      const result = await runner.run('gunzip /home/user/test.txt.gz');
+      expect(result.exitCode).toBe(0);
+      expect(() => vfs.stat('/home/user/test.txt.gz')).toThrow();
+      const content = new TextDecoder().decode(vfs.readFile('/home/user/test.txt'));
+      expect(content).toBe('hello gunzip');
+    });
+
+    it('gzip -d works like gunzip', async () => {
+      vfs.writeFile('/home/user/test.txt', new TextEncoder().encode('decompress test'));
+      await runner.run('gzip /home/user/test.txt');
+      const result = await runner.run('gzip -d /home/user/test.txt.gz');
+      expect(result.exitCode).toBe(0);
+      const content = new TextDecoder().decode(vfs.readFile('/home/user/test.txt'));
+      expect(content).toBe('decompress test');
+    });
+
+    it('roundtrip via pipeline', async () => {
+      // Compress to file, then decompress to stdout
+      vfs.writeFile('/home/user/pipe.txt', new TextEncoder().encode('pipeline test'));
+      await runner.run('gzip /home/user/pipe.txt');
+      const result = await runner.run('gunzip -c /home/user/pipe.txt.gz');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('pipeline test');
+    });
+
+    it('gzip -k keeps original', async () => {
+      vfs.writeFile('/home/user/keep.txt', new TextEncoder().encode('keep me'));
+      const result = await runner.run('gzip -k /home/user/keep.txt');
+      expect(result.exitCode).toBe(0);
+      expect(vfs.stat('/home/user/keep.txt').type).toBe('file');
+      expect(vfs.stat('/home/user/keep.txt.gz').type).toBe('file');
     });
   });
 
