@@ -275,6 +275,46 @@ path = "src/bin/cksum.rs"
 name = "truncate"
 path = "src/bin/truncate.rs"
 
+[[bin]]
+name = "tree"
+path = "src/bin/tree.rs"
+
+[[bin]]
+name = "patch"
+path = "src/bin/patch.rs"
+
+[[bin]]
+name = "file"
+path = "src/bin/file.rs"
+
+[[bin]]
+name = "column"
+path = "src/bin/column.rs"
+
+[[bin]]
+name = "cmp"
+path = "src/bin/cmp.rs"
+
+[[bin]]
+name = "timeout"
+path = "src/bin/timeout.rs"
+
+[[bin]]
+name = "numfmt"
+path = "src/bin/numfmt.rs"
+
+[[bin]]
+name = "csplit"
+path = "src/bin/csplit.rs"
+
+[[bin]]
+name = "zip"
+path = "src/bin/zip.rs"
+
+[[bin]]
+name = "unzip"
+path = "src/bin/unzip.rs"
+
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 tar = "0.4"

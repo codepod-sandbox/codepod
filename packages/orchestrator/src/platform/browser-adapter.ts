@@ -21,6 +21,7 @@ const BROWSER_TOOLS = [
   'hostname', 'base64', 'sha256sum', 'md5sum', 'stat', 'xxd', 'rev', 'nproc',
   'fmt', 'fold', 'nl', 'expand', 'unexpand', 'paste', 'comm', 'join',
   'split', 'strings', 'od', 'cksum', 'truncate',
+  'tree', 'patch', 'file', 'column', 'cmp', 'timeout', 'numfmt', 'csplit', 'zip', 'unzip',
 ];
 
 function toolToWasmFile(name: string): string {

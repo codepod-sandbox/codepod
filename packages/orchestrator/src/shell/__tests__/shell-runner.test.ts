@@ -755,6 +755,58 @@ describe('ShellRunner', () => {
     });
   });
 
+  describe('eval builtin', () => {
+    it('evaluates a simple command', async () => {
+      const result = await runner.run('eval echo hello');
+      expect(result.stdout).toBe('hello\n');
+    });
+
+    it('evaluates concatenated args', async () => {
+      const result = await runner.run('eval echo "hello world"');
+      expect(result.stdout).toBe('hello world\n');
+    });
+
+    it('evaluates dynamically constructed commands', async () => {
+      await runner.run('export CMD=echo');
+      const result = await runner.run('eval $CMD hi');
+      expect(result.stdout).toBe('hi\n');
+    });
+
+    it('returns 0 with no arguments', async () => {
+      const result = await runner.run('eval');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('preserves exit codes', async () => {
+      const result = await runner.run('eval false');
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
+  describe('getopts builtin', () => {
+    it('parses simple options', async () => {
+      const result = await runner.run('getopts "ab" opt -a && echo "opt=$opt"');
+      expect(result.stdout).toContain('opt=a');
+    });
+
+    it('parses options with arguments', async () => {
+      const result = await runner.run('getopts "f:" opt -f myfile && echo "opt=$opt arg=$OPTARG"');
+      expect(result.stdout).toContain('opt=f');
+      expect(result.stdout).toContain('arg=myfile');
+    });
+
+    it('handles attached option arguments', async () => {
+      const result = await runner.run('getopts "f:" opt -fmyfile && echo "opt=$opt arg=$OPTARG"');
+      expect(result.stdout).toContain('opt=f');
+      expect(result.stdout).toContain('arg=myfile');
+    });
+
+    it('returns 1 when no more options', async () => {
+      const result = await runner.run('getopts "a" opt noopt');
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
   describe('sh/bash command', () => {
     it('sh -c runs a command', async () => {
       const result = await runner.run("sh -c 'echo hello from sh'");

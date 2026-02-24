@@ -31,6 +31,7 @@ const TOOLS = [
   'hostname', 'base64', 'sha256sum', 'md5sum', 'stat', 'xxd', 'rev', 'nproc',
   'fmt', 'fold', 'nl', 'expand', 'unexpand', 'paste', 'comm', 'join',
   'split', 'strings', 'od', 'cksum', 'truncate',
+  'tree', 'patch', 'file', 'column', 'cmp', 'timeout', 'numfmt', 'csplit', 'zip', 'unzip',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
@@ -1788,6 +1789,136 @@ describe('Coreutils Integration', () => {
       expect(data.length).toBe(5);
       expect(data[0]).toBe(72); // 'H'
       expect(data[1]).toBe(105); // 'i'
+    });
+  });
+
+  describe('tree', () => {
+    it('shows directory structure', async () => {
+      await runner.run('mkdir -p /home/user/project/src');
+      vfs.writeFile('/home/user/project/src/main.rs', new TextEncoder().encode('fn main() {}'));
+      vfs.writeFile('/home/user/project/README.md', new TextEncoder().encode('# Hello'));
+      const result = await runner.run('tree /home/user/project');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('src');
+      expect(result.stdout).toContain('main.rs');
+      expect(result.stdout).toContain('README.md');
+    });
+
+    it('supports -L depth limit', async () => {
+      await runner.run('mkdir -p /home/user/deep/a/b');
+      vfs.writeFile('/home/user/deep/a/b/c.txt', new TextEncoder().encode('deep'));
+      const result = await runner.run('tree -L 1 /home/user/deep');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('a');
+      expect(result.stdout).not.toContain('c.txt');
+    });
+  });
+
+  describe('file', () => {
+    it('detects PNG', async () => {
+      const png = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, ...new Array(100).fill(0)]);
+      vfs.writeFile('/home/user/image.png', png);
+      const result = await runner.run('file /home/user/image.png');
+      expect(result.stdout).toContain('PNG');
+    });
+
+    it('detects ASCII text', async () => {
+      vfs.writeFile('/home/user/hello.txt', new TextEncoder().encode('Hello, World!\n'));
+      const result = await runner.run('file /home/user/hello.txt');
+      expect(result.stdout).toContain('text');
+    });
+  });
+
+  describe('patch', () => {
+    it('applies unified diff', async () => {
+      vfs.writeFile('/home/user/test.txt', new TextEncoder().encode('line1\nline2\nline3\n'));
+      const diff = '--- test.txt\n+++ test.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2modified\n line3\n';
+      vfs.writeFile('/home/user/test.diff', new TextEncoder().encode(diff));
+      const result = await runner.run('patch -i /home/user/test.diff /home/user/test.txt');
+      expect(result.exitCode).toBe(0);
+      const content = new TextDecoder().decode(vfs.readFile('/home/user/test.txt'));
+      expect(content).toContain('line2modified');
+    });
+  });
+
+  describe('column', () => {
+    it('formats table with -t', async () => {
+      const result = await runner.run('printf "name age\\nAlice 30\\nBob 25" | column -t');
+      expect(result.exitCode).toBe(0);
+      const lines = result.stdout.trimEnd().split('\n');
+      expect(lines.length).toBe(3);
+      // Columns should be aligned
+      expect(lines[0]).toMatch(/name\s+age/);
+    });
+  });
+
+  describe('cmp', () => {
+    it('reports identical files', async () => {
+      vfs.writeFile('/home/user/a.txt', new TextEncoder().encode('same'));
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode('same'));
+      const result = await runner.run('cmp /home/user/a.txt /home/user/b.txt');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('reports first difference', async () => {
+      vfs.writeFile('/home/user/a.txt', new TextEncoder().encode('hello'));
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode('hallo'));
+      const result = await runner.run('cmp /home/user/a.txt /home/user/b.txt');
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain('differ');
+    });
+  });
+
+  describe('timeout', () => {
+    it('accepts duration and command syntax', async () => {
+      const result = await runner.run('timeout 5 echo hello');
+      // timeout is a stub in the sandbox
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe('numfmt', () => {
+    it('converts to human-readable IEC', async () => {
+      const result = await runner.run('echo 1048576 | numfmt --to=iec');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('1.0M');
+    });
+
+    it('converts to SI', async () => {
+      const result = await runner.run('echo 1000000 | numfmt --to=si');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('1.0M');
+    });
+  });
+
+  describe('csplit', () => {
+    it('splits at regex pattern', async () => {
+      vfs.writeFile('/home/user/data.txt', new TextEncoder().encode('header\n---\nbody\n---\nfooter\n'));
+      const result = await runner.run('csplit -f /tmp/cs_ /home/user/data.txt "/---/" "/---/"');
+      expect(result.exitCode).toBe(0);
+      // Should print byte counts
+      expect(result.stdout.trim().split('\n').length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('zip and unzip', () => {
+    it('creates and extracts archive', async () => {
+      vfs.writeFile('/home/user/a.txt', new TextEncoder().encode('alpha'));
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode('bravo'));
+      const zipResult = await runner.run('zip /home/user/archive.zip /home/user/a.txt /home/user/b.txt');
+      expect(zipResult.exitCode).toBe(0);
+
+      await runner.run('mkdir -p /home/user/out');
+      const unzipResult = await runner.run('unzip -d /home/user/out /home/user/archive.zip');
+      expect(unzipResult.exitCode).toBe(0);
+    });
+
+    it('lists archive contents', async () => {
+      vfs.writeFile('/home/user/c.txt', new TextEncoder().encode('charlie'));
+      await runner.run('zip /home/user/list.zip /home/user/c.txt');
+      const result = await runner.run('unzip -l /home/user/list.zip');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('c.txt');
     });
   });
 });

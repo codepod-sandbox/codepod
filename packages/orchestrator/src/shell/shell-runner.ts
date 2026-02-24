@@ -25,7 +25,7 @@ import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts']);
 const SHELL_COMMANDS = new Set(['sh', 'bash']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
@@ -606,6 +606,10 @@ export class ShellRunner {
       result = { ...EMPTY_RESULT };
     } else if (cmdName === 'read') {
       result = this.builtinRead(args, stdinData);
+    } else if (cmdName === 'eval') {
+      result = await this.builtinEval(args);
+    } else if (cmdName === 'getopts') {
+      result = this.builtinGetopts(args);
     }
 
     if (!result) {
@@ -1867,6 +1871,144 @@ export class ShellRunner {
       }
     }
     return { ...EMPTY_RESULT };
+  }
+
+  /** Builtin: eval — concatenate args and execute as a shell command. */
+  private async builtinEval(args: string[]): Promise<RunResult> {
+    if (args.length === 0) return { ...EMPTY_RESULT };
+    const command = args.join(' ');
+    // Re-parse and execute through the full pipeline (expansion, parsing, execution)
+    const ast = await this.parse(command);
+    if (ast === null) return { ...EMPTY_RESULT };
+    const result = await this.execCommand(ast);
+    this.lastExitCode = result.exitCode;
+    return result;
+  }
+
+  /**
+   * Builtin: getopts — POSIX option parsing for shell scripts.
+   *
+   * Usage: getopts OPTSTRING NAME [ARGS...]
+   *
+   * Uses shell variable OPTIND (1-based index into args) to track position.
+   * Sets NAME to the option character found (or '?' on error).
+   * Sets OPTARG for options that take arguments.
+   * Returns 0 while options remain, 1 when done.
+   */
+  private builtinGetopts(args: string[]): RunResult {
+    if (args.length < 2) {
+      return {
+        exitCode: 2,
+        stdout: '',
+        stderr: 'getopts: usage: getopts optstring name [arg ...]\n',
+        executionTimeMs: 0,
+      };
+    }
+    const optstring = args[0];
+    const varName = args[1];
+    // If extra args given, parse those; otherwise use positional params ($1, $2, ...)
+    const optArgs = args.length > 2 ? args.slice(2) : this.getPositionalArgs();
+
+    const optind = parseInt(this.env.get('OPTIND') ?? '1', 10);
+    const idx = optind - 1; // 0-based
+
+    if (idx >= optArgs.length) {
+      this.env.set(varName, '?');
+      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+
+    const current = optArgs[idx];
+    if (!current.startsWith('-') || current === '-' || current === '--') {
+      this.env.set(varName, '?');
+      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+
+    // Get the current character position within the option group
+    let charPos = parseInt(this.env.get('_GETOPTS_CHARPOS') ?? '1', 10);
+    const optChar = current[charPos];
+
+    if (!optChar) {
+      // Exhausted this arg group, move to next
+      this.env.set('OPTIND', String(optind + 1));
+      this.env.delete('_GETOPTS_CHARPOS');
+      this.env.set(varName, '?');
+      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+
+    const optPos = optstring.indexOf(optChar);
+    if (optPos === -1) {
+      // Unknown option
+      const silent = optstring.startsWith(':');
+      this.env.set(varName, '?');
+      if (!silent) {
+        // Advance position
+        if (charPos + 1 < current.length) {
+          this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
+        } else {
+          this.env.set('OPTIND', String(optind + 1));
+          this.env.delete('_GETOPTS_CHARPOS');
+        }
+        return {
+          exitCode: 0,
+          stdout: '',
+          stderr: `getopts: illegal option -- ${optChar}\n`,
+          executionTimeMs: 0,
+        };
+      }
+      this.env.set('OPTARG', optChar);
+      if (charPos + 1 < current.length) {
+        this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
+      } else {
+        this.env.set('OPTIND', String(optind + 1));
+        this.env.delete('_GETOPTS_CHARPOS');
+      }
+      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+
+    const needsArg = optstring[optPos + 1] === ':';
+    this.env.set(varName, optChar);
+
+    if (needsArg) {
+      // Check for argument attached to this option (e.g. -fVALUE)
+      const remainder = current.slice(charPos + 1);
+      if (remainder.length > 0) {
+        this.env.set('OPTARG', remainder);
+        this.env.set('OPTIND', String(optind + 1));
+        this.env.delete('_GETOPTS_CHARPOS');
+      } else if (idx + 1 < optArgs.length) {
+        this.env.set('OPTARG', optArgs[idx + 1]);
+        this.env.set('OPTIND', String(optind + 2));
+        this.env.delete('_GETOPTS_CHARPOS');
+      } else {
+        // Missing argument
+        const silent = optstring.startsWith(':');
+        if (silent) {
+          this.env.set(varName, ':');
+          this.env.set('OPTARG', optChar);
+        } else {
+          this.env.set(varName, '?');
+          return {
+            exitCode: 0,
+            stdout: '',
+            stderr: `getopts: option requires an argument -- ${optChar}\n`,
+            executionTimeMs: 0,
+          };
+        }
+        this.env.set('OPTIND', String(optind + 1));
+        this.env.delete('_GETOPTS_CHARPOS');
+      }
+    } else {
+      // No argument needed — advance within option group or to next arg
+      if (charPos + 1 < current.length) {
+        this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
+      } else {
+        this.env.set('OPTIND', String(optind + 1));
+        this.env.delete('_GETOPTS_CHARPOS');
+      }
+      this.env.delete('OPTARG');
+    }
+
+    return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
   }
 
   /** Builtin: which — locate a command by searching known tool names. */
