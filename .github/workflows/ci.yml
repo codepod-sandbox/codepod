@@ -20,5 +20,11 @@ jobs:
       - name: Build TypeScript
         run: cd packages/orchestrator && bun run build
 
-      - name: Run tests
-        run: bun test
+      - name: Run TypeScript tests
+        run: bun test packages/orchestrator packages/sdk-server
+
+      - name: Install Python SDK
+        run: cd packages/python-sdk && pip install -e .
+
+      - name: Run Python tests
+        run: cd packages/python-sdk && python -m pytest tests/ -v
