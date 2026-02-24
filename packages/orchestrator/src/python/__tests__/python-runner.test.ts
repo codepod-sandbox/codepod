@@ -4,11 +4,13 @@ import { PythonRunner } from '../python-runner.js';
 import { ProcessManager } from '../../process/manager.js';
 import { VFS } from '../../vfs/vfs.js';
 import { NodeAdapter } from '../../platform/node-adapter.js';
+import { Sandbox } from '../../sandbox.js';
 
 const FIXTURES = resolve(
   import.meta.dirname,
   '../../platform/__tests__/fixtures',
 );
+const SHELL_WASM = resolve(import.meta.dirname, '../../shell/__tests__/fixtures/wasmsand-shell.wasm');
 
 describe('PythonRunner', () => {
   let vfs: VFS;
@@ -161,16 +163,18 @@ describe('PythonRunner', () => {
   });
 
   describe('resource limits', () => {
-    // RustPython WASI does not have built-in resource limits like Monty
-    // (maxDurationSecs, maxAllocations). An infinite while True: pass will
-    // run forever and hang the test runner. Skipping until a timeout/fuel
-    // mechanism is added.
-    it.skip('terminates infinite loops', { timeout: 10000 }, async () => {
-      const result = await runner.run({
-        args: ['-c', 'while True:\n  pass'],
-        env: {},
+    it('terminates infinite loops via worker hard-kill', { timeout: 10000 }, async () => {
+      const adapter = new NodeAdapter();
+      const sb = await Sandbox.create({
+        wasmDir: FIXTURES,
+        shellWasmPath: SHELL_WASM,
+        adapter,
+        security: { hardKill: true, limits: { timeoutMs: 500 } },
       });
-      expect(result.exitCode).not.toBe(0);
+      const result = await sb.run('python3 -c "while True:\n  pass"');
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(result.exitCode).toBe(124);
+      sb.destroy();
     });
   });
 });

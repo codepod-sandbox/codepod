@@ -18,8 +18,7 @@ import { NetworkBridge } from './network/bridge.js';
 import { SOCKET_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from './network/socket-shim.js';
 import type { SecurityOptions, AuditEventHandler } from './security.js';
 import { CancelledError } from './security.js';
-import { WorkerExecutor } from './execution/worker-executor.js';
-import type { WorkerConfig } from './execution/worker-executor.js';
+import type { WorkerExecutor } from './execution/worker-executor.js';
 
 export interface SandboxOptions {
   /** Directory (Node) or URL base (browser) containing .wasm files. */
@@ -146,10 +145,11 @@ export class Sandbox {
       runner.setEnv('PYTHONPATH', '/usr/lib/python');
     }
 
-    // Create WorkerExecutor for hard-kill support on platforms that support Workers.
+    // Create WorkerExecutor for hard-kill preemption when enabled.
     // Skip when networking is enabled — the bridge requires main-thread access.
     let workerExecutor: WorkerExecutor | undefined;
-    if (adapter.supportsWorkerExecution && !bridge) {
+    if (options.security?.hardKill && adapter.supportsWorkerExecution && !bridge) {
+      const { WorkerExecutor: WE } = await import('./execution/worker-executor.js');
       const toolRegistry: [string, string][] = [];
       for (const [name, path] of tools) {
         toolRegistry.push([name, path]);
@@ -157,12 +157,11 @@ export class Sandbox {
       if (!tools.has('python3')) {
         toolRegistry.push(['python3', `${options.wasmDir}/python3.wasm`]);
       }
-      workerExecutor = new WorkerExecutor({
+      workerExecutor = new WE({
         vfs,
         wasmDir: options.wasmDir,
         shellWasmPath,
         toolRegistry,
-        networkEnabled: !!options.network,
         stdoutBytes: options.security?.limits?.stdoutBytes,
         stderrBytes: options.security?.limits?.stderrBytes,
         toolAllowlist: options.security?.toolAllowlist,
@@ -208,15 +207,16 @@ export class Sandbox {
 
     if (this.workerExecutor) {
       // Worker-based execution (Node) — hard kill on timeout via worker.terminate()
-      result = await this.workerExecutor.run(command, this.runner.getEnvMap(), effectiveTimeout);
+      const workerResult = await this.workerExecutor.run(command, this.runner.getEnvMap(), effectiveTimeout);
 
       // Sync env changes from Worker back to main-thread runner
-      const lastEnv = this.workerExecutor.getLastEnv();
-      if (lastEnv) {
-        this.runner.setEnvMap(lastEnv);
+      if (workerResult.env) {
+        this.runner.setEnvMap(new Map(workerResult.env));
       }
+
+      result = workerResult;
     } else {
-      // Fallback (browser) — cooperative cancel + Promise.race
+      // Fallback: in-process execution (browser, or hardKill=false)
       this.runner.resetCancel(effectiveTimeout);
       try {
         result = await this.runner.run(command);
@@ -347,33 +347,10 @@ export class Sandbox {
       childRunner.setEnv(k, v);
     }
 
-    // Create WorkerExecutor for child if parent has one (skip when networking)
-    let childWorkerExecutor: WorkerExecutor | undefined;
-    if (this.adapter.supportsWorkerExecution && !childBridge) {
-      const toolRegistry: [string, string][] = [];
-      for (const [name, path] of tools) {
-        toolRegistry.push([name, path]);
-      }
-      if (!tools.has('python3')) {
-        toolRegistry.push(['python3', `${this.wasmDir}/python3.wasm`]);
-      }
-      childWorkerExecutor = new WorkerExecutor({
-        vfs: childVfs,
-        wasmDir: this.wasmDir,
-        shellWasmPath: this.shellWasmPath,
-        toolRegistry,
-        networkEnabled: !!this.networkPolicy,
-        stdoutBytes: this.security?.limits?.stdoutBytes,
-        stderrBytes: this.security?.limits?.stderrBytes,
-        toolAllowlist: this.security?.toolAllowlist,
-      });
-    }
-
     return new Sandbox(
       childVfs, childRunner, this.timeoutMs,
       this.adapter, this.wasmDir, this.shellWasmPath,
       childMgr, childBridge, this.networkPolicy, this.security,
-      childWorkerExecutor,
     );
   }
 
@@ -383,6 +360,7 @@ export class Sandbox {
       this.workerExecutor.kill();
     } else {
       this.runner.cancel('CANCELLED');
+      // Set deadline to now so Date.now() checks in fdWrite/fdRead fire immediately
       this.runner.setDeadlineNow();
       this.mgr.cancelCurrent();
     }
@@ -390,8 +368,8 @@ export class Sandbox {
 
   destroy(): void {
     this.audit('sandbox.destroy');
-    this.workerExecutor?.dispose();
     this.destroyed = true;
+    this.workerExecutor?.dispose();
     this.bridge?.dispose();
   }
 

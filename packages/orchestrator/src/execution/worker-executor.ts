@@ -28,12 +28,17 @@ export interface WorkerConfig {
   toolAllowlist?: string[];
 }
 
+export interface WorkerRunResult extends RunResult {
+  /** Environment updates from the worker, for syncing back to ShellRunner. */
+  env?: [string, string][];
+}
+
 export class WorkerExecutor {
   private worker: Worker | null = null;
   private sab: SharedArrayBuffer;
   private int32: Int32Array;
   private config: WorkerConfig;
-  private pendingResolve: ((r: RunResult) => void) | null = null;
+  private pendingResolve: ((r: WorkerRunResult) => void) | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private lastEnv: Map<string, string> | null = null;
@@ -44,14 +49,14 @@ export class WorkerExecutor {
     this.int32 = new Int32Array(this.sab);
   }
 
-  async run(command: string, env: Map<string, string>, timeoutMs: number): Promise<RunResult> {
+  async run(command: string, env: Map<string, string>, timeoutMs: number): Promise<WorkerRunResult> {
     if (!this.worker) {
       await this.createWorker();
     }
 
     this.running = true;
 
-    return new Promise<RunResult>((resolve) => {
+    return new Promise<WorkerRunResult>((resolve) => {
       this.pendingResolve = resolve;
 
       this.timeoutTimer = setTimeout(() => {
@@ -69,6 +74,8 @@ export class WorkerExecutor {
         command,
         env: Array.from(env.entries()),
         timeoutMs,
+        stdoutLimit: this.config.stdoutBytes,
+        stderrLimit: this.config.stderrBytes,
       });
     });
   }
@@ -130,7 +137,11 @@ export class WorkerExecutor {
         if (this.pendingResolve) {
           const resolve = this.pendingResolve;
           this.pendingResolve = null;
-          resolve(msg.result as RunResult);
+          const result: WorkerRunResult = msg.result as RunResult;
+          if (msg.env) {
+            result.env = msg.env;
+          }
+          resolve(result);
         }
       }
     });

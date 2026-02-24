@@ -941,6 +941,9 @@ export class ShellRunner {
       env: Object.fromEntries(this.env),
       stdinData,
       cwd: this.env.get('PWD'),
+      stdoutLimit: this.stdoutLimit,
+      stderrLimit: this.stderrLimit,
+      deadlineMs: this.deadlineMs,
     });
   }
 

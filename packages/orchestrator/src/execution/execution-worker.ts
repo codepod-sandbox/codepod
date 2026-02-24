@@ -32,6 +32,8 @@ interface RunMessage {
   command: string;
   env: [string, string][];
   timeoutMs?: number;
+  stdoutLimit?: number;
+  stderrLimit?: number;
 }
 
 let runner: ShellRunner | null = null;
@@ -74,6 +76,11 @@ parentPort.on('message', async (msg: InitMessage | RunMessage) => {
     // Apply env vars from main thread
     for (const [k, v] of msg.env) {
       runner.setEnv(k, v);
+    }
+
+    // Apply output limits if provided
+    if (msg.stdoutLimit !== undefined || msg.stderrLimit !== undefined) {
+      runner.setOutputLimits(msg.stdoutLimit, msg.stderrLimit);
     }
 
     // Set deadline for cooperative cancellation

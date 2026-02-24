@@ -20,4 +20,4 @@ export type { SecurityOptions, SecurityLimits, ErrorClass, AuditEvent, AuditEven
 export { CancelledError } from './security.js';
 export type { VfsLike } from './vfs/vfs-like.js';
 export { WorkerExecutor } from './execution/worker-executor.js';
-export type { WorkerConfig } from './execution/worker-executor.js';
+export type { WorkerConfig, WorkerRunResult } from './execution/worker-executor.js';

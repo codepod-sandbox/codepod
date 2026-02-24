@@ -197,9 +197,16 @@ export class WasiHost {
     return this.stderrTruncated;
   }
 
-  /** Signal cancellation — next fd_write/fd_read will throw WasiExitError. */
+  /** Signal cancellation — next syscall check will throw WasiExitError. */
   cancelExecution(): void {
     this.cancelled = true;
+  }
+
+  /** Throw WasiExitError(124) if cancelled or past deadline. */
+  private checkDeadline(): void {
+    if (this.cancelled || Date.now() > this.deadlineMs) {
+      throw new WasiExitError(124);
+    }
   }
 
   getExitCode(): number | null {
@@ -426,7 +433,7 @@ export class WasiHost {
     iovsLen: number,
     nwrittenPtr: number,
   ): number {
-    if (this.cancelled || Date.now() > this.deadlineMs) throw new WasiExitError(124);
+    this.checkDeadline();
     const view = this.getView();
     const bytes = this.getBytes();
     const iovecs = readIovecs(view, iovsPtr, iovsLen);
@@ -492,7 +499,7 @@ export class WasiHost {
     iovsLen: number,
     nreadPtr: number,
   ): number {
-    if (this.cancelled || Date.now() > this.deadlineMs) throw new WasiExitError(124);
+    this.checkDeadline();
     const view = this.getView();
     const iovecs = readIovecs(view, iovsPtr, iovsLen);
 
@@ -660,6 +667,7 @@ export class WasiHost {
   }
 
   private fdFilestatGet(fd: number, bufPtr: number): number {
+    this.checkDeadline();
     // For preopened / directory fds, stat the directory path
     const dirPath = this.dirFds.get(fd);
     if (dirPath !== undefined) {
@@ -687,6 +695,7 @@ export class WasiHost {
     cookie: bigint,
     bufUsedPtr: number,
   ): number {
+    this.checkDeadline();
     const dirPath = this.dirFds.get(fd);
     if (dirPath === undefined) {
       return WASI_EBADF;
@@ -776,6 +785,7 @@ export class WasiHost {
     fdflags: number,
     fdPtr: number,
   ): number {
+    this.checkDeadline();
     try {
       const relativePath = this.readString(pathPtr, pathLen);
       const absPath = this.resolvePath(dirFd, relativePath);
@@ -845,6 +855,7 @@ export class WasiHost {
     pathLen: number,
     bufPtr: number,
   ): number {
+    this.checkDeadline();
     try {
       const relativePath = this.readString(pathPtr, pathLen);
       const absPath = this.resolvePath(dirFd, relativePath);
@@ -862,6 +873,7 @@ export class WasiHost {
     pathPtr: number,
     pathLen: number,
   ): number {
+    this.checkDeadline();
     try {
       const relativePath = this.readString(pathPtr, pathLen);
       const absPath = this.resolvePath(dirFd, relativePath);
@@ -898,6 +910,7 @@ export class WasiHost {
     pathPtr: number,
     pathLen: number,
   ): number {
+    this.checkDeadline();
     try {
       const relativePath = this.readString(pathPtr, pathLen);
       const absPath = this.resolvePath(dirFd, relativePath);
@@ -919,6 +932,7 @@ export class WasiHost {
     newPathPtr: number,
     newPathLen: number,
   ): number {
+    this.checkDeadline();
     try {
       const oldRelative = this.readString(oldPathPtr, oldPathLen);
       const newRelative = this.readString(newPathPtr, newPathLen);
@@ -939,6 +953,7 @@ export class WasiHost {
     _precision: bigint,
     timestampPtr: number,
   ): number {
+    this.checkDeadline();
     const view = this.getView();
     // Both realtime and monotonic return nanoseconds since epoch
     const nowMs = Date.now();
@@ -948,6 +963,7 @@ export class WasiHost {
   }
 
   private randomGet(bufPtr: number, bufLen: number): number {
+    this.checkDeadline();
     const bytes = this.getBytes();
     const target = bytes.subarray(bufPtr, bufPtr + bufLen);
     crypto.getRandomValues(target);
@@ -960,6 +976,7 @@ export class WasiHost {
   }
 
   private schedYield(): number {
+    this.checkDeadline();
     return WASI_ESUCCESS;
   }
 

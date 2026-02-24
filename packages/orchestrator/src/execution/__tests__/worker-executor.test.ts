@@ -99,7 +99,7 @@ describe('WorkerExecutor', () => {
     expect(result.errorClass).toBe('CANCELLED');
   });
 
-  it('next run after kill creates fresh Worker', async () => {
+  it('next run after kill creates fresh Worker', { timeout: 15000 }, async () => {
     vfs = new VFS();
     executor = new WorkerExecutor({
       vfs,

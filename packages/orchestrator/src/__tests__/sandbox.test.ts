@@ -395,6 +395,39 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('broadened syscall deadline checks', () => {
+    it('kills WASM that calls clock_time_get in a loop', async () => {
+      // Python's time.time() calls clock_time_get — a tight loop calling it will now hit the deadline
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 300 } },
+      });
+      const start = performance.now();
+      const result = await sandbox.run('python3 -c "import time\nwhile True:\n time.time()"');
+      const elapsed = performance.now() - start;
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(elapsed).toBeLessThan(3000);
+    });
+  });
+
+  describe('worker-based hard kill', () => {
+    it('kills a pure CPU-bound Python loop via worker termination', { timeout: 15000 }, async () => {
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { hardKill: true, limits: { timeoutMs: 500 } },
+      });
+      const start = performance.now();
+      const result = await sandbox.run('python3 -c "while True: pass"');
+      const elapsed = performance.now() - start;
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(elapsed).toBeLessThan(5000);
+    });
+  });
+
   describe('hard cancellation', () => {
     it('timeout kills long-running WASM via deadline in fdWrite', async () => {
       sandbox = await Sandbox.create({
@@ -496,7 +529,7 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        security: { limits: { timeoutMs: 200 } },
+        security: { hardKill: true, limits: { timeoutMs: 200 } },
       });
       const start = performance.now();
       const result = await sandbox.run('seq 1 999999999');
@@ -511,6 +544,7 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
+        security: { hardKill: true },
         timeoutMs: 30000,
       });
       const promise = sandbox.run('seq 1 999999999');
@@ -526,7 +560,7 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        security: { limits: { timeoutMs: 100 } },
+        security: { hardKill: true, limits: { timeoutMs: 100 } },
       });
       const r1 = await sandbox.run('seq 1 999999999');
       expect(r1.errorClass).toBe('TIMEOUT');
@@ -540,7 +574,7 @@ describe('Sandbox', () => {
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        security: { limits: { timeoutMs: 100 } },
+        security: { hardKill: true, limits: { timeoutMs: 100 } },
       });
       sandbox.writeFile('/tmp/pre.txt', new TextEncoder().encode('before'));
       const r1 = await sandbox.run('seq 1 999999999');
