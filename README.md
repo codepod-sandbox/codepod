@@ -12,6 +12,10 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 - **45+ coreutils** — cat, grep, sed, awk, find, sort, jq, and more, compiled to WebAssembly
 - **Python 3** via RustPython compiled to WASI — standard library available
 - **In-memory virtual filesystem** — POSIX semantics with inodes, file descriptors, and pipes
+- **Virtual `/dev` and `/proc`** — `/dev/null`, `/dev/zero`, `/dev/random`, `/proc/uptime`, `/proc/cpuinfo`, and more
+- **Package manager** — install WASI binaries into the sandbox at runtime with `pkg install`
+- **State persistence** — export/import full sandbox state (files + env) for long-running agent workflows
+- **Command history** — `history list` and `history clear` for agent session tracking
 - **Runs everywhere** — same code works server-side ([Bun](https://bun.sh) or Node.js) and in the browser
 
 ## Install
@@ -93,6 +97,88 @@ with Sandbox() as sb:
 
 Pipes (`|`), redirects (`>`, `>>`, `<`, `2>&1`), boolean operators (`&&`, `||`), semicolons, single/double quotes, escape sequences, variable expansion (`$VAR`, `${VAR:-default}`), command substitution (`$(...)`), globbing (`*`, `?`, `**/*.txt`), subshells (`(...)`), and control flow (`if`/`elif`/`else`/`fi`, `for`/`do`/`done`, `while`/`do`/`done`).
 
+## Virtual filesystems
+
+The sandbox provides virtual `/dev` and `/proc` filesystems:
+
+| Path | Behavior |
+|------|----------|
+| `/dev/null` | Discards writes, returns empty on read |
+| `/dev/zero` | Returns zero-filled bytes |
+| `/dev/random`, `/dev/urandom` | Cryptographically random bytes |
+| `/proc/uptime` | Seconds since sandbox creation |
+| `/proc/version` | Sandbox version string |
+| `/proc/cpuinfo` | Processor information |
+| `/proc/meminfo` | Memory information |
+
+These work transparently with coreutils: `cat /dev/null`, `head -c 16 /dev/random | xxd`, `cat /proc/uptime`.
+
+## Package manager
+
+Install WASI binaries into the sandbox at runtime. Packages run inside the WASM sandbox with the same security boundary as built-in coreutils.
+
+```typescript
+const sandbox = await Sandbox.create({
+  wasmDir: './wasm',
+  security: {
+    packagePolicy: {
+      enabled: true,
+      allowedHosts: ['trusted-registry.example.com'],
+      maxPackageBytes: 5 * 1024 * 1024,
+      maxInstalledPackages: 50,
+    },
+  },
+});
+
+await sandbox.run('pkg install https://trusted-registry.example.com/mytool.wasm');
+await sandbox.run('mytool --help');  // immediately available
+await sandbox.run('pkg list');        // show installed packages
+await sandbox.run('pkg remove mytool');
+```
+
+The package manager is disabled by default. Enable it with `packagePolicy.enabled: true`.
+
+## State persistence
+
+Export and import the full sandbox state (filesystem + environment variables) as an opaque binary blob. Useful for long-running agent workflows that need to survive restarts.
+
+**TypeScript:**
+
+```typescript
+// Save state
+const blob = sandbox.exportState();
+
+// Later, restore into a new sandbox
+const sandbox2 = await Sandbox.create({ wasmDir: './wasm' });
+sandbox2.importState(blob);
+```
+
+**Python:**
+
+```python
+# Save state
+blob = sb.export_state()
+
+# Later, restore
+sb2 = Sandbox()
+sb2.import_state(blob)
+```
+
+Virtual filesystems (`/dev`, `/proc`) are excluded from exports — they are regenerated automatically.
+
+## Command history
+
+The shell tracks command history for agent session introspection:
+
+```bash
+echo hello
+echo world
+history list    # shows all executed commands with indices
+history clear   # resets history
+```
+
+Also available via the RPC API: `shell.history.list`, `shell.history.clear`.
+
 ## Architecture
 
 ```
@@ -115,12 +201,11 @@ The shell parser is written in Rust and compiled to WASI. It emits a JSON AST th
 
 ## Limitations
 
-- **No networking by default.** Network access is off and must be explicitly enabled with a domain allowlist. Fine-grained URL policies are not yet implemented.
-- **No persistent storage.** The VFS is in-memory and scoped to a single session. There is no snapshot/restore across sessions yet.
+- **No networking by default.** Network access is off and must be explicitly enabled with a domain allowlist.
+- **In-memory filesystem.** The VFS is in-memory (256 MB default, configurable). Use `exportState`/`importState` to persist across sessions.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O rather than in parallel. This is correct but slower than a real shell for streaming workloads.
 - **Bash subset, not full POSIX.** No function definitions, aliases, `eval`, job control, or advanced file descriptor manipulation (e.g., `>&3`).
-- **No dynamic package installation.** There is no `pip install` at runtime. Only the Python standard library is available.
-- **256 MB filesystem limit** by default. Configurable, but the VFS is always in-memory.
+- **WASI packages only.** The `pkg` command installs WASI binaries. There is no `pip install` at runtime — only the Python standard library is available.
 - **Security hardening is in progress.** Timeout enforcement, capability policies, output truncation, and session isolation are defined but not all fully implemented yet. Do not use for adversarial untrusted input in production without reviewing the [security spec](docs/plans/2026-02-23-security-mvp-spec.md).
 
 ## Development
