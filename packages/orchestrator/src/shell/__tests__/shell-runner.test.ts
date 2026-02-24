@@ -529,4 +529,102 @@ describe('ShellRunner', () => {
       expect(result.stdout).toBe('7\n');
     });
   });
+
+  describe('$@, $*, $# positional parameters', () => {
+    it('$@ expands to script arguments', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh\necho $@\n'));
+      vfs.chmod('/home/user/script.sh', 0o755);
+      const result = await runner.run('./script.sh arg1 arg2');
+      expect(result.stdout.trim()).toBe('arg1 arg2');
+    });
+
+    it('$* expands to script arguments', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh\necho $*\n'));
+      vfs.chmod('/home/user/script.sh', 0o755);
+      const result = await runner.run('./script.sh arg1 arg2');
+      expect(result.stdout.trim()).toBe('arg1 arg2');
+    });
+
+    it('$# reflects argument count', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh\necho $#\n'));
+      vfs.chmod('/home/user/script.sh', 0o755);
+      const result = await runner.run('./script.sh a b c');
+      expect(result.stdout.trim()).toBe('3');
+    });
+
+    it('$# is 0 when no arguments', async () => {
+      vfs.writeFile('/home/user/script.sh', new TextEncoder().encode('#!/bin/sh\necho $#\n'));
+      vfs.chmod('/home/user/script.sh', 0o755);
+      const result = await runner.run('./script.sh');
+      expect(result.stdout.trim()).toBe('0');
+    });
+
+    it('function calls with $@ and $#', async () => {
+      await runner.run('myfunc() { echo $# $@; }');
+      const result = await runner.run('myfunc x y z');
+      expect(result.stdout.trim()).toBe('3 x y z');
+    });
+  });
+
+  describe('source builtin', () => {
+    it('sources a file and executes commands', async () => {
+      vfs.writeFile('/home/user/lib.sh', new TextEncoder().encode('echo hello from source\n'));
+      const result = await runner.run('source /home/user/lib.sh');
+      expect(result.stdout.trim()).toBe('hello from source');
+    });
+
+    it('. works as alias for source', async () => {
+      vfs.writeFile('/home/user/lib.sh', new TextEncoder().encode('echo dotted\n'));
+      const result = await runner.run('. /home/user/lib.sh');
+      expect(result.stdout.trim()).toBe('dotted');
+    });
+
+    it('variables persist after source', async () => {
+      vfs.writeFile('/home/user/vars.sh', new TextEncoder().encode('MY_VAR=sourced_value\n'));
+      await runner.run('source /home/user/vars.sh');
+      expect(runner.getEnv('MY_VAR')).toBe('sourced_value');
+    });
+
+    it('functions persist after source', async () => {
+      vfs.writeFile('/home/user/funcs.sh', new TextEncoder().encode('greet() { echo hi $1; }\n'));
+      await runner.run('source /home/user/funcs.sh');
+      const result = await runner.run('greet world');
+      expect(result.stdout.trim()).toBe('hi world');
+    });
+
+    it('positional params with extra args', async () => {
+      vfs.writeFile('/home/user/args.sh', new TextEncoder().encode('echo $1 $2\n'));
+      const result = await runner.run('source /home/user/args.sh foo bar');
+      expect(result.stdout.trim()).toBe('foo bar');
+    });
+
+    it('positional params restore after source with args', async () => {
+      // Set up outer positional params via a script
+      vfs.writeFile('/home/user/inner.sh', new TextEncoder().encode('echo $1\n'));
+      vfs.writeFile('/home/user/outer.sh', new TextEncoder().encode(
+        'echo $1\nsource /home/user/inner.sh x\necho $1\n'
+      ));
+      const result = await runner.run('./outer.sh outer_arg');
+      expect(result.stdout).toBe('outer_arg\nx\nouter_arg\n');
+    });
+
+    it('error on file not found', async () => {
+      const result = await runner.run('source /nonexistent.sh');
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('No such file or directory');
+    });
+
+    it('error on no args', async () => {
+      const result = await runner.run('source');
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('filename argument required');
+    });
+
+    it('strips shebang from sourced file', async () => {
+      vfs.writeFile('/home/user/shebang.sh', new TextEncoder().encode('#!/bin/bash\necho no shebang error\n'));
+      const result = await runner.run('source /home/user/shebang.sh');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('no shebang error');
+    });
+  });
 });

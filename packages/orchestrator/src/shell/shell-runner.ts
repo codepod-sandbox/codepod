@@ -24,7 +24,7 @@ import { CommandHistory } from './history.js';
 import type { HistoryEntry } from './history.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'history']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'history', 'source', '.']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -515,6 +515,8 @@ export class ShellRunner {
       result = await this.builtinPkg(args);
     } else if (cmdName === 'history') {
       result = this.builtinHistory(args);
+    } else if (cmdName === 'source' || cmdName === '.') {
+      result = await this.builtinSource(args);
     } else if (cmdName === 'exit') {
       const code = args.length > 0 ? parseInt(args[0], 10) || 0 : this.lastExitCode;
       throw new ExitSignal(code);
@@ -531,11 +533,17 @@ export class ShellRunner {
         // Set positional parameters
         const savedPositionals: Map<string, string | undefined> = new Map();
         savedPositionals.set('#', this.env.get('#'));
-        for (let i = 0; i < Math.max(args.length, 9); i++) {
+        // Save existing positional params (at least up to current count)
+        const prevCount = this.getPositionalArgs().length;
+        for (let i = 0; i < Math.max(args.length, prevCount, 9); i++) {
           savedPositionals.set(String(i + 1), this.env.get(String(i + 1)));
         }
         for (let i = 0; i < args.length; i++) {
           this.env.set(String(i + 1), args[i]);
+        }
+        // Clear stale positional params beyond args.length
+        for (let i = args.length + 1; i <= prevCount; i++) {
+          this.env.delete(String(i));
         }
         this.env.set('#', String(args.length));
         try {
@@ -880,6 +888,12 @@ export class ShellRunner {
     }
     if ('Variable' in part) {
       if (part.Variable === '?') return String(this.lastExitCode);
+      if (part.Variable === '@' || part.Variable === '*') {
+        return this.getPositionalArgs().join(' ');
+      }
+      if (part.Variable === '#') {
+        return String(this.getPositionalArgs().length);
+      }
       return this.env.get(part.Variable) ?? '';
     }
     if ('CommandSub' in part) {
@@ -921,6 +935,17 @@ export class ShellRunner {
       return String(this.evalArithmetic(part.ArithmeticExpansion));
     }
     return '';
+  }
+
+  /** Collect positional parameters $1, $2, ... from env until a gap. */
+  private getPositionalArgs(): string[] {
+    const args: string[] = [];
+    for (let i = 1; ; i++) {
+      const val = this.env.get(String(i));
+      if (val === undefined) break;
+      args.push(val);
+    }
+    return args;
   }
 
   private async spawnOrPython(
@@ -1036,6 +1061,15 @@ export class ShellRunner {
     for (let i = 0; i < args.length; i++) {
       this.env.set(String(i + 1), args[i]);
     }
+    // Clear stale positional params beyond args.length
+    for (let i = args.length + 1; ; i++) {
+      if (this.env.has(String(i))) {
+        this.env.delete(String(i));
+      } else {
+        break;
+      }
+    }
+    this.env.set('#', String(args.length));
 
     // Run the entire script as a single command string.
     // The shell parser handles semicolons, &&, newlines, etc.
@@ -1447,6 +1481,62 @@ export class ShellRunner {
   /** Emit an audit event if an audit handler is configured. */
   private audit(type: string, data?: Record<string, unknown>): void {
     if (this.auditHandler) this.auditHandler(type, data);
+  }
+
+  /** Builtin: source / . — execute commands from a file in the current shell. */
+  private async builtinSource(args: string[]): Promise<RunResult> {
+    if (args.length === 0) {
+      return { exitCode: 2, stdout: '', stderr: 'source: filename argument required\n', executionTimeMs: 0 };
+    }
+
+    const filePath = this.resolvePath(args[0]);
+    let content: Uint8Array;
+    try {
+      content = this.vfs.readFile(filePath);
+    } catch {
+      return { exitCode: 1, stdout: '', stderr: `source: ${args[0]}: No such file or directory\n`, executionTimeMs: 0 };
+    }
+
+    let script = new TextDecoder().decode(content);
+
+    // Strip shebang line if present
+    if (script.startsWith('#!')) {
+      const nl = script.indexOf('\n');
+      script = nl >= 0 ? script.slice(nl + 1) : '';
+    }
+
+    const extraArgs = args.slice(1);
+
+    if (extraArgs.length > 0) {
+      // Save and set positional parameters
+      const savedPositionals: Map<string, string | undefined> = new Map();
+      savedPositionals.set('#', this.env.get('#'));
+      const prevCount = this.getPositionalArgs().length;
+      for (let i = 0; i < Math.max(extraArgs.length, prevCount, 9); i++) {
+        savedPositionals.set(String(i + 1), this.env.get(String(i + 1)));
+      }
+      for (let i = 0; i < extraArgs.length; i++) {
+        this.env.set(String(i + 1), extraArgs[i]);
+      }
+      for (let i = extraArgs.length + 1; i <= prevCount; i++) {
+        this.env.delete(String(i));
+      }
+      this.env.set('#', String(extraArgs.length));
+
+      try {
+        const result = await this.run(script);
+        return result;
+      } finally {
+        // Restore positional parameters
+        for (const [key, val] of savedPositionals) {
+          if (val !== undefined) this.env.set(key, val);
+          else this.env.delete(key);
+        }
+      }
+    }
+
+    // No extra args — just run in current shell
+    return this.run(script);
   }
 
   /** Builtin: history — list or clear command history. */
