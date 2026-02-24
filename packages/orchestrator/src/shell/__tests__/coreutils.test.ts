@@ -1210,6 +1210,15 @@ describe('Coreutils Integration', () => {
       expect(cat.stdout).toBe('gzip tar test');
     });
 
+    it('tar with relative paths resolves against CWD', async () => {
+      vfs.writeFile('/home/user/test.txt', new TextEncoder().encode('hello tar'));
+      const create = await runner.run('tar cf archive.tar test.txt');
+      expect(create.exitCode).toBe(0);
+      const list = await runner.run('tar tf archive.tar');
+      expect(list.exitCode).toBe(0);
+      expect(list.stdout).toContain('test.txt');
+    });
+
     it('tar -tvf shows verbose listing', async () => {
       await runner.run('mkdir -p /home/user/vdir');
       vfs.writeFile('/home/user/vdir/file.txt', new TextEncoder().encode('verbose'));

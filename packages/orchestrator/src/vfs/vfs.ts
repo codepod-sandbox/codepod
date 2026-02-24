@@ -126,7 +126,7 @@ export class VFS {
 
   /** Populate the default directory tree. */
   private initDefaultLayout(): void {
-    const dirs = ['/home', '/home/user', '/tmp', '/bin', '/usr', '/usr/bin', '/mnt'];
+    const dirs = ['/home', '/home/user', '/tmp', '/bin', '/usr', '/usr/bin', '/usr/lib', '/usr/lib/python', '/mnt'];
     for (const dir of dirs) {
       this.mkdirInternal(dir);
     }

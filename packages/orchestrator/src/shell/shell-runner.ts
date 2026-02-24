@@ -290,6 +290,8 @@ export class ShellRunner {
    *
    * Uses VFS stat to disambiguate: only resolves if the resolved path
    * exists in VFS (avoids mangling non-path args like grep patterns).
+   * Also resolves args that look like filenames (contain a dot) so that
+   * tools like tar/gzip can create new files relative to CWD.
    */
   private resolveArgIfPath(cmdName: string, arg: string): string {
     if (ShellRunner.PASSTHROUGH_ARGS.has(cmdName)) return arg;
@@ -305,6 +307,13 @@ export class ShellRunner {
       this.vfs.stat(resolved);
       return resolved;
     } catch {
+      // Arg looks like a filename (e.g. "archive.tar") — resolve it so
+      // tools can create new files relative to CWD.  Must end with a
+      // file extension, not contain glob/pattern chars, and not start
+      // with "." (which would match jq expressions like ".name").
+      if (/\.\w+$/.test(arg) && !/[*?{}\/]/.test(arg) && !arg.startsWith('.')) {
+        return resolved;
+      }
       return arg;
     }
   }

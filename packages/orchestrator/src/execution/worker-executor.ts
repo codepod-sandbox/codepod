@@ -119,9 +119,17 @@ export class WorkerExecutor {
   private async createWorker(): Promise<void> {
     const { Worker } = await import('node:worker_threads');
 
+    // Fresh SAB for each Worker to avoid data races with terminated Workers
+    // whose threads may still be lingering on the old SAB.
+    this.sab = new SharedArrayBuffer(SAB_SIZE);
+    this.int32 = new Int32Array(this.sab);
+
     // In bun, TypeScript files can be loaded directly as Workers.
     const workerPath = new URL('./execution-worker.ts', import.meta.url).pathname;
     this.worker = new Worker(workerPath);
+
+    // Don't let the Worker prevent the process from exiting (e.g. in tests).
+    this.worker.unref();
 
     // Handle messages from Worker
     this.worker.on('message', (msg: any) => {

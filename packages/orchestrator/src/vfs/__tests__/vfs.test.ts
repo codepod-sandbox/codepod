@@ -180,8 +180,8 @@ describe('VFS size limit', () => {
 });
 
 describe('file count limit', () => {
-  // Default layout creates 7 dirs: /home, /home/user, /tmp, /bin, /usr, /usr/bin, /mnt
-  const DEFAULT_INODES = 7;
+  // Default layout creates 9 dirs: /home, /home/user, /tmp, /bin, /usr, /usr/bin, /usr/lib, /usr/lib/python, /mnt
+  const DEFAULT_INODES = 9;
 
   it('rejects file creation when file count limit reached', () => {
     const vfs = new VFS({ fileCount: DEFAULT_INODES + 3 });
@@ -238,7 +238,7 @@ describe('cowClone option propagation', () => {
   });
 
   it('propagates fileCount to cloned VFS', () => {
-    const vfs = new VFS({ fileCount: 9 }); // 7 default dirs + 2 files
+    const vfs = new VFS({ fileCount: 11 }); // 9 default dirs + 2 files
     vfs.writeFile('/tmp/a.txt', new Uint8Array(1));
     vfs.writeFile('/tmp/b.txt', new Uint8Array(1));
     const child = vfs.cowClone();
