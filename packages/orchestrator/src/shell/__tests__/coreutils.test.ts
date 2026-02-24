@@ -29,6 +29,8 @@ const TOOLS = [
   'bc', 'dc',
   'sqlite3',
   'hostname', 'base64', 'sha256sum', 'md5sum', 'stat', 'xxd', 'rev', 'nproc',
+  'fmt', 'fold', 'nl', 'expand', 'unexpand', 'paste', 'comm', 'join',
+  'split', 'strings', 'od', 'cksum', 'truncate',
 ];
 
 /** Map tool name to wasm filename (true/false use special names). */
@@ -1541,6 +1543,251 @@ describe('Coreutils Integration', () => {
     it('prints 1', async () => {
       const result = await runner.run('nproc');
       expect(result.stdout.trim()).toBe('1');
+    });
+  });
+
+  describe('fmt', () => {
+    it('rewraps long lines to default width', async () => {
+      const longLine = 'word '.repeat(20).trim();
+      vfs.writeFile('/tmp/fmt.txt', new TextEncoder().encode(longLine));
+      const r = await runner.run('fmt /tmp/fmt.txt');
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trimEnd().split('\n');
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(75);
+      }
+    });
+
+    it('respects -w flag', async () => {
+      vfs.writeFile('/tmp/fmt2.txt', new TextEncoder().encode('one two three four five six seven eight nine ten'));
+      const r = await runner.run('fmt -w 20 /tmp/fmt2.txt');
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trimEnd().split('\n');
+      expect(lines.length).toBeGreaterThan(1);
+      for (const line of lines) {
+        expect(line.length).toBeLessThanOrEqual(20);
+      }
+    });
+  });
+
+  describe('fold', () => {
+    it('wraps long lines at specified width', async () => {
+      const r = await runner.run('echo "abcdefghij" | fold -w 5');
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trimEnd().split('\n');
+      expect(lines[0]).toBe('abcde');
+      expect(lines[1]).toBe('fghij');
+    });
+
+    it('breaks at spaces with -s', async () => {
+      const r = await runner.run('echo "hello world foo" | fold -w 11 -s');
+      expect(r.exitCode).toBe(0);
+      // -s breaks at last space within width, so "hello" ends first line
+      const lines = r.stdout.trimEnd().split('\n');
+      expect(lines.length).toBe(2);
+      expect(lines[1]).toBe('world foo');
+    });
+  });
+
+  describe('nl', () => {
+    it('numbers all lines by default', async () => {
+      vfs.writeFile('/tmp/nl.txt', new TextEncoder().encode('alpha\nbeta\n'));
+      const r = await runner.run('nl /tmp/nl.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('1\talpha');
+      expect(r.stdout).toContain('2\tbeta');
+    });
+
+    it('skips empty lines with -b t', async () => {
+      vfs.writeFile('/tmp/nl2.txt', new TextEncoder().encode('first\n\nsecond\n'));
+      const r = await runner.run('nl -b t /tmp/nl2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('1\tfirst');
+      expect(r.stdout).toContain('2\tsecond');
+      // The empty line should not be numbered
+      const lines = r.stdout.split('\n');
+      const emptyLine = lines.find(l => l.trim() === '' || (l.includes('\t') && l.split('\t')[1] === ''));
+      // The empty line should have spaces + tab but no number
+      expect(r.stdout).toContain('      \t');
+    });
+  });
+
+  describe('expand', () => {
+    it('converts tabs to spaces', async () => {
+      const r = await runner.run('printf "a\\tb\\n" | expand');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain('\t');
+      expect(r.stdout).toContain('a');
+      expect(r.stdout).toContain('b');
+    });
+
+    it('respects custom tab stop', async () => {
+      const r = await runner.run('printf "\\tx\\n" | expand -t 4');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('    x\n');
+    });
+  });
+
+  describe('unexpand', () => {
+    it('converts leading spaces to tabs', async () => {
+      const r = await runner.run('echo "        hello" | unexpand');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('\thello');
+    });
+
+    it('converts all spaces with -a', async () => {
+      const r = await runner.run('printf "hello           world\\n" | unexpand -a');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('\t');
+    });
+  });
+
+  describe('paste', () => {
+    it('merges two files side by side', async () => {
+      vfs.writeFile('/tmp/p1.txt', new TextEncoder().encode('a\nb\n'));
+      vfs.writeFile('/tmp/p2.txt', new TextEncoder().encode('1\n2\n'));
+      const r = await runner.run('paste /tmp/p1.txt /tmp/p2.txt');
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trimEnd().split('\n');
+      expect(lines[0]).toBe('a\t1');
+      expect(lines[1]).toBe('b\t2');
+    });
+
+    it('uses custom delimiter', async () => {
+      vfs.writeFile('/tmp/pd1.txt', new TextEncoder().encode('x\ny\n'));
+      vfs.writeFile('/tmp/pd2.txt', new TextEncoder().encode('1\n2\n'));
+      const r = await runner.run('paste -d , /tmp/pd1.txt /tmp/pd2.txt');
+      expect(r.exitCode).toBe(0);
+      const lines = r.stdout.trimEnd().split('\n');
+      expect(lines[0]).toBe('x,1');
+      expect(lines[1]).toBe('y,2');
+    });
+  });
+
+  describe('comm', () => {
+    it('shows three columns for sorted files', async () => {
+      vfs.writeFile('/tmp/c1.txt', new TextEncoder().encode('a\nb\nc\n'));
+      vfs.writeFile('/tmp/c2.txt', new TextEncoder().encode('b\nc\nd\n'));
+      const r = await runner.run('comm /tmp/c1.txt /tmp/c2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('a');
+      expect(r.stdout).toContain('\t\tb');
+      expect(r.stdout).toContain('\td');
+    });
+
+    it('suppresses columns', async () => {
+      vfs.writeFile('/tmp/cs1.txt', new TextEncoder().encode('a\nb\n'));
+      vfs.writeFile('/tmp/cs2.txt', new TextEncoder().encode('b\nc\n'));
+      const r = await runner.run('comm -12 /tmp/cs1.txt /tmp/cs2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('b');
+    });
+  });
+
+  describe('join', () => {
+    it('joins two sorted files on first field', async () => {
+      vfs.writeFile('/tmp/j1.txt', new TextEncoder().encode('1 Alice\n2 Bob\n'));
+      vfs.writeFile('/tmp/j2.txt', new TextEncoder().encode('1 Engineering\n2 Sales\n'));
+      const r = await runner.run('join /tmp/j1.txt /tmp/j2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('1 Alice Engineering');
+      expect(r.stdout).toContain('2 Bob Sales');
+    });
+
+    it('uses custom separator', async () => {
+      vfs.writeFile('/tmp/jt1.txt', new TextEncoder().encode('1:Alice\n2:Bob\n'));
+      vfs.writeFile('/tmp/jt2.txt', new TextEncoder().encode('1:Eng\n2:Sales\n'));
+      const r = await runner.run('join -t : /tmp/jt1.txt /tmp/jt2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('1:Alice:Eng');
+    });
+  });
+
+  describe('split', () => {
+    it('splits file into pieces by lines', async () => {
+      vfs.writeFile('/tmp/split_input.txt', new TextEncoder().encode('1\n2\n3\n4\n5\n'));
+      const r = await runner.run('split -l 2 /tmp/split_input.txt /tmp/split_');
+      expect(r.exitCode).toBe(0);
+      const part1 = new TextDecoder().decode(vfs.readFile('/tmp/split_aa'));
+      expect(part1).toBe('1\n2\n');
+      const part2 = new TextDecoder().decode(vfs.readFile('/tmp/split_ab'));
+      expect(part2).toBe('3\n4\n');
+      const part3 = new TextDecoder().decode(vfs.readFile('/tmp/split_ac'));
+      expect(part3).toBe('5\n');
+    });
+  });
+
+  describe('strings', () => {
+    it('extracts printable strings', async () => {
+      // Create a buffer with some printable text surrounded by non-printable bytes
+      const buf = new Uint8Array([0, 0, 72, 101, 108, 108, 111, 0, 0]); // \0\0Hello\0\0
+      vfs.writeFile('/tmp/strings_input.bin', buf);
+      const r = await runner.run('strings -n 4 /tmp/strings_input.bin');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('Hello');
+    });
+
+    it('respects minimum length', async () => {
+      const r = await runner.run('echo "ab longword" | strings -n 6');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('longword');
+    });
+  });
+
+  describe('od', () => {
+    it('produces hex dump', async () => {
+      const r = await runner.run('echo -n "AB" | od -t x');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('41');
+      expect(r.stdout).toContain('42');
+    });
+
+    it('produces character dump', async () => {
+      const r = await runner.run('echo -n "Hi" | od -t c');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('H');
+      expect(r.stdout).toContain('i');
+    });
+  });
+
+  describe('cksum', () => {
+    it('computes CRC-32 checksum', async () => {
+      vfs.writeFile('/tmp/cksum.txt', new TextEncoder().encode('Hello'));
+      const r = await runner.run('cksum /tmp/cksum.txt');
+      expect(r.exitCode).toBe(0);
+      // Should output checksum, byte count, and filename
+      const parts = r.stdout.trim().split(/\s+/);
+      expect(parts.length).toBe(3);
+      expect(parts[1]).toBe('5');
+      expect(parts[2]).toBe('/tmp/cksum.txt');
+    });
+
+    it('reads from stdin', async () => {
+      const r = await runner.run('echo -n "test" | cksum');
+      expect(r.exitCode).toBe(0);
+      const parts = r.stdout.trim().split(/\s+/);
+      expect(parts.length).toBe(2);
+      expect(parts[1]).toBe('4');
+    });
+  });
+
+  describe('truncate', () => {
+    it('truncates file to specified size', async () => {
+      vfs.writeFile('/tmp/trunc.txt', new TextEncoder().encode('Hello World'));
+      const r = await runner.run('truncate -s 5 /tmp/trunc.txt');
+      expect(r.exitCode).toBe(0);
+      const content = new TextDecoder().decode(vfs.readFile('/tmp/trunc.txt'));
+      expect(content).toBe('Hello');
+    });
+
+    it('extends file with zeros', async () => {
+      vfs.writeFile('/tmp/trunc2.txt', new TextEncoder().encode('Hi'));
+      const r = await runner.run('truncate -s 5 /tmp/trunc2.txt');
+      expect(r.exitCode).toBe(0);
+      const data = vfs.readFile('/tmp/trunc2.txt');
+      expect(data.length).toBe(5);
+      expect(data[0]).toBe(72); // 'H'
+      expect(data[1]).toBe(105); // 'i'
     });
   });
 });

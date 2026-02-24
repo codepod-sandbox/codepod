@@ -30,7 +30,7 @@ if [[ "${1:-}" == "--copy-fixtures" ]]; then
   echo ""
   echo "Copying to test fixtures..."
 
-  TOOLS=(cat echo head tail wc sort uniq grep ls mkdir rm cp mv touch tee tr cut basename dirname env printf find sed awk jq du df gzip tar bc dc hostname base64 sha256sum md5sum stat xxd rev nproc)
+  TOOLS=(cat echo head tail wc sort uniq grep ls mkdir rm cp mv touch tee tr cut basename dirname env printf find sed awk jq du df gzip tar bc dc hostname base64 sha256sum md5sum stat xxd rev nproc fmt fold nl expand unexpand paste comm join split strings od cksum truncate)
   for tool in "${TOOLS[@]}"; do
     cp "$TARGET_DIR/$tool.wasm" "$FIXTURES_DIR/$tool.wasm"
   done

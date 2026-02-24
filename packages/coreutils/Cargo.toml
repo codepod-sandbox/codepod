@@ -223,6 +223,58 @@ path = "src/bin/rev.rs"
 name = "nproc"
 path = "src/bin/nproc.rs"
 
+[[bin]]
+name = "fmt"
+path = "src/bin/fmt.rs"
+
+[[bin]]
+name = "fold"
+path = "src/bin/fold.rs"
+
+[[bin]]
+name = "nl"
+path = "src/bin/nl.rs"
+
+[[bin]]
+name = "expand"
+path = "src/bin/expand.rs"
+
+[[bin]]
+name = "unexpand"
+path = "src/bin/unexpand.rs"
+
+[[bin]]
+name = "paste"
+path = "src/bin/paste.rs"
+
+[[bin]]
+name = "comm"
+path = "src/bin/comm.rs"
+
+[[bin]]
+name = "join"
+path = "src/bin/join.rs"
+
+[[bin]]
+name = "split"
+path = "src/bin/split.rs"
+
+[[bin]]
+name = "strings"
+path = "src/bin/strings.rs"
+
+[[bin]]
+name = "od"
+path = "src/bin/od.rs"
+
+[[bin]]
+name = "cksum"
+path = "src/bin/cksum.rs"
+
+[[bin]]
+name = "truncate"
+path = "src/bin/truncate.rs"
+
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 tar = "0.4"

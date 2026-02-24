@@ -1,6 +1,6 @@
 # wasmsand
 
-A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 65+ commands, and a Python runtime — no containers, no kernel, no hardware emulation.
+A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 85+ commands, and a Python runtime — no containers, no kernel, no hardware emulation.
 
 **[Try it in your browser](https://sunnymar.github.io/wasmsand/)**
 
@@ -9,7 +9,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 ## What it does
 
 - **Shell execution** — pipes, redirects, variables, globbing, control flow (`if`/`for`/`while`/`case`), functions, `source`, command substitution, arithmetic, subshells
-- **65+ commands** — cat, grep, sed, awk, find, sort, jq, tar, gzip, curl, sqlite3, bc, and more — coreutils compiled to WebAssembly plus shell builtins
+- **85+ commands** — cat, grep, sed, awk, find, sort, jq, tar, gzip, curl, sqlite3, bc, and more — coreutils compiled to WebAssembly plus shell builtins
 - **Python 3** via RustPython compiled to WASI — standard library available
 - **Virtual filesystem** — in-memory POSIX VFS with optional persistence to IndexedDB (browser) or filesystem (Node)
 - **Virtual `/dev` and `/proc`** — `/dev/null`, `/dev/zero`, `/dev/random`, `/proc/uptime`, `/proc/cpuinfo`, and more
@@ -149,18 +149,22 @@ except RpcError as e:
 
 | Category | Tools |
 |----------|-------|
-| File operations | cat, cp, mv, rm, mkdir, rmdir, ls, touch, ln, chmod |
-| Text processing | grep, sort, uniq, wc, head, tail, cut, tr, tac, tee |
-| Advanced text | sed, awk, diff |
-| Search | find, xargs |
+| File operations | cat, cp, mv, rm, mkdir, rmdir, ls, touch, ln, chmod, truncate, split |
+| Text processing | grep, sort, uniq, wc, head, tail, cut, tr, tac, tee, rev |
+| Text formatting | fmt, fold, nl, expand, unexpand, paste |
+| Advanced text | sed, awk, diff, comm, join |
+| Search | find, xargs, strings |
 | Data formats | jq |
 | Archiving | tar, gzip, gunzip |
 | Disk usage | du, df |
 | Path utilities | basename, dirname, readlink, realpath |
-| Environment | env, printenv, export, unset, uname, whoami, id |
+| Environment | env, printenv, export, unset, uname, whoami, id, hostname, nproc |
 | Math & data | bc, dc, sqlite3 (in-memory) |
+| Encoding & hashing | base64, md5sum, sha256sum, cksum, xxd, od |
 | Scripting | echo, printf, test, expr, seq, sleep, yes, true, false, mktemp |
+| File inspection | stat |
 | Shell builtins | cd, pwd, which, date, source/`.`, exit, history |
+| Shell commands | sh, bash (execute scripts and `sh -c` one-liners) |
 | Package management | pkg (install/list/remove WASI binaries), pip (list/show/install for extensions) |
 | Networking | curl, wget (requires network access to be enabled) |
 | Python | python3 (RustPython, standard library) |

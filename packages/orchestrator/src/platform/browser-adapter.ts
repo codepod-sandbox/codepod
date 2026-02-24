@@ -19,6 +19,8 @@ const BROWSER_TOOLS = [
   'true', 'false',
   'bc', 'dc', 'sqlite3',
   'hostname', 'base64', 'sha256sum', 'md5sum', 'stat', 'xxd', 'rev', 'nproc',
+  'fmt', 'fold', 'nl', 'expand', 'unexpand', 'paste', 'comm', 'join',
+  'split', 'strings', 'od', 'cksum', 'truncate',
 ];
 
 function toolToWasmFile(name: string): string {
