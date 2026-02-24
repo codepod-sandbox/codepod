@@ -25,7 +25,7 @@ import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'history', 'source', '.']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -530,6 +530,8 @@ export class ShellRunner {
       result = await this.builtinWget(args);
     } else if (cmdName === 'pkg') {
       result = await this.builtinPkg(args);
+    } else if (cmdName === 'pip') {
+      result = this.builtinPip(args);
     } else if (cmdName === 'history') {
       result = this.builtinHistory(args);
     } else if (cmdName === 'source' || cmdName === '.') {
@@ -1585,6 +1587,71 @@ export class ShellRunner {
 
     // No extra args — just run in current shell
     return this.run(script);
+  }
+
+  /** Builtin: pip — extension package discovery. */
+  private builtinPip(args: string[]): RunResult {
+    const sub = args[0];
+    if (sub === '--help' || sub === '-h' || sub === undefined) {
+      return {
+        exitCode: 0,
+        stdout: 'Usage: pip <command> [options]\n\nCommands:\n  list     List installed packages\n  show     Show package details\n  install  Install packages\n',
+        stderr: '',
+        executionTimeMs: 0,
+      };
+    }
+    if (sub === 'list') {
+      const names = this.extensionRegistry?.getPackageNames() ?? [];
+      if (names.length === 0) {
+        return { exitCode: 0, stdout: 'Package    Version\n---------- -------\n', stderr: '', executionTimeMs: 0 };
+      }
+      let out = 'Package    Version\n---------- -------\n';
+      for (const name of names) {
+        const ext = this.extensionRegistry!.get(name)!;
+        const ver = ext.pythonPackage!.version;
+        out += `${name.padEnd(10)} ${ver}\n`;
+      }
+      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+    }
+    if (sub === 'show') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: Please provide a package name\n', executionTimeMs: 0 };
+      }
+      const ext = this.extensionRegistry?.get(name);
+      if (!ext?.pythonPackage) {
+        return { exitCode: 1, stdout: '', stderr: `WARNING: Package(s) not found: ${name}\n`, executionTimeMs: 0 };
+      }
+      const pkg = ext.pythonPackage;
+      const files = Object.keys(pkg.files);
+      let out = `Name: ${name}\nVersion: ${pkg.version}\n`;
+      if (pkg.summary) out += `Summary: ${pkg.summary}\n`;
+      out += `Location: /usr/lib/python\nFiles:\n`;
+      for (const f of files) out += `  ${name}/${f}\n`;
+      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+    }
+    if (sub === 'install') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to install\n', executionTimeMs: 0 };
+      }
+      const ext = this.extensionRegistry?.get(name);
+      if (ext?.pythonPackage) {
+        return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
+      }
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: `ERROR: Could not find a version that satisfies the requirement ${name}\n`,
+        executionTimeMs: 0,
+      };
+    }
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `ERROR: unknown command "${sub}"\n`,
+      executionTimeMs: 0,
+    };
   }
 
   /** Builtin: history — list or clear command history. */
