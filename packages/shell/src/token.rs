@@ -5,6 +5,8 @@ use crate::ast::WordPart;
 pub enum Token {
     /// A plain word (command name, argument, glob pattern, etc.)
     Word(String),
+    /// A word that originated from inside quotes — braces should not expand.
+    QuotedWord(String),
     /// A double-quoted string that may contain variable/command interpolation.
     DoubleQuoted(Vec<WordPart>),
     /// An assignment: name=value

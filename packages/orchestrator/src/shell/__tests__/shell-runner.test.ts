@@ -627,4 +627,131 @@ describe('ShellRunner', () => {
       expect(result.stdout.trim()).toBe('no shebang error');
     });
   });
+
+  describe('string parameter expansion', () => {
+    it('${var#pattern} removes shortest prefix', async () => {
+      const result = await runner.run('X=/usr/local/bin; echo ${X#*/}');
+      expect(result.stdout).toBe('usr/local/bin\n');
+    });
+
+    it('${var##pattern} removes longest prefix', async () => {
+      const result = await runner.run('X=/usr/local/bin; echo ${X##*/}');
+      expect(result.stdout).toBe('bin\n');
+    });
+
+    it('${var%pattern} removes shortest suffix', async () => {
+      const result = await runner.run('X=/usr/local/bin; echo ${X%/*}');
+      expect(result.stdout).toBe('/usr/local\n');
+    });
+
+    it('${var%%pattern} removes longest suffix', async () => {
+      const result = await runner.run('X=/usr/local/bin; echo ${X%%/*}');
+      expect(result.stdout).toBe('\n');
+    });
+
+    it('${var/pattern/replacement} replaces first match', async () => {
+      const result = await runner.run('X=hello_world_hello; echo ${X/hello/goodbye}');
+      expect(result.stdout).toBe('goodbye_world_hello\n');
+    });
+
+    it('${var//pattern/replacement} replaces all matches', async () => {
+      const result = await runner.run('X=hello_world_hello; echo ${X//hello/goodbye}');
+      expect(result.stdout).toBe('goodbye_world_goodbye\n');
+    });
+
+    it('returns empty when var is unset', async () => {
+      const result = await runner.run('echo ${UNSET_VAR#pattern}');
+      expect(result.stdout).toBe('\n');
+    });
+  });
+
+  describe('set flags', () => {
+    it('set -e aborts on non-zero exit', async () => {
+      const result = await runner.run('set -e; echo before; false; echo after');
+      expect(result.stdout).toContain('before');
+      expect(result.stdout).not.toContain('after');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('set -e does not abort in if condition', async () => {
+      const result = await runner.run('set -e; if false; then echo no; else echo yes; fi; echo after');
+      expect(result.stdout).toContain('yes');
+      expect(result.stdout).toContain('after');
+    });
+
+    it('set -e does not abort in || chain', async () => {
+      const result = await runner.run('set -e; false || echo fallback; echo after');
+      expect(result.stdout).toContain('fallback');
+      expect(result.stdout).toContain('after');
+    });
+
+    it('set -u errors on undefined variable', async () => {
+      const result = await runner.run('set -u; echo $UNDEFINED_VAR_XYZ');
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('UNDEFINED_VAR_XYZ');
+    });
+
+    it('set +e disables errexit', async () => {
+      const result = await runner.run('set -e; set +e; false; echo still-here');
+      expect(result.stdout).toContain('still-here');
+    });
+  });
+
+  describe('brace expansion', () => {
+    it('expands comma-separated braces', async () => {
+      const result = await runner.run('echo {a,b,c}');
+      expect(result.stdout).toBe('a b c\n');
+    });
+
+    it('expands braces with prefix and suffix', async () => {
+      const result = await runner.run('echo file.{txt,md,rs}');
+      expect(result.stdout).toBe('file.txt file.md file.rs\n');
+    });
+
+    it('expands numeric range', async () => {
+      const result = await runner.run('echo {1..5}');
+      expect(result.stdout).toBe('1 2 3 4 5\n');
+    });
+
+    it('expands reverse numeric range', async () => {
+      const result = await runner.run('echo {5..1}');
+      expect(result.stdout).toBe('5 4 3 2 1\n');
+    });
+
+    it('expands alpha range', async () => {
+      const result = await runner.run('echo {a..e}');
+      expect(result.stdout).toBe('a b c d e\n');
+    });
+
+    it('does not expand single item in braces', async () => {
+      const result = await runner.run('echo {solo}');
+      expect(result.stdout).toBe('{solo}\n');
+    });
+  });
+
+  describe('read builtin', () => {
+    it('reads from here-document into variable', async () => {
+      await runner.run('read NAME <<EOF\nalice\nEOF');
+      const result = await runner.run('echo "name is $NAME"');
+      expect(result.stdout).toBe('name is alice\n');
+    });
+
+    it('splits into multiple variables', async () => {
+      await runner.run('read A B C <<EOF\none two three four\nEOF');
+      const result = await runner.run('echo "$A $B $C"');
+      expect(result.stdout).toBe('one two three four\n');
+    });
+
+    it('uses REPLY when no variable given', async () => {
+      await runner.run('read <<EOF\nhello world\nEOF');
+      const result = await runner.run('echo "$REPLY"');
+      expect(result.stdout).toBe('hello world\n');
+    });
+
+    it('returns 1 on empty input', async () => {
+      // read with no stdin data should fail
+      const result = await runner.run('read X <<EOF\nEOF');
+      expect(result.exitCode).not.toBe(0);
+    });
+  });
 });

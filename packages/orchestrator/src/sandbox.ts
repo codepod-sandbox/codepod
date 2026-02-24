@@ -162,6 +162,11 @@ export class Sandbox {
       runner.setExtensionRegistry(extensionRegistry);
     }
 
+    // Apply tool allowlist to ShellRunner so extensions are also gated
+    if (options.security?.toolAllowlist) {
+      runner.setToolAllowlist(options.security.toolAllowlist);
+    }
+
     // Apply output limits from security options
     if (options.security?.limits) {
       runner.setOutputLimits(options.security.limits.stdoutBytes, options.security.limits.stderrBytes);
@@ -561,6 +566,19 @@ export class Sandbox {
     const envMap = this.runner.getEnvMap();
     for (const [k, v] of envMap) {
       childRunner.setEnv(k, v);
+    }
+
+    // Propagate tool allowlist and output limits to forked runner
+    if (this.security?.toolAllowlist) {
+      childRunner.setToolAllowlist(this.security.toolAllowlist);
+    }
+    if (this.security?.limits) {
+      childRunner.setOutputLimits(this.security.limits.stdoutBytes, this.security.limits.stderrBytes);
+    }
+
+    // Wire extension registry to forked runner
+    if (this.extensionRegistry && this.extensionRegistry.list().length > 0) {
+      childRunner.setExtensionRegistry(this.extensionRegistry);
     }
 
     // Create WorkerExecutor for the child if parent uses hard-kill

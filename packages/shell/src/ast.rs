@@ -6,6 +6,7 @@ use crate::token::RedirectType;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum WordPart {
     Literal(String),
+    QuotedLiteral(String),
     Variable(String),
     CommandSub(String),
     ParamExpansion {

@@ -1,6 +1,6 @@
 # wasmsand
 
-A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 60+ commands, and a Python runtime — no containers, no kernel, no hardware emulation.
+A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 65+ commands, and a Python runtime — no containers, no kernel, no hardware emulation.
 
 **[Try it in your browser](https://sunnymar.github.io/wasmsand/)**
 
@@ -9,7 +9,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 ## What it does
 
 - **Shell execution** — pipes, redirects, variables, globbing, control flow (`if`/`for`/`while`/`case`), functions, `source`, command substitution, arithmetic, subshells
-- **60+ commands** — cat, grep, sed, awk, find, sort, jq, tar, gzip, curl, and more — coreutils compiled to WebAssembly plus shell builtins
+- **65+ commands** — cat, grep, sed, awk, find, sort, jq, tar, gzip, curl, sqlite3, bc, and more — coreutils compiled to WebAssembly plus shell builtins
 - **Python 3** via RustPython compiled to WASI — standard library available
 - **Virtual filesystem** — in-memory POSIX VFS with optional persistence to IndexedDB (browser) or filesystem (Node)
 - **Virtual `/dev` and `/proc`** — `/dev/null`, `/dev/zero`, `/dev/random`, `/proc/uptime`, `/proc/cpuinfo`, and more
@@ -158,6 +158,7 @@ except RpcError as e:
 | Disk usage | du, df |
 | Path utilities | basename, dirname, readlink, realpath |
 | Environment | env, printenv, export, unset, uname, whoami, id |
+| Math & data | bc, dc, sqlite3 (in-memory) |
 | Scripting | echo, printf, test, expr, seq, sleep, yes, true, false, mktemp |
 | Shell builtins | cd, pwd, which, date, source/`.`, exit, history |
 | Package management | pkg (install/list/remove WASI binaries), pip (list/show/install for extensions) |
@@ -168,11 +169,11 @@ except RpcError as e:
 
 **Operators and I/O:** pipes (`|`), redirects (`>`, `>>`, `<`, `2>`, `2>&1`), here-documents (`<<EOF`), boolean operators (`&&`, `||`), semicolons, subshells (`(...)`)
 
-**Quoting and expansion:** single/double quotes, escape sequences, tilde expansion (`~`), variable expansion (`$VAR`, `${VAR:-default}`, `${VAR:+alt}`, `${VAR:=val}`, `${VAR:?err}`), command substitution (`$(...)`), arithmetic expansion (`$(( ))`), globbing (`*`, `?`)
+**Quoting and expansion:** single/double quotes, escape sequences, tilde expansion (`~`), variable expansion (`$VAR`, `${VAR:-default}`, `${VAR:+alt}`, `${VAR:=val}`, `${VAR:?err}`), string manipulation (`${VAR#prefix}`, `${VAR%suffix}`, `${VAR/old/new}`), command substitution (`$(...)`), arithmetic expansion (`$(( ))`), brace expansion (`{a,b,c}`, `{1..5}`), globbing (`*`, `?`)
 
-**Control flow:** `if`/`elif`/`else`/`fi`, `for`/`do`/`done`, `while`/`do`/`done`, `case`/`esac`, `break`, `continue`
+**Control flow:** `if`/`elif`/`else`/`fi`, `for`/`do`/`done`, `while`/`do`/`done`, `case`/`esac`, `break`, `continue`, `set -e` (errexit), `set -u` (nounset)
 
-**Functions and sourcing:** function definitions (`name() { ...; }`), `source`/`.` for loading files into the current shell
+**Functions and sourcing:** function definitions (`name() { ...; }`), `source`/`.` for loading files, `read` for stdin parsing
 
 **Special variables:** `$?` (last exit code), `$@` and `$*` (all positional parameters), `$#` (argument count), `$1`–`$9` (positional parameters)
 
@@ -616,9 +617,9 @@ The shell parser is written in Rust and compiled to WASI. It emits a JSON AST th
 - **No networking by default.** Network access is off and must be explicitly enabled with a domain allowlist.
 - **In-memory filesystem.** The VFS is in-memory (256 MB default, configurable). Use persistence modes or `exportState`/`importState` to persist across sessions.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O rather than in parallel. This is correct but slower than a real shell for streaming workloads.
-- **Bash subset, not full POSIX.** No aliases, `eval`, job control, or advanced file descriptor manipulation (e.g., `>&3`).
+- **Bash-compatible, not full POSIX.** Covers most scripting needs — control flow, functions, parameter expansion, here-docs, subshells, arithmetic. Missing: aliases, `eval`, `trap`, job control (`&`, `fg`, `bg`), arrays, process substitution (`<(...)`), advanced file descriptor manipulation (`>&3`).
 - **No runtime pip install from PyPI.** `pip install` only works for host-registered extensions. There is no PyPI access — Python packages are either standard library or provided via extensions.
-- **Security hardening is in progress.** Timeout enforcement, capability policies, output truncation, and session isolation are implemented but not yet audited for adversarial untrusted input in production.
+- **Security is defense-in-depth, not formally audited.** Hard-kill timeout via `Worker.terminate()`, tool allowlist, output/memory limits, VFS isolation (no host filesystem access), network default-deny with domain allowlist, file count limits, command length limits, and session isolation are all implemented. Not yet pen-tested against adversarial untrusted input in production.
 
 ## Development
 
@@ -631,7 +632,7 @@ bun install
 # Build everything (Rust WASM + TypeScript)
 make build
 
-# Run tests (668 tests)
+# Run tests
 make test
 
 # Package for npm

@@ -25,7 +25,7 @@ import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -38,6 +38,7 @@ interface Word {
 
 type WordPart =
   | { Literal: string }
+  | { QuotedLiteral: string }
   | { Variable: string }
   | { CommandSub: string }
   | { ParamExpansion: { var: string; op: string; default: string } }
@@ -139,6 +140,12 @@ export class ShellRunner {
   private history = new CommandHistory();
   /** Host-provided extension registry for custom commands/packages. */
   private extensionRegistry: ExtensionRegistry | null = null;
+  /** Optional allowlist of tool names permitted by security policy. */
+  private toolAllowlist: Set<string> | null = null;
+  /** Shell option flags (e=errexit, u=nounset). */
+  private shellFlags = new Set<string>();
+  /** Whether we're in a conditional context (if condition, || / && chains). */
+  private inConditionalContext = false;
 
   constructor(
     vfs: VfsLike,
@@ -239,6 +246,11 @@ export class ShellRunner {
         } catch { /* ignore if exists */ }
       }
     });
+  }
+
+  /** Set the tool allowlist so extension commands are also gated. */
+  setToolAllowlist(list: string[]): void {
+    this.toolAllowlist = new Set(list);
   }
 
   /** Signal cancellation to the shell runner. */
@@ -502,8 +514,21 @@ export class ShellRunner {
     }
 
     // Expand words (async — may contain command substitutions)
-    const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
-    const expandedWords = this.expandGlobs(rawWords);
+    let rawWords: string[];
+    try {
+      rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
+    } catch (err: unknown) {
+      if (err instanceof CancelledError) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const expandErr: RunResult = { exitCode: 1, stdout: '', stderr: `${msg}\n`, executionTimeMs: 0 };
+      if (this.shellFlags.has('e') && !this.inConditionalContext) {
+        throw new ExitSignal(expandErr.exitCode, expandErr.stdout, expandErr.stderr);
+      }
+      return expandErr;
+    }
+    const bracedWords = this.expandBraces(rawWords);
+    const restoredWords = bracedWords.map(w => w.replace(/\uE000/g, '{').replace(/\uE001/g, '}'));
+    const expandedWords = this.expandGlobs(restoredWords);
     const cmdName = expandedWords[0];
     let args = expandedWords.slice(1);
 
@@ -511,6 +536,19 @@ export class ShellRunner {
     const pwd = this.env.get('PWD');
     if (pwd && this.needsDefaultDir(cmdName, args)) {
       args = [...args, pwd];
+    }
+
+    // Extract stdin redirect / heredoc early so builtins (e.g. read) can use it
+    let stdinData: Uint8Array | undefined;
+    for (const redirect of simple.redirects) {
+      const rt = redirect.redirect_type;
+      if (typeof rt === 'object' && 'StdinFrom' in rt) {
+        stdinData = this.vfs.readFile(this.resolvePath(rt.StdinFrom));
+      } else if (typeof rt === 'object' && 'Heredoc' in rt) {
+        stdinData = new TextEncoder().encode(rt.Heredoc);
+      } else if (typeof rt === 'object' && 'HeredocStrip' in rt) {
+        stdinData = new TextEncoder().encode(rt.HeredocStrip);
+      }
     }
 
     // Handle shell builtins — capture result, then fall through to redirect handling
@@ -555,6 +593,17 @@ export class ShellRunner {
       result = { ...EMPTY_RESULT };
     } else if (cmdName === 'false') {
       result = { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
+    } else if (cmdName === 'set') {
+      for (const arg of args) {
+        if (arg.startsWith('-')) {
+          for (const ch of arg.slice(1)) this.shellFlags.add(ch);
+        } else if (arg.startsWith('+')) {
+          for (const ch of arg.slice(1)) this.shellFlags.delete(ch);
+        }
+      }
+      result = { ...EMPTY_RESULT };
+    } else if (cmdName === 'read') {
+      result = this.builtinRead(args, stdinData);
     }
 
     if (!result) {
@@ -600,19 +649,6 @@ export class ShellRunner {
     }
 
     if (!result) {
-      // Handle stdin redirect / heredoc
-      let stdinData: Uint8Array | undefined;
-      for (const redirect of simple.redirects) {
-        const rt = redirect.redirect_type;
-        if (typeof rt === 'object' && 'StdinFrom' in rt) {
-          stdinData = this.vfs.readFile(this.resolvePath(rt.StdinFrom));
-        } else if (typeof rt === 'object' && 'Heredoc' in rt) {
-          stdinData = new TextEncoder().encode(rt.Heredoc);
-        } else if (typeof rt === 'object' && 'HeredocStrip' in rt) {
-          stdinData = new TextEncoder().encode(rt.HeredocStrip);
-        }
-      }
-
       // Spawn the process (or delegate to PythonRunner)
       try {
         result = await this.spawnOrPython(cmdName, args, stdinData);
@@ -686,13 +722,20 @@ export class ShellRunner {
       }
     }
 
-    return {
+    const finalResult: RunResult = {
       exitCode: result.exitCode,
       stdout,
       stderr,
       executionTimeMs: result.executionTimeMs,
       truncated: result.truncated,
     };
+
+    // set -e (errexit): abort on non-zero exit unless in conditional context
+    if (this.shellFlags.has('e') && !this.inConditionalContext && finalResult.exitCode !== 0) {
+      throw new ExitSignal(finalResult.exitCode, finalResult.stdout, finalResult.stderr);
+    }
+
+    return finalResult;
   }
 
   private async execPipeline(pipeline: {
@@ -718,22 +761,28 @@ export class ShellRunner {
       if (typeof cmd === 'object' && 'Simple' in cmd) {
         const simple = cmd.Simple;
         const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
-        const expandedWords = this.expandGlobs(rawWords);
+        const bracedWords = this.expandBraces(rawWords);
+        const restoredWords = bracedWords.map(w => w.replace(/\uE000/g, '{').replace(/\uE001/g, '}'));
+        const expandedWords = this.expandGlobs(restoredWords);
         const cmdName = expandedWords[0];
         const args = expandedWords.slice(1);
 
-        try {
-          const result = await this.spawnOrPython(cmdName, args, stdinData);
-          lastResult = { ...result };
-        } catch (err: unknown) {
-          if (err instanceof CancelledError) throw err;
-          const msg = err instanceof Error ? err.message : String(err);
-          lastResult = {
-            exitCode: 127,
-            stdout: '',
-            stderr: `${cmdName}: ${msg}\n`,
-            executionTimeMs: 0,
-          };
+        if (cmdName === 'read') {
+          lastResult = this.builtinRead(args, stdinData);
+        } else {
+          try {
+            const result = await this.spawnOrPython(cmdName, args, stdinData);
+            lastResult = { ...result };
+          } catch (err: unknown) {
+            if (err instanceof CancelledError) throw err;
+            const msg = err instanceof Error ? err.message : String(err);
+            lastResult = {
+              exitCode: 127,
+              stdout: '',
+              stderr: `${cmdName}: ${msg}\n`,
+              executionTimeMs: 0,
+            };
+          }
         }
       } else {
         // For non-simple commands in a pipeline, execute them normally
@@ -752,11 +801,25 @@ export class ShellRunner {
     right: Command;
   }): Promise<RunResult> {
     let leftResult: RunResult;
-    try {
-      leftResult = await this.execCommand(list.left);
-    } catch (e) {
-      if (e instanceof ExitSignal) throw e;
-      throw e;
+
+    // For && and ||, the left side is in a conditional context (errexit suppressed)
+    if (list.op === 'And' || list.op === 'Or') {
+      const prevCtx = this.inConditionalContext;
+      this.inConditionalContext = true;
+      try {
+        leftResult = await this.execCommand(list.left);
+      } catch (e) {
+        this.inConditionalContext = prevCtx;
+        throw e;
+      }
+      this.inConditionalContext = prevCtx;
+    } else {
+      try {
+        leftResult = await this.execCommand(list.left);
+      } catch (e) {
+        if (e instanceof ExitSignal) throw e;
+        throw e;
+      }
     }
     // Update lastExitCode so $? reflects intermediate results
     this.lastExitCode = leftResult.exitCode;
@@ -777,7 +840,14 @@ export class ShellRunner {
       }
       case 'Or': {
         if (leftResult.exitCode !== 0) {
-          const rightResult = await this.execCommand(list.right);
+          const prevCtx = this.inConditionalContext;
+          this.inConditionalContext = true;
+          let rightResult: RunResult;
+          try {
+            rightResult = await this.execCommand(list.right);
+          } finally {
+            this.inConditionalContext = prevCtx;
+          }
           return {
             exitCode: rightResult.exitCode,
             stdout: leftResult.stdout + rightResult.stdout,
@@ -823,7 +893,14 @@ export class ShellRunner {
     then_body: Command;
     else_body: Command | null;
   }): Promise<RunResult> {
-    const condResult = await this.execCommand(ifCmd.condition);
+    const prevCtx = this.inConditionalContext;
+    this.inConditionalContext = true;
+    let condResult: RunResult;
+    try {
+      condResult = await this.execCommand(ifCmd.condition);
+    } finally {
+      this.inConditionalContext = prevCtx;
+    }
 
     if (condResult.exitCode === 0) {
       return this.execCommand(ifCmd.then_body);
@@ -840,7 +917,9 @@ export class ShellRunner {
     body: Command;
   }): Promise<RunResult> {
     const rawWords = await Promise.all(forCmd.words.map(w => this.expandWord(w)));
-    const expandedWords = this.expandGlobs(rawWords);
+    const bracedWords = this.expandBraces(rawWords);
+    const restoredWords = bracedWords.map(w => w.replace(/\uE000/g, '{').replace(/\uE001/g, '}'));
+    const expandedWords = this.expandGlobs(restoredWords);
     let combinedStdout = '';
     let combinedStderr = '';
     let lastExitCode = 0;
@@ -881,7 +960,14 @@ export class ShellRunner {
     let iterations = 0;
 
     while (iterations < MAX_ITERATIONS) {
-      const condResult = await this.execCommand(whileCmd.condition);
+      const prevCtx = this.inConditionalContext;
+      this.inConditionalContext = true;
+      let condResult: RunResult;
+      try {
+        condResult = await this.execCommand(whileCmd.condition);
+      } finally {
+        this.inConditionalContext = prevCtx;
+      }
       if (condResult.exitCode !== 0) {
         break;
       }
@@ -927,6 +1013,12 @@ export class ShellRunner {
       if (s.startsWith('~/')) return (this.env.get('HOME') ?? '/home/user') + s.slice(1);
       return s;
     }
+    if ('QuotedLiteral' in part) {
+      // Replace { and } with sentinels so brace expansion skips them
+      return part.QuotedLiteral
+        .replace(/\{/g, '\uE000')
+        .replace(/\}/g, '\uE001');
+    }
     if ('Variable' in part) {
       if (part.Variable === '?') return String(this.lastExitCode);
       if (part.Variable === '@' || part.Variable === '*') {
@@ -935,7 +1027,11 @@ export class ShellRunner {
       if (part.Variable === '#') {
         return String(this.getPositionalArgs().length);
       }
-      return this.env.get(part.Variable) ?? '';
+      const val = this.env.get(part.Variable);
+      if (val === undefined && this.shellFlags.has('u') && !/^\d+$/.test(part.Variable)) {
+        throw new Error(`${part.Variable}: unbound variable`);
+      }
+      return val ?? '';
     }
     if ('CommandSub' in part) {
       if (this.substitutionDepth >= MAX_SUBSTITUTION_DEPTH) {
@@ -969,6 +1065,30 @@ export class ShellRunner {
           }
           return val;
         }
+        case '#': {
+          if (val === undefined) return '';
+          return this.trimPrefix(val, operand, false);
+        }
+        case '##': {
+          if (val === undefined) return '';
+          return this.trimPrefix(val, operand, true);
+        }
+        case '%': {
+          if (val === undefined) return '';
+          return this.trimSuffix(val, operand, false);
+        }
+        case '%%': {
+          if (val === undefined) return '';
+          return this.trimSuffix(val, operand, true);
+        }
+        case '/': {
+          if (val === undefined) return '';
+          return this.replacePattern(val, operand, false);
+        }
+        case '//': {
+          if (val === undefined) return '';
+          return this.replacePattern(val, operand, true);
+        }
         default: return val ?? '';
       }
     }
@@ -989,6 +1109,83 @@ export class ShellRunner {
     return args;
   }
 
+  /** Convert a shell glob pattern to a RegExp (anchored). */
+  private globToRegex(pattern: string): RegExp {
+    const re = pattern
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.');
+    return new RegExp('^' + re + '$');
+  }
+
+  /** Remove prefix matching glob pattern. greedy=true for longest match (##). */
+  private trimPrefix(val: string, pattern: string, greedy: boolean): string {
+    const re = this.globToRegex(pattern);
+    if (greedy) {
+      for (let i = val.length; i >= 0; i--) {
+        if (re.test(val.slice(0, i))) return val.slice(i);
+      }
+    } else {
+      for (let i = 0; i <= val.length; i++) {
+        if (re.test(val.slice(0, i))) return val.slice(i);
+      }
+    }
+    return val;
+  }
+
+  /** Remove suffix matching glob pattern. greedy=true for longest match (%%). */
+  private trimSuffix(val: string, pattern: string, greedy: boolean): string {
+    const re = this.globToRegex(pattern);
+    if (greedy) {
+      for (let i = 0; i <= val.length; i++) {
+        if (re.test(val.slice(i))) return val.slice(0, i);
+      }
+    } else {
+      for (let i = val.length; i >= 0; i--) {
+        if (re.test(val.slice(i))) return val.slice(0, i);
+      }
+    }
+    return val;
+  }
+
+  /** Replace first or all occurrences. Operand format: "pattern/replacement". */
+  private replacePattern(val: string, operand: string, all: boolean): string {
+    const slashIdx = operand.indexOf('/');
+    const pattern = slashIdx >= 0 ? operand.slice(0, slashIdx) : operand;
+    const replacement = slashIdx >= 0 ? operand.slice(slashIdx + 1) : '';
+    const re = this.globToRegex(pattern);
+
+    if (all) {
+      let result = '';
+      let i = 0;
+      while (i < val.length) {
+        let matched = false;
+        for (let j = val.length; j > i; j--) {
+          if (re.test(val.slice(i, j))) {
+            result += replacement;
+            i = j;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          result += val[i];
+          i++;
+        }
+      }
+      return result;
+    } else {
+      for (let i = 0; i < val.length; i++) {
+        for (let j = val.length; j > i; j--) {
+          if (re.test(val.slice(i, j))) {
+            return val.slice(0, i) + replacement + val.slice(j);
+          }
+        }
+      }
+      return val;
+    }
+  }
+
   private async spawnOrPython(
     cmdName: string,
     args: string[],
@@ -1003,7 +1200,16 @@ export class ShellRunner {
     } else if (PYTHON_COMMANDS.has(cmdName)) {
       result = await this.execPython(args, stdinData);
     } else if (this.extensionRegistry?.has(cmdName) && this.extensionRegistry.get(cmdName)!.command) {
-      result = await this.execExtension(cmdName, args, stdinData);
+      if (this.toolAllowlist && !this.toolAllowlist.has(cmdName)) {
+        result = {
+          exitCode: 126,
+          stdout: '',
+          stderr: `${cmdName}: tool not allowed by security policy\n`,
+          executionTimeMs: 0,
+        };
+      } else {
+        result = await this.execExtension(cmdName, args, stdinData);
+      }
     } else {
       // Resolve relative path args for WASI binaries. WASI resolves all
       // paths against the root preopen (/), so we must convert relative
@@ -1032,6 +1238,8 @@ export class ShellRunner {
   private async execExtension(
     cmdName: string, args: string[], stdinData: Uint8Array | undefined,
   ): Promise<SpawnResult> {
+    if (Date.now() > this.deadlineMs) throw new CancelledError('TIMEOUT');
+
     const start = performance.now();
     if (args.includes('--help')) {
       const desc = this.extensionRegistry!.get(cmdName)!.description ?? `${cmdName}: extension command\n`;
@@ -1049,11 +1257,26 @@ export class ShellRunner {
       env: Object.fromEntries(this.env),
       cwd: this.env.get('PWD') ?? '/',
     });
+
+    let stdout = r.stdout;
+    let stderr = r.stderr ?? '';
+    let truncated: { stdout: boolean; stderr: boolean } | undefined;
+
+    if (this.stdoutLimit !== undefined && stdout.length > this.stdoutLimit) {
+      stdout = stdout.slice(0, this.stdoutLimit);
+      truncated = { stdout: true, stderr: false };
+    }
+    if (this.stderrLimit !== undefined && stderr.length > this.stderrLimit) {
+      stderr = stderr.slice(0, this.stderrLimit);
+      truncated = truncated ? { ...truncated, stderr: true } : { stdout: false, stderr: true };
+    }
+
     return {
       exitCode: r.exitCode,
-      stdout: r.stdout,
-      stderr: r.stderr ?? '',
+      stdout,
+      stderr,
       executionTimeMs: performance.now() - start,
+      truncated,
     };
   }
 
@@ -1225,6 +1448,103 @@ export class ShellRunner {
       if (depth > 0) i++;
     }
     return { text: s.slice(start, i), end: i + 1 };
+  }
+
+  /**
+   * Expand brace patterns in a list of words.
+   * {a,b,c} → ['a', 'b', 'c'], prefix{a,b}suffix → ['prefixasuffix', 'prefixbsuffix']
+   * {1..5} → ['1', '2', '3', '4', '5'], {a..e} → ['a', 'b', 'c', 'd', 'e']
+   */
+  private expandBraces(words: string[]): string[] {
+    const result: string[] = [];
+    for (const word of words) {
+      result.push(...this.expandBrace(word));
+    }
+    return result;
+  }
+
+  private expandBrace(word: string): string[] {
+    // Find the first top-level { } pair
+    let depth = 0;
+    let start = -1;
+    for (let i = 0; i < word.length; i++) {
+      if (word[i] === '{') {
+        if (depth === 0) start = i;
+        depth++;
+      } else if (word[i] === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          const prefix = word.slice(0, start);
+          const inner = word.slice(start + 1, i);
+          const suffix = word.slice(i + 1);
+
+          // Check for range pattern: {a..z} or {1..10}
+          const rangeMatch = inner.match(/^(-?\w+)\.\.(-?\w+)$/);
+          if (rangeMatch) {
+            const items = this.expandRange(rangeMatch[1], rangeMatch[2]);
+            if (items.length > 0) {
+              return items.flatMap(item => this.expandBrace(prefix + item + suffix));
+            }
+          }
+
+          // Check for comma-separated list (must have at least one comma)
+          if (inner.includes(',')) {
+            const items = this.splitBraceItems(inner);
+            if (items.length > 1) {
+              return items.flatMap(item => this.expandBrace(prefix + item + suffix));
+            }
+          }
+
+          // Not a valid brace expansion — treat as literal
+          return [word];
+        }
+      }
+    }
+    return [word];
+  }
+
+  private splitBraceItems(inner: string): string[] {
+    const items: string[] = [];
+    let depth = 0;
+    let current = '';
+    for (const ch of inner) {
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      if (ch === ',' && depth === 0) {
+        items.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    items.push(current);
+    return items;
+  }
+
+  private expandRange(startStr: string, endStr: string): string[] {
+    // Numeric range
+    const startNum = parseInt(startStr, 10);
+    const endNum = parseInt(endStr, 10);
+    if (!isNaN(startNum) && !isNaN(endNum)) {
+      const items: string[] = [];
+      const step = startNum <= endNum ? 1 : -1;
+      for (let i = startNum; step > 0 ? i <= endNum : i >= endNum; i += step) {
+        items.push(String(i));
+      }
+      return items;
+    }
+    // Alpha range (single chars)
+    if (startStr.length === 1 && endStr.length === 1) {
+      const s = startStr.charCodeAt(0);
+      const e = endStr.charCodeAt(0);
+      const items: string[] = [];
+      const step = s <= e ? 1 : -1;
+      for (let i = s; step > 0 ? i <= e : i >= e; i += step) {
+        items.push(String.fromCharCode(i));
+      }
+      return items;
+    }
+    return [];
   }
 
   /**
@@ -1498,6 +1818,35 @@ export class ShellRunner {
     }
     const output = args.slice(startIdx).join(' ') + (trailingNewline ? '\n' : '');
     return { exitCode: 0, stdout: output, stderr: '', executionTimeMs: 0 };
+  }
+
+  /** Builtin: read — read a line from stdin and assign to variables. */
+  private builtinRead(args: string[], stdinData: Uint8Array | undefined): RunResult {
+    let raw = false;
+    const varNames: string[] = [];
+    for (const a of args) {
+      if (a === '-r') { raw = true; continue; }
+      varNames.push(a);
+    }
+    if (varNames.length === 0) varNames.push('REPLY');
+
+    // Get first line from stdin
+    const input = stdinData ? new TextDecoder().decode(stdinData) : '';
+    const firstLine = input.split('\n')[0];
+    if (!stdinData?.length || (firstLine === '' && input === '')) {
+      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
+    }
+    const line = raw ? firstLine : firstLine.replace(/\\(.)/g, '$1');
+    const parts = line.split(/[ \t]+/);
+    for (let i = 0; i < varNames.length; i++) {
+      if (i === varNames.length - 1) {
+        // Last variable gets the remainder
+        this.env.set(varNames[i], parts.slice(i).join(' '));
+      } else {
+        this.env.set(varNames[i], parts[i] ?? '');
+      }
+    }
+    return { ...EMPTY_RESULT };
   }
 
   /** Builtin: which — locate a command by searching known tool names. */

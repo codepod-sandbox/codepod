@@ -327,6 +327,61 @@ describe('Security MVP acceptance', () => {
     sb.destroy();
   });
 
+  // Extension + tool allowlist enforcement (Task 3)
+  it('tool allowlist blocks extension not in list', async () => {
+    const sb = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: { toolAllowlist: ['echo'] },
+      extensions: [{
+        name: 'greet',
+        description: 'says hello',
+        command: async () => ({ stdout: 'hello\n', exitCode: 0 }),
+      }],
+    });
+    const result = await sb.run('greet');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('not allowed');
+    sb.destroy();
+  });
+
+  it('tool allowlist allows extension in list', async () => {
+    const sb = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: { toolAllowlist: ['echo', 'greet'] },
+      extensions: [{
+        name: 'greet',
+        description: 'says hello',
+        command: async () => ({ stdout: 'hello\n', exitCode: 0 }),
+      }],
+    });
+    const result = await sb.run('greet');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('hello\n');
+    sb.destroy();
+  });
+
+  // Extension output limits (Task 4)
+  it('extension output is truncated to stdout limit', async () => {
+    const sb = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      security: { limits: { stdoutBytes: 100 } },
+      extensions: [{
+        name: 'flood',
+        description: 'outputs a lot',
+        command: async () => ({ stdout: 'x'.repeat(10000), exitCode: 0 }),
+      }],
+    });
+    const result = await sb.run('flood');
+    expect(result.stdout.length).toBeLessThanOrEqual(200);
+    sb.destroy();
+  });
+
   // Destroy prevents further use
   it('destroyed sandbox rejects all operations', async () => {
     const sb = await Sandbox.create({

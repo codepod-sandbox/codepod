@@ -73,6 +73,7 @@ impl Parser {
             Some(token) => matches!(
                 token,
                 Token::Word(_)
+                    | Token::QuotedWord(_)
                     | Token::DoubleQuoted(_)
                     | Token::Assignment(_, _)
                     | Token::Variable(_)
@@ -245,6 +246,14 @@ impl Parser {
                         words.push(Word::literal(&w));
                     }
                 }
+                Some(Token::QuotedWord(_)) => {
+                    seen_word = true;
+                    if let Token::QuotedWord(w) = self.advance() {
+                        words.push(Word {
+                            parts: vec![WordPart::QuotedLiteral(w)],
+                        });
+                    }
+                }
                 Some(Token::Variable(_)) => {
                     seen_word = true;
                     if let Token::Variable(v) = self.advance() {
@@ -351,6 +360,13 @@ impl Parser {
                 Some(Token::Word(_)) => {
                     if let Token::Word(w) = self.advance() {
                         words.push(Word::literal(&w));
+                    }
+                }
+                Some(Token::QuotedWord(_)) => {
+                    if let Token::QuotedWord(w) = self.advance() {
+                        words.push(Word {
+                            parts: vec![WordPart::QuotedLiteral(w)],
+                        });
                     }
                 }
                 Some(Token::Variable(_)) => {
@@ -469,12 +485,21 @@ impl Parser {
         Command::Case { word, items }
     }
 
-    /// Parse a single word token (Word, Variable, DoubleQuoted, CommandSub).
+    /// Parse a single word token (Word, QuotedWord, Variable, DoubleQuoted, CommandSub).
     fn parse_word_token(&mut self) -> Word {
         match self.peek() {
             Some(Token::Word(_)) => {
                 if let Token::Word(w) = self.advance() {
                     Word::literal(&w)
+                } else {
+                    unreachable!()
+                }
+            }
+            Some(Token::QuotedWord(_)) => {
+                if let Token::QuotedWord(w) = self.advance() {
+                    Word {
+                        parts: vec![WordPart::QuotedLiteral(w)],
+                    }
                 } else {
                     unreachable!()
                 }

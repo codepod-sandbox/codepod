@@ -54,16 +54,37 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
 
-        // Braces
-        if chars[pos] == '{' {
-            tokens.push(Token::LBrace);
-            pos += 1;
-            continue;
-        }
-        if chars[pos] == '}' {
-            tokens.push(Token::RBrace);
-            pos += 1;
-            continue;
+        // Braces — only special at command-start position (reserved words).
+        // In other positions, { and } are literal word characters so that
+        // brace expansion patterns like {a,b,c} pass through to the runtime.
+        if chars[pos] == '{' || chars[pos] == '}' {
+            let is_command_start = tokens.is_empty()
+                || matches!(
+                    tokens.last(),
+                    Some(Token::Pipe)
+                        | Some(Token::And)
+                        | Some(Token::Or)
+                        | Some(Token::Semi)
+                        | Some(Token::Newline)
+                        | Some(Token::LParen)
+                        | Some(Token::RParen)
+                        | Some(Token::Do)
+                        | Some(Token::Then)
+                        | Some(Token::Else)
+                        | Some(Token::LBrace)
+                        | Some(Token::DoubleSemi)
+                );
+            if is_command_start {
+                if chars[pos] == '{' {
+                    tokens.push(Token::LBrace);
+                } else {
+                    tokens.push(Token::RBrace);
+                }
+                pos += 1;
+                continue;
+            }
+            // Otherwise fall through to read_word — { and } become literal
+            // characters in the word (enabling brace expansion patterns).
         }
 
         // Bang (pipeline negation) — standalone ! at command start position
@@ -317,7 +338,7 @@ pub fn lex(input: &str) -> Vec<Token> {
         if chars[pos] == '\'' {
             pos += 1; // skip opening quote
             let content = read_until_char(&chars, &mut pos, '\'');
-            tokens.push(Token::Word(content));
+            tokens.push(Token::QuotedWord(content));
             continue;
         }
 
@@ -325,10 +346,10 @@ pub fn lex(input: &str) -> Vec<Token> {
         if chars[pos] == '"' {
             pos += 1; // skip opening quote
             let parts = lex_double_quoted(&chars, &mut pos);
-            // Optimize: if there's a single literal part, emit a plain Word token
+            // Optimize: if there's a single quoted literal part, emit a QuotedWord token
             if parts.len() == 1 {
-                if let WordPart::Literal(ref s) = parts[0] {
-                    tokens.push(Token::Word(s.clone()));
+                if let WordPart::QuotedLiteral(ref s) = parts[0] {
+                    tokens.push(Token::QuotedWord(s.clone()));
                     continue;
                 }
             }
@@ -443,7 +464,7 @@ fn lex_double_quoted(chars: &[char], pos: &mut usize) -> Vec<WordPart> {
         if chars[*pos] == '$' {
             // Flush accumulated literal text
             if !literal.is_empty() {
-                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                parts.push(WordPart::QuotedLiteral(std::mem::take(&mut literal)));
             }
             *pos += 1;
             if *pos < chars.len() && chars[*pos] == '(' {
@@ -510,7 +531,7 @@ fn lex_double_quoted(chars: &[char], pos: &mut usize) -> Vec<WordPart> {
         // Backtick command substitution
         if chars[*pos] == '`' {
             if !literal.is_empty() {
-                parts.push(WordPart::Literal(std::mem::take(&mut literal)));
+                parts.push(WordPart::QuotedLiteral(std::mem::take(&mut literal)));
             }
             *pos += 1;
             let content = read_until_char(chars, pos, '`');
@@ -528,12 +549,12 @@ fn lex_double_quoted(chars: &[char], pos: &mut usize) -> Vec<WordPart> {
 
     // Flush remaining literal text
     if !literal.is_empty() {
-        parts.push(WordPart::Literal(literal));
+        parts.push(WordPart::QuotedLiteral(literal));
     }
 
-    // If completely empty (e.g. ""), return a single empty literal
+    // If completely empty (e.g. ""), return a single empty quoted literal
     if parts.is_empty() {
-        parts.push(WordPart::Literal(String::new()));
+        parts.push(WordPart::QuotedLiteral(String::new()));
     }
 
     parts
@@ -765,7 +786,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("echo".into()),
-                Token::Word("hello world".into()),
+                Token::QuotedWord("hello world".into()),
             ]
         );
     }
@@ -777,7 +798,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("echo".into()),
-                Token::Word("hello world".into()),
+                Token::QuotedWord("hello world".into()),
             ]
         );
     }
@@ -958,7 +979,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("echo".into()),
-                Token::Word("hello # not comment".into()),
+                Token::QuotedWord("hello # not comment".into()),
             ]
         );
     }
@@ -970,7 +991,7 @@ mod tests {
             tokens,
             vec![
                 Token::Word("echo".into()),
-                Token::Word("hello # not comment".into()),
+                Token::QuotedWord("hello # not comment".into()),
             ]
         );
     }
