@@ -49,6 +49,15 @@ export class PackageManager {
     if (!this.policy.enabled) {
       throw new PkgError('E_PKG_DISABLED', 'Package installation is disabled');
     }
+    if (this.policy.allowedHosts !== undefined) {
+      const host = new URL(sourceUrl).hostname;
+      if (!this.matchesHostList(host, this.policy.allowedHosts)) {
+        throw new PkgError(
+          'E_PKG_HOST_DENIED',
+          `Host '${host}' is not in the allowed hosts list`,
+        );
+      }
+    }
     if (this.packages.has(name)) {
       throw new PkgError('E_PKG_EXISTS', `Package '${name}' is already installed`);
     }
@@ -117,6 +126,25 @@ export class PackageManager {
   }
 
   // -- Private helpers --
+
+  /** Check if a hostname matches any entry in a host pattern list. */
+  private matchesHostList(host: string, list: string[]): boolean {
+    for (const pattern of list) {
+      if (pattern.startsWith('*.')) {
+        const suffix = pattern.slice(2);
+        if (
+          host.endsWith(suffix) &&
+          host.length > suffix.length &&
+          host[host.length - suffix.length - 1] === '.'
+        ) {
+          return true;
+        }
+      } else if (host === pattern) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /** Load metadata from VFS if it exists. */
   private loadMetadata(): void {

@@ -157,6 +157,35 @@ describe('PackageManager', () => {
     expect(info!.name).toBe('persisted');
   });
 
+  it('install throws E_PKG_HOST_DENIED when host is not in allowedHosts', () => {
+    const { mgr } = createManager({ allowedHosts: ['trusted.com'] });
+    try {
+      mgr.install('bad', SAMPLE_WASM, 'https://evil.com/bad.wasm');
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(PkgError);
+      expect((e as PkgError).code).toBe('E_PKG_HOST_DENIED');
+    }
+  });
+
+  it('install succeeds when host IS in allowedHosts', () => {
+    const { mgr } = createManager({ allowedHosts: ['trusted.com'] });
+    mgr.install('good', SAMPLE_WASM, 'https://trusted.com/good.wasm');
+    expect(mgr.info('good')).not.toBeNull();
+  });
+
+  it('install succeeds with wildcard allowedHosts pattern', () => {
+    const { mgr } = createManager({ allowedHosts: ['*.example.com'] });
+    mgr.install('wild', SAMPLE_WASM, 'https://cdn.example.com/wild.wasm');
+    expect(mgr.info('wild')).not.toBeNull();
+  });
+
+  it('install succeeds when allowedHosts is undefined (all hosts allowed)', () => {
+    const { mgr } = createManager();
+    mgr.install('any', SAMPLE_WASM, 'https://anywhere.org/any.wasm');
+    expect(mgr.info('any')).not.toBeNull();
+  });
+
   it('PackagePolicy type is accepted in SecurityOptions', () => {
     // Type-level check — if this compiles, the type is correctly integrated.
     const opts: SecurityOptions = {
