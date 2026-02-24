@@ -190,98 +190,111 @@ export class WorkerExecutor {
   private handleProxyRequest(): void {
     const { metadata, binary } = decodeRequest(this.sab);
     const op = metadata.op as string;
+    const path = (metadata.path as string) ?? '';
     const vfs = this.config.vfs;
 
-    // Wrap all VFS operations in withWriteAccess so the Worker can write
-    // to system paths (e.g. /.wasi-preopen-sentinel, /bin) that are
-    // outside the default writable-path list.
-    try {
-      vfs.withWriteAccess(() => {
-        switch (op) {
-          case 'readFile': {
-            const content = vfs.readFile(metadata.path as string);
-            encodeResponse(this.sab, {}, content);
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'writeFile': {
-            vfs.writeFile(metadata.path as string, binary ?? new Uint8Array(0));
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'stat': {
-            const st = vfs.stat(metadata.path as string);
-            encodeResponse(this.sab, {
-              type: st.type,
-              size: st.size,
-              permissions: st.permissions,
-              mtime: st.mtime.toISOString(),
-              ctime: st.ctime.toISOString(),
-              atime: st.atime.toISOString(),
-            });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'readdir': {
-            const entries = vfs.readdir(metadata.path as string);
-            encodeResponse(this.sab, { entries });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'mkdir': {
-            vfs.mkdir(metadata.path as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'mkdirp': {
-            vfs.mkdirp(metadata.path as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'unlink': {
-            vfs.unlink(metadata.path as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'rmdir': {
-            vfs.rmdir(metadata.path as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'rename': {
-            vfs.rename(metadata.oldPath as string, metadata.newPath as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'chmod': {
-            vfs.chmod(metadata.path as string, metadata.mode as number);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          case 'symlink': {
-            vfs.symlink(metadata.target as string, metadata.path as string);
-            encodeResponse(this.sab, { ok: true });
-            Atomics.store(this.int32, 0, STATUS_RESPONSE);
-            break;
-          }
-          default: {
-            encodeResponse(this.sab, {
-              error: true,
-              code: 'ENOSYS',
-              message: `Unknown op: ${op}`,
-            });
-            Atomics.store(this.int32, 0, STATUS_ERROR);
-            break;
-          }
+    // Only use withWriteAccess for write operations targeting system paths.
+    // Read operations never need it; user-path writes go through normal
+    // writable-path checks.
+    const READ_OPS = new Set(['readFile', 'stat', 'readdir']);
+    const SYSTEM_PREFIXES = ['/bin', '/usr', '/.wasi'];
+    const isRead = READ_OPS.has(op);
+    const isSystemPath = SYSTEM_PREFIXES.some(p => path.startsWith(p));
+    const needsElevation = !isRead && isSystemPath;
+
+    const exec = () => {
+      switch (op) {
+        case 'readFile': {
+          const content = vfs.readFile(metadata.path as string);
+          encodeResponse(this.sab, {}, content);
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
         }
-      });
+        case 'writeFile': {
+          vfs.writeFile(metadata.path as string, binary ?? new Uint8Array(0));
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'stat': {
+          const st = vfs.stat(metadata.path as string);
+          encodeResponse(this.sab, {
+            type: st.type,
+            size: st.size,
+            permissions: st.permissions,
+            mtime: st.mtime.toISOString(),
+            ctime: st.ctime.toISOString(),
+            atime: st.atime.toISOString(),
+          });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'readdir': {
+          const entries = vfs.readdir(metadata.path as string);
+          encodeResponse(this.sab, { entries });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'mkdir': {
+          vfs.mkdir(metadata.path as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'mkdirp': {
+          vfs.mkdirp(metadata.path as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'unlink': {
+          vfs.unlink(metadata.path as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'rmdir': {
+          vfs.rmdir(metadata.path as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'rename': {
+          vfs.rename(metadata.oldPath as string, metadata.newPath as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'chmod': {
+          vfs.chmod(metadata.path as string, metadata.mode as number);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'symlink': {
+          vfs.symlink(metadata.target as string, metadata.path as string);
+          encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        default: {
+          encodeResponse(this.sab, {
+            error: true,
+            code: 'ENOSYS',
+            message: `Unknown op: ${op}`,
+          });
+          Atomics.store(this.int32, 0, STATUS_ERROR);
+          break;
+        }
+      }
+    };
+
+    try {
+      if (needsElevation) {
+        vfs.withWriteAccess(exec);
+      } else {
+        exec();
+      }
     } catch (err) {
       if (err instanceof VfsError) {
         encodeResponse(this.sab, {

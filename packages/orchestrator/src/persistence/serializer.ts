@@ -1,8 +1,14 @@
 /**
  * VFS state serializer.
  *
- * Binary format:
+ * Binary format v2:
  *   [4 bytes: magic "WSND" = 0x57, 0x53, 0x4E, 0x44]
+ *   [4 bytes: version = 2, little-endian uint32]
+ *   [4 bytes: CRC32 of JSON payload]
+ *   [rest:    JSON UTF-8 encoded SerializedState]
+ *
+ * Binary format v1 (legacy, read-only):
+ *   [4 bytes: magic "WSND"]
  *   [4 bytes: version = 1, little-endian uint32]
  *   [rest:    JSON UTF-8 encoded SerializedState]
  *
@@ -32,13 +38,39 @@ function fromBase64(b64: string): Uint8Array {
 const MAGIC = new Uint8Array([0x57, 0x53, 0x4e, 0x44]); // "WSND"
 
 /** Current format version. */
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
 
-/** Header size: 4 bytes magic + 4 bytes version. */
-const HEADER_SIZE = 8;
+/** Header size for v1: 4 bytes magic + 4 bytes version. */
+const HEADER_SIZE_V1 = 8;
+
+/** Header size for v2: 4 bytes magic + 4 bytes version + 4 bytes CRC32. */
+const HEADER_SIZE_V2 = 12;
 
 /** Paths whose subtrees are virtual providers and must not be serialized. */
 const EXCLUDED_PREFIXES = ['/dev', '/proc'];
+
+// ---- CRC32 implementation ----
+
+/** Pre-computed CRC32 lookup table (IEEE polynomial). */
+const CRC32_TABLE = new Uint32Array(256);
+{
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    CRC32_TABLE[i] = c;
+  }
+}
+
+/** Compute CRC32 checksum of a Uint8Array. */
+function crc32(data: Uint8Array): number {
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < data.byteLength; i++) {
+    crc = CRC32_TABLE[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
 
 /**
  * Export the full VFS state (files + directories) and optional env vars
@@ -60,7 +92,10 @@ export function exportState(vfs: VfsLike, env?: Map<string, string>, excludePath
   const json = JSON.stringify(state);
   const jsonBytes = new TextEncoder().encode(json);
 
-  const blob = new Uint8Array(HEADER_SIZE + jsonBytes.byteLength);
+  // Compute CRC32 of the JSON payload
+  const checksum = crc32(jsonBytes);
+
+  const blob = new Uint8Array(HEADER_SIZE_V2 + jsonBytes.byteLength);
 
   // Write magic
   blob.set(MAGIC, 0);
@@ -69,8 +104,11 @@ export function exportState(vfs: VfsLike, env?: Map<string, string>, excludePath
   const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
   view.setUint32(4, FORMAT_VERSION, true);
 
+  // Write CRC32 checksum (little-endian uint32)
+  view.setUint32(8, checksum, true);
+
   // Write JSON payload
-  blob.set(jsonBytes, HEADER_SIZE);
+  blob.set(jsonBytes, HEADER_SIZE_V2);
 
   return blob;
 }
@@ -85,7 +123,7 @@ export function exportState(vfs: VfsLike, env?: Map<string, string>, excludePath
  * Returns the restored environment map if one was stored in the blob.
  */
 export function importState(vfs: VfsLike, blob: Uint8Array): { env?: Map<string, string> } {
-  if (blob.byteLength < HEADER_SIZE) {
+  if (blob.byteLength < HEADER_SIZE_V1) {
     throw new Error('Invalid state blob: too short');
   }
 
@@ -96,15 +134,31 @@ export function importState(vfs: VfsLike, blob: Uint8Array): { env?: Map<string,
     }
   }
 
-  // Validate version
+  // Read version
   const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
   const version = view.getUint32(4, true);
-  if (version !== FORMAT_VERSION) {
+
+  let jsonBytes: Uint8Array;
+
+  if (version === 2) {
+    // v2: validate CRC32 checksum
+    if (blob.byteLength < HEADER_SIZE_V2) {
+      throw new Error('Invalid state blob: too short for v2');
+    }
+    const storedChecksum = view.getUint32(8, true);
+    jsonBytes = blob.subarray(HEADER_SIZE_V2);
+    const computedChecksum = crc32(jsonBytes);
+    if (storedChecksum !== computedChecksum) {
+      throw new Error('State blob checksum mismatch: data may be corrupted');
+    }
+  } else if (version === 1) {
+    // v1: no checksum (backwards compat)
+    jsonBytes = blob.subarray(HEADER_SIZE_V1);
+  } else {
     throw new Error(`Unsupported state version: ${version}`);
   }
 
   // Parse JSON payload
-  const jsonBytes = blob.subarray(HEADER_SIZE);
   const json = new TextDecoder().decode(jsonBytes);
   const state: SerializedState = JSON.parse(json);
 

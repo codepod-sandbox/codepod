@@ -21,6 +21,7 @@ export class ProcessManager {
   private networkBridge: NetworkBridgeLike | null;
   private currentHost: WasiHost | null = null;
   private toolAllowlist: Set<string> | null = null;
+  private extensionHandler: ((cmd: Record<string, unknown>) => Record<string, unknown>) | null = null;
 
   constructor(vfs: VfsLike, adapter: PlatformAdapter, networkBridge?: NetworkBridgeLike, toolAllowlist?: string[]) {
     this.vfs = vfs;
@@ -42,6 +43,11 @@ export class ProcessManager {
   /** Cancel the currently running WASI process, if any. */
   cancelCurrent(): void {
     this.currentHost?.cancelExecution();
+  }
+
+  /** Set the extension handler for Python package → host extension bridge. */
+  setExtensionHandler(handler: (cmd: Record<string, unknown>) => Record<string, unknown>): void {
+    this.extensionHandler = handler;
   }
 
   /** Check if a tool name is registered. */
@@ -88,6 +94,7 @@ export class ProcessManager {
       preopens: { '/': '/' },
       stdin: stdinData,
       networkBridge: this.networkBridge ?? undefined,
+      extensionHandler: this.extensionHandler ?? undefined,
       stdoutLimit: opts.stdoutLimit,
       stderrLimit: opts.stderrLimit,
       deadlineMs: opts.deadlineMs,
@@ -112,13 +119,31 @@ export class ProcessManager {
     // Check exported memory against limit
     if (opts.memoryBytes !== undefined) {
       const mem = instance.exports.memory as WebAssembly.Memory | undefined;
-      if (mem && mem.buffer.byteLength > opts.memoryBytes) {
-        return {
-          exitCode: 1,
-          stdout: '',
-          stderr: `memory limit exceeded: ${mem.buffer.byteLength} > ${opts.memoryBytes}\n`,
-          executionTimeMs: 0,
-        };
+      if (mem) {
+        // Check if the module defined its own unbounded memory (no import).
+        // If we injected a bounded memory via imports, that's fine. But if
+        // the module defines memory internally, it bypasses our limit.
+        const moduleImports = WebAssembly.Module.imports(module);
+        const hasMemoryImport = moduleImports.some(imp => imp.kind === 'memory');
+        if (!hasMemoryImport) {
+          // Module defined its own memory — check if it has a maximum.
+          // We can't inspect the max directly, but we can reject if the
+          // module exported memory without importing our bounded one.
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `module defines its own memory, bypassing sandbox memory limit\n`,
+            executionTimeMs: 0,
+          };
+        }
+        if (mem.buffer.byteLength > opts.memoryBytes) {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `memory limit exceeded: ${mem.buffer.byteLength} > ${opts.memoryBytes}\n`,
+            executionTimeMs: 0,
+          };
+        }
       }
     }
 

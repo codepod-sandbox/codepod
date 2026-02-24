@@ -107,7 +107,7 @@ describe('Persistence serializer', () => {
       });
 
       const blob = exportState(vfs);
-      const json = dec(blob.subarray(8));
+      const json = dec(blob.subarray(12));
       const state = JSON.parse(json);
 
       // No entry should have a path starting with /dev or /proc
@@ -159,7 +159,7 @@ describe('Persistence serializer', () => {
       expect(blob[3]).toBe(0x44); // D
 
       const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
-      expect(view.getUint32(4, true)).toBe(1);
+      expect(view.getUint32(4, true)).toBe(2);
     });
   });
 });

@@ -22,9 +22,10 @@ import type { PackageManager } from '../pkg/manager.js';
 import { PkgError } from '../pkg/manager.js';
 import { CommandHistory } from './history.js';
 import type { HistoryEntry } from './history.js';
+import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'history', 'source', '.']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
 const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
@@ -100,6 +101,7 @@ const EMPTY_RESULT: RunResult = {
 };
 
 const MAX_SUBSTITUTION_DEPTH = 50;
+const MAX_FUNCTION_DEPTH = 100;
 
 class BreakSignal { constructor(public depth: number = 1) {} }
 class ContinueSignal { constructor(public depth: number = 1) {} }
@@ -123,6 +125,8 @@ export class ShellRunner {
   private deadlineMs: number = Infinity;
   /** Current command substitution nesting depth. */
   private substitutionDepth = 0;
+  /** Current shell function call depth. */
+  private functionDepth = 0;
   /** Exit code of the last executed command (for $?). */
   private lastExitCode = 0;
   /** User-defined shell functions. */
@@ -133,6 +137,8 @@ export class ShellRunner {
   private auditHandler: ((type: string, data?: Record<string, unknown>) => void) | null = null;
   /** Command history tracker. */
   private history = new CommandHistory();
+  /** Host-provided extension registry for custom commands/packages. */
+  private extensionRegistry: ExtensionRegistry | null = null;
 
   constructor(
     vfs: VfsLike,
@@ -219,6 +225,20 @@ export class ShellRunner {
   /** Set the audit event handler for emitting structured audit events. */
   setAuditHandler(handler: (type: string, data?: Record<string, unknown>) => void): void {
     this.auditHandler = handler;
+  }
+
+  /** Set the extension registry and write /bin stubs for discovery. */
+  setExtensionRegistry(registry: ExtensionRegistry): void {
+    this.extensionRegistry = registry;
+    this.vfs.withWriteAccess(() => {
+      const enc = new TextEncoder();
+      for (const name of registry.getCommandNames()) {
+        try {
+          this.vfs.writeFile(`/bin/${name}`, enc.encode(`#!/bin/wasmsand\n# extension: ${name}\n`));
+          this.vfs.chmod(`/bin/${name}`, 0o755);
+        } catch { /* ignore if exists */ }
+      }
+    });
   }
 
   /** Signal cancellation to the shell runner. */
@@ -513,6 +533,8 @@ export class ShellRunner {
       result = await this.builtinWget(args);
     } else if (cmdName === 'pkg') {
       result = await this.builtinPkg(args);
+    } else if (cmdName === 'pip') {
+      result = this.builtinPip(args);
     } else if (cmdName === 'history') {
       result = this.builtinHistory(args);
     } else if (cmdName === 'source' || cmdName === '.') {
@@ -530,6 +552,14 @@ export class ShellRunner {
       // Check if it's a user-defined function
       const fn = this.functions.get(cmdName);
       if (fn) {
+        if (this.functionDepth >= MAX_FUNCTION_DEPTH) {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: `${cmdName}: maximum function nesting depth (${MAX_FUNCTION_DEPTH}) exceeded\n`,
+            executionTimeMs: 0,
+          };
+        }
         // Set positional parameters
         const savedPositionals: Map<string, string | undefined> = new Map();
         savedPositionals.set('#', this.env.get('#'));
@@ -546,9 +576,11 @@ export class ShellRunner {
           this.env.delete(String(i));
         }
         this.env.set('#', String(args.length));
+        this.functionDepth++;
         try {
           result = await this.execCommand(fn);
         } finally {
+          this.functionDepth--;
           // Restore positional parameters
           for (const [key, val] of savedPositionals) {
             if (val !== undefined) this.env.set(key, val);
@@ -961,6 +993,8 @@ export class ShellRunner {
       result = await this.execPath(cmdName, args, stdinData);
     } else if (PYTHON_COMMANDS.has(cmdName)) {
       result = await this.execPython(args, stdinData);
+    } else if (this.extensionRegistry?.has(cmdName) && this.extensionRegistry.get(cmdName)!.command) {
+      result = await this.execExtension(cmdName, args, stdinData);
     } else {
       // Resolve relative path args for WASI binaries. WASI resolves all
       // paths against the root preopen (/), so we must convert relative
@@ -983,6 +1017,35 @@ export class ShellRunner {
     if (Date.now() > this.deadlineMs) throw new CancelledError('TIMEOUT');
 
     return result;
+  }
+
+  /** Execute a host-provided extension command. */
+  private async execExtension(
+    cmdName: string, args: string[], stdinData: Uint8Array | undefined,
+  ): Promise<SpawnResult> {
+    const start = performance.now();
+    if (args.includes('--help')) {
+      const desc = this.extensionRegistry!.get(cmdName)!.description ?? `${cmdName}: extension command\n`;
+      return {
+        exitCode: 0,
+        stdout: desc.endsWith('\n') ? desc : desc + '\n',
+        stderr: '',
+        executionTimeMs: performance.now() - start,
+      };
+    }
+    const stdin = stdinData ? new TextDecoder().decode(stdinData) : '';
+    const r = await this.extensionRegistry!.invoke(cmdName, {
+      args,
+      stdin,
+      env: Object.fromEntries(this.env),
+      cwd: this.env.get('PWD') ?? '/',
+    });
+    return {
+      exitCode: r.exitCode,
+      stdout: r.stdout,
+      stderr: r.stderr ?? '',
+      executionTimeMs: performance.now() - start,
+    };
   }
 
   /** Run a Python script via PythonRunner. */
@@ -1433,7 +1496,7 @@ export class ShellRunner {
     let stdout = '';
     let exitCode = 0;
     for (const name of args) {
-      if (this.mgr.hasTool(name) || PYTHON_COMMANDS.has(name) || SHELL_BUILTINS.has(name)) {
+      if (this.mgr.hasTool(name) || PYTHON_COMMANDS.has(name) || SHELL_BUILTINS.has(name) || this.extensionRegistry?.has(name)) {
         stdout += `/bin/${name}\n`;
       } else {
         exitCode = 1;
@@ -1539,6 +1602,71 @@ export class ShellRunner {
     return this.run(script);
   }
 
+  /** Builtin: pip — extension package discovery. */
+  private builtinPip(args: string[]): RunResult {
+    const sub = args[0];
+    if (sub === '--help' || sub === '-h' || sub === undefined) {
+      return {
+        exitCode: 0,
+        stdout: 'Usage: pip <command> [options]\n\nCommands:\n  list     List installed packages\n  show     Show package details\n  install  Install packages\n',
+        stderr: '',
+        executionTimeMs: 0,
+      };
+    }
+    if (sub === 'list') {
+      const names = this.extensionRegistry?.getPackageNames() ?? [];
+      if (names.length === 0) {
+        return { exitCode: 0, stdout: 'Package    Version\n---------- -------\n', stderr: '', executionTimeMs: 0 };
+      }
+      let out = 'Package    Version\n---------- -------\n';
+      for (const name of names) {
+        const ext = this.extensionRegistry!.get(name)!;
+        const ver = ext.pythonPackage!.version;
+        out += `${name.padEnd(10)} ${ver}\n`;
+      }
+      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+    }
+    if (sub === 'show') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: Please provide a package name\n', executionTimeMs: 0 };
+      }
+      const ext = this.extensionRegistry?.get(name);
+      if (!ext?.pythonPackage) {
+        return { exitCode: 1, stdout: '', stderr: `WARNING: Package(s) not found: ${name}\n`, executionTimeMs: 0 };
+      }
+      const pkg = ext.pythonPackage;
+      const files = Object.keys(pkg.files);
+      let out = `Name: ${name}\nVersion: ${pkg.version}\n`;
+      if (pkg.summary) out += `Summary: ${pkg.summary}\n`;
+      out += `Location: /usr/lib/python\nFiles:\n`;
+      for (const f of files) out += `  ${name}/${f}\n`;
+      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+    }
+    if (sub === 'install') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to install\n', executionTimeMs: 0 };
+      }
+      const ext = this.extensionRegistry?.get(name);
+      if (ext?.pythonPackage) {
+        return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
+      }
+      return {
+        exitCode: 1,
+        stdout: '',
+        stderr: `ERROR: Could not find a version that satisfies the requirement ${name}\n`,
+        executionTimeMs: 0,
+      };
+    }
+    return {
+      exitCode: 1,
+      stdout: '',
+      stderr: `ERROR: unknown command "${sub}"\n`,
+      executionTimeMs: 0,
+    };
+  }
+
   /** Builtin: history — list or clear command history. */
   private builtinHistory(args: string[]): RunResult {
     const sub = args[0] ?? 'list';
@@ -1636,6 +1764,11 @@ export class ShellRunner {
       return { exitCode: 1, stdout: '', stderr: 'pkg install: could not derive package name from URL\n', executionTimeMs: 0 };
     }
 
+    // Reject invalid package names (path traversal, empty, dots-only)
+    if (name === '' || name === '.' || name === '..' || name.includes('/')) {
+      return { exitCode: 1, stdout: '', stderr: `pkg install: invalid package name '${name}'\n`, executionTimeMs: 0 };
+    }
+
     // Check host against policy BEFORE fetching (to emit audit event early)
     let host: string;
     try {
@@ -1659,13 +1792,18 @@ export class ShellRunner {
 
     try {
       // Fetch the WASM binary
-      const response = await globalThis.fetch(url);
+      const response = await (this.gateway?.fetch(url) ?? globalThis.fetch(url));
       if (!response.ok) {
         this.audit('package.install.denied', { name, url, host, reason: `HTTP ${response.status}` });
         return { exitCode: 1, stdout: '', stderr: `pkg install: fetch failed with HTTP ${response.status}\n`, executionTimeMs: 0 };
       }
 
-      const wasmBytes = new Uint8Array(await response.arrayBuffer());
+      const arrayBuf = await NetworkGateway.readResponseArrayBuffer(response);
+      if (arrayBuf === null) {
+        this.audit('package.install.denied', { name, url, host, reason: 'response too large' });
+        return { exitCode: 1, stdout: '', stderr: 'pkg install: response body too large\n', executionTimeMs: 0 };
+      }
+      const wasmBytes = new Uint8Array(arrayBuf);
 
       // Install via PackageManager (validates host, size, count limits)
       this.packageManager!.install(name, wasmBytes, url);
@@ -1797,7 +1935,7 @@ export class ShellRunner {
         return { exitCode: 0, stdout: headerStr, stderr: '', executionTimeMs: 0 };
       }
 
-      const body = await response.text();
+      const body = await NetworkGateway.readResponseBody(response);
       if (outputFile) {
         this.vfs.writeFile(outputFile, new TextEncoder().encode(body));
         return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
@@ -1836,7 +1974,7 @@ export class ShellRunner {
 
     try {
       const response = await this.gateway.fetch(url);
-      const body = await response.text();
+      const body = await NetworkGateway.readResponseBody(response);
 
       if (toStdout) return { exitCode: 0, stdout: body, stderr: '', executionTimeMs: 0 };
 

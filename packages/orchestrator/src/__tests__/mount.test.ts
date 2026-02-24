@@ -119,7 +119,7 @@ describe('mounts', () => {
     sandbox.writeFile('/tmp/normal.txt', enc('normal'));
 
     const blob = sandbox.exportState();
-    const json = new TextDecoder().decode(blob.subarray(8));
+    const json = new TextDecoder().decode(blob.subarray(12));
     const state = JSON.parse(json);
 
     // /mnt/tools subtree should be excluded

@@ -32,6 +32,12 @@ export function encodeRequest(
   const uint8 = new Uint8Array(sab);
 
   const jsonBytes = encoder.encode(JSON.stringify(metadata));
+  const binLen = binary?.byteLength ?? 0;
+  const totalNeeded = METADATA_OFFSET + jsonBytes.byteLength + binLen;
+  if (totalNeeded > sab.byteLength) {
+    throw new Error(`SAB overflow: need ${totalNeeded} bytes but buffer is ${sab.byteLength}`);
+  }
+
   uint8.set(jsonBytes, METADATA_OFFSET);
   Atomics.store(int32, 1, jsonBytes.byteLength);
 
@@ -53,6 +59,11 @@ export function decodeRequest(sab: SharedArrayBuffer): {
 
   const metaLen = Atomics.load(int32, 1);
   const binLen = Atomics.load(int32, 2);
+
+  const totalNeeded = METADATA_OFFSET + metaLen + binLen;
+  if (totalNeeded > sab.byteLength) {
+    throw new Error(`SAB bounds exceeded: need ${totalNeeded} bytes but buffer is ${sab.byteLength}`);
+  }
 
   const metaBytes = uint8.slice(METADATA_OFFSET, METADATA_OFFSET + metaLen);
   const metadata = JSON.parse(decoder.decode(metaBytes));

@@ -62,6 +62,10 @@ export class PackageManager {
 
   /** Install a WASI binary package into the VFS. */
   install(name: string, wasmBytes: Uint8Array, sourceUrl: string): void {
+    // Reject invalid package names (path traversal, empty, dots-only)
+    if (name === '' || name === '.' || name === '..' || name.includes('/')) {
+      throw new PkgError('E_PKG_INVALID_NAME', `Invalid package name: '${name}'`);
+    }
     if (!this.policy.enabled) {
       throw new PkgError('E_PKG_DISABLED', 'Package installation is disabled');
     }

@@ -53,10 +53,44 @@ export class NetworkBridge implements NetworkBridgeLike {
     const workerCode = `
       const { workerData, parentPort } = require('node:worker_threads');
       const sab = workerData.sab;
+      const allowedHosts = workerData.allowedHosts;
+      const blockedHosts = workerData.blockedHosts;
       const int32 = new Int32Array(sab);
       const uint8 = new Uint8Array(sab);
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
+
+      function matchesHostList(host, list) {
+        for (const pattern of list) {
+          if (pattern.startsWith('*.')) {
+            const suffix = pattern.slice(2);
+            if (
+              host.endsWith(suffix) &&
+              host.length > suffix.length &&
+              host[host.length - suffix.length - 1] === '.'
+            ) return true;
+          } else if (host === pattern) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function checkAccess(url) {
+        let host;
+        try { host = new URL(url).hostname; }
+        catch { return { allowed: false, reason: 'invalid URL' }; }
+
+        if (allowedHosts !== undefined) {
+          if (matchesHostList(host, allowedHosts)) return { allowed: true };
+          return { allowed: false, reason: 'host ' + host + ' not in allowedHosts' };
+        }
+        if (blockedHosts !== undefined) {
+          if (matchesHostList(host, blockedHosts)) return { allowed: false, reason: 'host ' + host + ' is in blockedHosts' };
+          return { allowed: true };
+        }
+        return { allowed: false, reason: 'no network policy configured (default deny)' };
+      }
 
       parentPort.postMessage('ready');
 
@@ -68,6 +102,18 @@ export class NetworkBridge implements NetworkBridgeLike {
           const len = Atomics.load(int32, 1);
           const reqJson = decoder.decode(uint8.slice(8, 8 + len));
           const req = JSON.parse(reqJson);
+
+          // Enforce network policy inside the worker before fetching
+          const access = checkAccess(req.url);
+          if (!access.allowed) {
+            const result = JSON.stringify({ status: 403, body: '', headers: {}, error: access.reason });
+            const encoded = encoder.encode(result);
+            uint8.set(encoded, 8);
+            Atomics.store(int32, 1, encoded.byteLength);
+            Atomics.store(int32, 0, ${STATUS_ERROR});
+            Atomics.notify(int32, 0);
+            continue;
+          }
 
           try {
             const resp = await fetch(req.url, {
@@ -98,7 +144,11 @@ export class NetworkBridge implements NetworkBridgeLike {
 
     this.worker = new Worker(workerCode, {
       eval: true,
-      workerData: { sab: this.sab },
+      workerData: {
+        sab: this.sab,
+        allowedHosts: this.gateway.getAllowedHosts(),
+        blockedHosts: this.gateway.getBlockedHosts(),
+      },
     });
 
     // Attach error handler that unblocks any waiting thread

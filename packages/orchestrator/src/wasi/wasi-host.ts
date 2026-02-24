@@ -38,6 +38,8 @@ import {
  *  Must not collide with fds allocated by FdTable (which start at 3) or
  *  directory pseudo-fds (which start at 100). */
 const CONTROL_FD = 1023;
+/** Extension fd for Python package → host extension bridge (FD_MAX-2). */
+const EXTENSION_FD = 1022;
 
 export class WasiExitError extends Error {
   code: number;
@@ -59,6 +61,8 @@ export interface WasiHostOptions {
   stdoutLimit?: number;
   stderrLimit?: number;
   deadlineMs?: number;
+  /** Synchronous handler for extension fd commands (Python package → host). */
+  extensionHandler?: (cmd: Record<string, unknown>) => Record<string, unknown>;
 }
 
 interface PreopenEntry {
@@ -134,6 +138,8 @@ export class WasiHost {
   private controlConnections: Map<string, { host: string; port: number; scheme: string }> = new Map();
   private controlResponseBuf: Uint8Array | null = null;
   private nextControlConnId = 0;
+  private extensionResponseBuf: Uint8Array | null = null;
+  private extensionHandler: ((cmd: Record<string, unknown>) => Record<string, unknown>) | null;
 
   private stdoutTotal = 0;
   private stderrTotal = 0;
@@ -153,6 +159,7 @@ export class WasiHost {
     );
     this.stdinData = options.stdin;
     this.networkBridge = options.networkBridge ?? null;
+    this.extensionHandler = options.extensionHandler ?? null;
     this.stdoutLimit = options.stdoutLimit ?? Infinity;
     this.stderrLimit = options.stderrLimit ?? Infinity;
     this.deadlineMs = options.deadlineMs ?? Infinity;
@@ -231,7 +238,11 @@ export class WasiHost {
       case 'request': {
         const conn = this.controlConnections.get(cmd.id as string);
         if (!conn) return { ok: false, error: 'unknown connection id' };
-        const url = `${conn.scheme}://${conn.host}:${conn.port}${cmd.path as string}`;
+        const reqPath = cmd.path as string;
+        if (typeof reqPath !== 'string' || !reqPath.startsWith('/')) {
+          return { ok: false, error: 'invalid request path' };
+        }
+        const url = `${conn.scheme}://${conn.host}:${conn.port}${reqPath}`;
         const result = this.networkBridge.fetchSync(
           url, cmd.method as string, (cmd.headers as Record<string, string>) ?? {}, (cmd.body as string) || undefined,
         );
@@ -250,6 +261,14 @@ export class WasiHost {
       default:
         return { ok: false, error: `unknown command: ${cmd.cmd}` };
     }
+  }
+
+  /** Handle an extension fd command. Delegates to the extensionHandler callback. */
+  private handleExtensionCommand(cmd: Record<string, unknown>): Record<string, unknown> {
+    if (!this.extensionHandler) {
+      return { ok: false, error: 'extension calls from Python require worker mode (set security.hardKill: true)' };
+    }
+    return this.extensionHandler(cmd);
   }
 
   /**
@@ -478,6 +497,19 @@ export class WasiHost {
           }
         }
         totalWritten += data.byteLength;
+      } else if (fd === EXTENSION_FD) {
+        // Extension fd: parse JSON command, buffer response via extensionHandler
+        const cmdStr = this.decoder.decode(data).trim();
+        if (cmdStr) {
+          try {
+            const cmd = JSON.parse(cmdStr);
+            const resp = this.handleExtensionCommand(cmd);
+            this.extensionResponseBuf = this.encoder.encode(JSON.stringify(resp));
+          } catch {
+            this.extensionResponseBuf = this.encoder.encode(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+          }
+        }
+        totalWritten += data.byteLength;
       } else {
         try {
           totalWritten += this.fdTable.write(fd, data);
@@ -534,6 +566,21 @@ export class WasiHost {
           this.controlResponseBuf = this.controlResponseBuf.subarray(toRead);
         } else {
           this.controlResponseBuf = null;
+        }
+        break;
+      }
+
+      if (fd === EXTENSION_FD) {
+        if (!this.extensionResponseBuf) break;
+        const remaining = this.extensionResponseBuf.byteLength;
+        const toRead = Math.min(iov.len, remaining);
+        const bytes = this.getBytes();
+        bytes.set(this.extensionResponseBuf.subarray(0, toRead), iov.buf);
+        totalRead += toRead;
+        if (toRead < remaining) {
+          this.extensionResponseBuf = this.extensionResponseBuf.subarray(toRead);
+        } else {
+          this.extensionResponseBuf = null;
         }
         break;
       }
@@ -650,7 +697,7 @@ export class WasiHost {
       filetype = WASI_FILETYPE_DIRECTORY;
     } else if (this.fdTable.isOpen(fd)) {
       filetype = WASI_FILETYPE_REGULAR_FILE;
-    } else if (fd === CONTROL_FD) {
+    } else if (fd === CONTROL_FD || fd === EXTENSION_FD) {
       filetype = WASI_FILETYPE_CHARACTER_DEVICE;
     } else {
       return WASI_EBADF;
