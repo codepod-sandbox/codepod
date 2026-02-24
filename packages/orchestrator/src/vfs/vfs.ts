@@ -14,6 +14,9 @@ import {
   createSymlinkInode,
 } from './inode.js';
 import { deepCloneRoot } from './snapshot.js';
+import type { VirtualProvider } from './provider.js';
+import { DevProvider } from './dev-provider.js';
+import { ProcProvider } from './proc-provider.js';
 
 const MAX_SYMLINK_DEPTH = 40;
 
@@ -66,6 +69,8 @@ export class VFS {
   private writablePaths: string[] | undefined;
   /** When true, bypass writable-path checks (used during init). */
   private initializing = false;
+  /** Mounted virtual providers keyed by mount path (e.g. '/dev', '/proc'). */
+  private providers: Map<string, VirtualProvider> = new Map();
 
   constructor(options?: VfsOptions) {
     this.root = createDirInode();
@@ -75,6 +80,8 @@ export class VFS {
     this.initializing = true;
     this.initDefaultLayout();
     this.initializing = false;
+    this.registerProvider('/dev', new DevProvider());
+    this.registerProvider('/proc', new ProcProvider());
   }
 
   /** Create a VFS from an already-populated root (used by cowClone). */
@@ -84,6 +91,7 @@ export class VFS {
     fileCountLimit?: number;
     currentFileCount?: number;
     writablePaths?: string[];
+    providers?: Map<string, VirtualProvider>;
   }): VFS {
     const vfs = Object.create(VFS.prototype) as VFS;
     vfs.root = root;
@@ -95,6 +103,17 @@ export class VFS {
     vfs.currentFileCount = options?.currentFileCount ?? 0;
     vfs.writablePaths = options?.writablePaths;
     vfs.initializing = false;
+    // Re-create providers for the clone (fresh instances for independent state)
+    vfs.providers = new Map();
+    if (options?.providers) {
+      for (const [mount] of options.providers) {
+        if (mount === '/dev') {
+          vfs.providers.set(mount, new DevProvider());
+        } else if (mount === '/proc') {
+          vfs.providers.set(mount, new ProcProvider());
+        }
+      }
+    }
     return vfs;
   }
 
@@ -104,6 +123,29 @@ export class VFS {
     for (const dir of dirs) {
       this.mkdirInternal(dir);
     }
+  }
+
+  /** Register a virtual provider at the given mount path. */
+  registerProvider(mountPath: string, provider: VirtualProvider): void {
+    this.providers.set(mountPath, provider);
+  }
+
+  /**
+   * Match a path against mounted providers.
+   * Returns the provider and the subpath relative to the mount point,
+   * or undefined if no provider matches.
+   */
+  private matchProvider(path: string): { provider: VirtualProvider; subpath: string } | undefined {
+    const normalized = '/' + parsePath(path).join('/');
+    for (const [mount, provider] of this.providers) {
+      if (normalized === mount) {
+        return { provider, subpath: '' };
+      }
+      if (normalized.startsWith(mount + '/')) {
+        return { provider, subpath: normalized.slice(mount.length + 1) };
+      }
+    }
+    return undefined;
   }
 
   /** Throw EROFS if the path is outside writable paths. */
@@ -241,6 +283,20 @@ export class VFS {
   }
 
   stat(path: string): StatResult {
+    const match = this.matchProvider(path);
+    if (match) {
+      const ps = match.provider.stat(match.subpath);
+      const now = new Date();
+      return {
+        type: ps.type,
+        size: ps.size,
+        permissions: ps.type === 'dir' ? 0o755 : 0o444,
+        mtime: now,
+        ctime: now,
+        atime: now,
+      };
+    }
+
     const inode = this.resolve(path);
     const { metadata } = inode;
 
@@ -264,6 +320,11 @@ export class VFS {
   }
 
   readFile(path: string): Uint8Array {
+    const match = this.matchProvider(path);
+    if (match) {
+      return match.provider.readFile(match.subpath);
+    }
+
     const inode = this.resolve(path);
 
     if (inode.type === 'dir') {
@@ -286,6 +347,12 @@ export class VFS {
   }
 
   writeFile(path: string, data: Uint8Array): void {
+    const match = this.matchProvider(path);
+    if (match) {
+      match.provider.writeFile(match.subpath, data);
+      return;
+    }
+
     this.assertWritable(path);
     const { parent, name } = this.resolveParent(path);
     const existing = parent.children.get(name);
@@ -352,6 +419,11 @@ export class VFS {
   }
 
   readdir(path: string): DirEntry[] {
+    const match = this.matchProvider(path);
+    if (match) {
+      return match.provider.readdir(match.subpath);
+    }
+
     const inode = this.resolve(path);
 
     if (inode.type !== 'dir') {
@@ -488,6 +560,7 @@ export class VFS {
       fileCountLimit: this.fileCountLimit,
       currentFileCount: this.currentFileCount,
       writablePaths: this.writablePaths,
+      providers: this.providers,
     });
   }
 }
