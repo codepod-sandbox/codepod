@@ -122,3 +122,14 @@ class TestSandboxEndToEnd:
             result = sbx.commands.run("ls /tmp/workdir")
             assert "a.txt" in result.stdout
             assert "b.txt" in result.stdout
+
+    def test_export_import_roundtrip(self):
+        """Export state, overwrite data, import, and verify restoration."""
+        with Sandbox() as sbx:
+            sbx.files.write("/tmp/persist.txt", b"persisted data")
+            blob = sbx.export_state()
+            assert len(blob) > 0
+            sbx.files.write("/tmp/persist.txt", b"overwritten")
+            sbx.import_state(blob)
+            content = sbx.files.read("/tmp/persist.txt")
+            assert content == b"persisted data"

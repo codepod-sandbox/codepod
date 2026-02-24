@@ -32,6 +32,8 @@ function createMockSandbox(): SandboxLike {
     snapshot: mock(() => '1'),
     restore: mock((_id: string) => {}),
     fork: mock(async () => createMockSandbox()),
+    exportState: mock(() => new TextEncoder().encode('snapshot-blob')),
+    importState: mock((_blob: Uint8Array) => {}),
   };
 }
 
@@ -307,6 +309,39 @@ describe('Dispatcher', () => {
       await expect(dispatcher.dispatch('snapshot.restore', {})).rejects.toMatchObject({
         code: -32602,
       });
+    });
+  });
+
+  describe('persistence.export', () => {
+    it('calls sandbox.exportState() and returns base64-encoded data', async () => {
+      const result = await dispatcher.dispatch('persistence.export', {});
+      expect(sandbox.exportState).toHaveBeenCalled();
+      expect(result).toEqual({
+        data: Buffer.from('snapshot-blob').toString('base64'),
+      });
+    });
+
+    it('returns base64 that decodes to original bytes', async () => {
+      const result = await dispatcher.dispatch('persistence.export', {}) as { data: string };
+      const decoded = Buffer.from(result.data, 'base64');
+      expect(new TextDecoder().decode(decoded)).toBe('snapshot-blob');
+    });
+  });
+
+  describe('persistence.import', () => {
+    it('decodes base64 data and calls sandbox.importState()', async () => {
+      const data = Buffer.from('imported-blob').toString('base64');
+      const result = await dispatcher.dispatch('persistence.import', { data });
+      expect(sandbox.importState).toHaveBeenCalledWith(expect.any(Uint8Array));
+      const imported = (sandbox.importState as ReturnType<typeof mock>).mock.calls[0][0] as Uint8Array;
+      expect(new TextDecoder().decode(imported)).toBe('imported-blob');
+      expect(result).toEqual({ ok: true });
+    });
+
+    it('rejects when data param is missing', async () => {
+      await expect(
+        dispatcher.dispatch('persistence.import', {}),
+      ).rejects.toMatchObject({ code: -32602 });
     });
   });
 

@@ -1,3 +1,4 @@
+import base64
 import os
 import shutil
 from wasmsand._rpc import RpcClient
@@ -83,6 +84,16 @@ class Sandbox:
     def restore(self, snapshot_id: str) -> None:
         """Restore to a previous snapshot."""
         self._client.call("snapshot.restore", self._with_id({"id": snapshot_id}))
+
+    def export_state(self) -> bytes:
+        """Export the full sandbox state (VFS + env) as an opaque blob."""
+        result = self._client.call("persistence.export", self._with_id({}))
+        return base64.b64decode(result["data"])
+
+    def import_state(self, blob: bytes) -> None:
+        """Import a previously exported sandbox state, replacing current state."""
+        data = base64.b64encode(blob).decode("ascii")
+        self._client.call("persistence.import", self._with_id({"data": data}))
 
     def fork(self) -> "Sandbox":
         """Create an independent forked sandbox."""
