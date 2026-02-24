@@ -395,6 +395,23 @@ describe('Sandbox', () => {
     });
   });
 
+  describe('broadened syscall deadline checks', () => {
+    it('kills WASM that calls clock_time_get in a loop', async () => {
+      // Python's time.time() calls clock_time_get — a tight loop calling it will now hit the deadline
+      sandbox = await Sandbox.create({
+        wasmDir: WASM_DIR,
+        shellWasmPath: SHELL_WASM,
+        adapter: new NodeAdapter(),
+        security: { limits: { timeoutMs: 300 } },
+      });
+      const start = performance.now();
+      const result = await sandbox.run('python3 -c "import time\nwhile True:\n time.time()"');
+      const elapsed = performance.now() - start;
+      expect(result.errorClass).toBe('TIMEOUT');
+      expect(elapsed).toBeLessThan(3000);
+    });
+  });
+
   describe('hard cancellation', () => {
     it('timeout kills long-running WASM via deadline in fdWrite', async () => {
       sandbox = await Sandbox.create({
