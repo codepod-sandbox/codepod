@@ -96,6 +96,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "approx"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -442,22 +451,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "dyn-stack"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c4713e43e2886ba72b8271aa66c93d722116acf7a75555cce11dcde84388fe8"
-dependencies = [
- "bytemuck",
- "dyn-stack-macros",
-]
-
-[[package]]
-name = "dyn-stack-macros"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
-
-[[package]]
 name = "echo-args-wasm"
 version = "0.1.0"
 
@@ -503,46 +496,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "equator"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c35da53b5a021d2484a7cc49b2ac7f2d840f8236a286f84202369bd338d761ea"
-dependencies = [
- "equator-macro 0.2.1",
-]
-
-[[package]]
-name = "equator"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4711b213838dfee0117e3be6ac926007d7f433d7bbe33595975d4190cb07e6fc"
-dependencies = [
- "equator-macro 0.4.2",
-]
-
-[[package]]
-name = "equator-macro"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bf679796c0322556351f287a51b49e48f7c4986e727b5dd78c972d30e2e16cc"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "equator-macro"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44f23cf4b44bfce11a86ace86f8a73ffdec849c9fd00a386a53d278bd9e81fb3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,55 +522,6 @@ name = "exitcode"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de853764b47027c2e862a995c34978ffa63c1501f2e15f987ba11bd4f9bba193"
-
-[[package]]
-name = "faer"
-version = "0.21.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebe9ac2a073e05ca749eeea503fae16a91440b20d2e92b6fc6f6c6919b9964eb"
-dependencies = [
- "bytemuck",
- "dyn-stack",
- "equator 0.4.2",
- "faer-macros",
- "faer-traits",
- "gemm",
- "generativity",
- "libm",
- "nano-gemm",
- "num-complex",
- "num-traits",
- "pulp",
- "reborrow",
-]
-
-[[package]]
-name = "faer-macros"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d0a255d1442b5825c61812a7eafda9034ec53d969c98555251085e148428e6a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "faer-traits"
-version = "0.21.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1430e111b20872c7eaa82c7ada071bff1c3e3ac09cc6f4df676065fd2d41eb62"
-dependencies = [
- "bytemuck",
- "dyn-stack",
- "faer-macros",
- "generativity",
- "libm",
- "num-complex",
- "num-traits",
- "pulp",
- "reborrow",
-]
 
 [[package]]
 name = "false-cmd-wasm"
@@ -673,109 +577,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "gemm"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab96b703d31950f1aeddded248bc95543c9efc7ac9c4a21fda8703a83ee35451"
-dependencies = [
- "dyn-stack",
- "gemm-c32",
- "gemm-c64",
- "gemm-common",
- "gemm-f32",
- "gemm-f64",
- "num-complex",
- "num-traits",
- "paste",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "gemm-c32"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6db9fd9f40421d00eea9dd0770045a5603b8d684654816637732463f4073847"
-dependencies = [
- "dyn-stack",
- "gemm-common",
- "num-complex",
- "num-traits",
- "paste",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "gemm-c64"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfcad8a3d35a43758330b635d02edad980c1e143dc2f21e6fd25f9e4eada8edf"
-dependencies = [
- "dyn-stack",
- "gemm-common",
- "num-complex",
- "num-traits",
- "paste",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "gemm-common"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a352d4a69cbe938b9e2a9cb7a3a63b7e72f9349174a2752a558a8a563510d0f3"
-dependencies = [
- "bytemuck",
- "dyn-stack",
- "libm",
- "num-complex",
- "num-traits",
- "once_cell",
- "paste",
- "pulp",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "gemm-f32"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc8d3d4385393304f407392f754cd2dc4b315d05063f62cf09f47b58de276864"
-dependencies = [
- "dyn-stack",
- "gemm-common",
- "num-complex",
- "num-traits",
- "paste",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "gemm-f64"
-version = "0.18.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b2a4f76ce4b8b16eadc11ccf2e083252d8237c1b589558a49b0183545015bd"
-dependencies = [
- "dyn-stack",
- "gemm-common",
- "num-complex",
- "num-traits",
- "paste",
- "raw-cpuid",
- "seq-macro",
-]
-
-[[package]]
-name = "generativity"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5881e4c3c2433fe4905bb19cfd2b5d49d4248274862b68c27c33d9ba4e13f9ec"
 
 [[package]]
 name = "generic-array"
@@ -1236,7 +1037,7 @@ dependencies = [
  "itertools",
  "libm",
  "malachite-base",
- "wide",
+ "wide 1.1.1",
 ]
 
 [[package]]
@@ -1353,73 +1154,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "nano-gemm"
-version = "0.1.3"
+name = "nalgebra"
+version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb5ba2bea1c00e53de11f6ab5bd0761ba87dc0045d63b0c87ee471d2d3061376"
+checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
 dependencies = [
- "equator 0.2.2",
- "nano-gemm-c32",
- "nano-gemm-c64",
- "nano-gemm-codegen",
- "nano-gemm-core",
- "nano-gemm-f32",
- "nano-gemm-f64",
+ "approx",
+ "matrixmultiply",
  "num-complex",
-]
-
-[[package]]
-name = "nano-gemm-c32"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a40449e57a5713464c3a1208c4c3301c8d29ee1344711822cf022bc91373a91b"
-dependencies = [
- "nano-gemm-codegen",
- "nano-gemm-core",
- "num-complex",
-]
-
-[[package]]
-name = "nano-gemm-c64"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743a6e6211358fba85d1009616751e4107da86f4c95b24e684ce85f25c25b3bf"
-dependencies = [
- "nano-gemm-codegen",
- "nano-gemm-core",
- "num-complex",
-]
-
-[[package]]
-name = "nano-gemm-codegen"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "963bf7c7110d55430169dc74c67096375491ed580cd2ef84842550ac72e781fa"
-
-[[package]]
-name = "nano-gemm-core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe3fc4f83ae8861bad79dc3c016bd6b0220da5f9de302e07d3112d16efc24aa6"
-
-[[package]]
-name = "nano-gemm-f32"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e3681b7ce35658f79da94b7f62c60a005e29c373c7111ed070e3bf64546a8bb"
-dependencies = [
- "nano-gemm-codegen",
- "nano-gemm-core",
-]
-
-[[package]]
-name = "nano-gemm-f64"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc1e619ed04d801809e1f63e61b669d380c4119e8b0cdd6ed184c6b111f046d8"
-dependencies = [
- "nano-gemm-codegen",
- "nano-gemm-core",
+ "num-rational",
+ "num-traits",
+ "simba",
+ "typenum",
 ]
 
 [[package]]
@@ -1473,12 +1219,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-complex"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
- "bytemuck",
  "num-traits",
 ]
 
@@ -1488,6 +1243,17 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 
@@ -1536,7 +1302,7 @@ dependencies = [
 name = "numpy-rust-core"
 version = "0.1.0"
 dependencies = [
- "faer",
+ "nalgebra",
  "ndarray",
  "num-traits",
  "rand 0.9.2",
@@ -1552,8 +1318,8 @@ dependencies = [
  "crossbeam-utils",
  "numpy-rust-core",
  "once_cell",
- "rustpython-derive 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-vm 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
+ "rustpython-derive",
+ "rustpython-vm",
 ]
 
 [[package]]
@@ -1811,20 +1577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pulp"
-version = "0.21.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b86df24f0a7ddd5e4b95c94fc9ed8a98f1ca94d3b01bdce2824097e7835907"
-dependencies = [
- "bytemuck",
- "cfg-if",
- "libm",
- "num-complex",
- "reborrow",
- "version_check",
-]
-
-[[package]]
 name = "pymath"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1964,25 +1716,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "raw-cpuid"
-version = "11.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
-dependencies = [
- "bitflags",
-]
-
-[[package]]
 name = "rawpointer"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
-
-[[package]]
-name = "reborrow"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
 name = "redox_syscall"
@@ -2165,7 +1902,7 @@ dependencies = [
 [[package]]
 name = "rustpython"
 version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
+source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
 dependencies = [
  "cfg-if",
  "dirs-next",
@@ -2174,10 +1911,10 @@ dependencies = [
  "libc",
  "log",
  "ruff_python_parser",
- "rustpython-compiler 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-compiler",
  "rustpython-pylib",
  "rustpython-stdlib",
- "rustpython-vm 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-vm",
  "rustyline",
  "winresource",
 ]
@@ -2198,32 +1935,9 @@ dependencies = [
  "num-traits",
  "ruff_python_ast",
  "ruff_text_size",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "thiserror 2.0.18",
- "unicode_names2 2.0.0",
-]
-
-[[package]]
-name = "rustpython-codegen"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "ahash",
- "bitflags",
- "indexmap",
- "itertools",
- "log",
- "malachite-bigint",
- "memchr",
- "num-complex",
- "num-traits",
- "ruff_python_ast",
- "ruff_text_size",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-compiler-core",
+ "rustpython-literal",
+ "rustpython-wtf8",
  "thiserror 2.0.18",
  "unicode_names2 2.0.0",
 ]
@@ -2247,35 +1961,8 @@ dependencies = [
  "num-complex",
  "num-traits",
  "radium",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "siphasher",
- "unicode_names2 2.0.0",
- "widestring",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "rustpython-common"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "ascii",
- "bitflags",
- "cfg-if",
- "getrandom 0.3.4",
- "itertools",
- "libc",
- "lock_api",
- "malachite-base",
- "malachite-bigint",
- "malachite-q",
- "nix 0.30.1",
- "num-complex",
- "num-traits",
- "radium",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-literal",
+ "rustpython-wtf8",
  "siphasher",
  "unicode_names2 2.0.0",
  "widestring",
@@ -2291,22 +1978,8 @@ dependencies = [
  "ruff_python_parser",
  "ruff_source_file",
  "ruff_text_size",
- "rustpython-codegen 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "rustpython-compiler"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "ruff_python_ast",
- "ruff_python_parser",
- "ruff_source_file",
- "ruff_text_size",
- "rustpython-codegen 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-codegen",
+ "rustpython-compiler-core",
  "thiserror 2.0.18",
 ]
 
@@ -2321,21 +1994,7 @@ dependencies = [
  "malachite-bigint",
  "num-complex",
  "ruff_source_file",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
-]
-
-[[package]]
-name = "rustpython-compiler-core"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "bitflags",
- "itertools",
- "lz4_flex",
- "malachite-bigint",
- "num-complex",
- "ruff_source_file",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-wtf8",
 ]
 
 [[package]]
@@ -2343,18 +2002,8 @@ name = "rustpython-derive"
 version = "0.4.0"
 source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
 dependencies = [
- "rustpython-compiler 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-derive-impl 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "syn",
-]
-
-[[package]]
-name = "rustpython-derive"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "rustpython-compiler 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-derive-impl 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-compiler",
+ "rustpython-derive-impl",
  "syn",
 ]
 
@@ -2367,24 +2016,8 @@ dependencies = [
  "maplit",
  "proc-macro2",
  "quote",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-doc 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "syn",
- "syn-ext",
- "textwrap",
-]
-
-[[package]]
-name = "rustpython-derive-impl"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "itertools",
- "maplit",
- "proc-macro2",
- "quote",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-doc 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-compiler-core",
+ "rustpython-doc",
  "syn",
  "syn-ext",
  "textwrap",
@@ -2399,14 +2032,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustpython-doc"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "phf 0.13.1",
-]
-
-[[package]]
 name = "rustpython-literal"
 version = "0.4.0"
 source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
@@ -2415,31 +2040,18 @@ dependencies = [
  "is-macro",
  "lexical-parse-float",
  "num-traits",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "unic-ucd-category",
-]
-
-[[package]]
-name = "rustpython-literal"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "hexf-parse",
- "is-macro",
- "lexical-parse-float",
- "num-traits",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-wtf8",
  "unic-ucd-category",
 ]
 
 [[package]]
 name = "rustpython-pylib"
 version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
+source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
 dependencies = [
  "glob",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-derive 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-compiler-core",
+ "rustpython-derive",
 ]
 
 [[package]]
@@ -2450,24 +2062,13 @@ dependencies = [
  "bitflags",
  "num_enum",
  "optional",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
-]
-
-[[package]]
-name = "rustpython-sre_engine"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "bitflags",
- "num_enum",
- "optional",
- "rustpython-wtf8 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-wtf8",
 ]
 
 [[package]]
 name = "rustpython-stdlib"
 version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
+source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
 dependencies = [
  "adler32",
  "ahash",
@@ -2511,9 +2112,9 @@ dependencies = [
  "pymath",
  "rand_core 0.9.5",
  "rustix",
- "rustpython-common 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-derive 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-vm 0.4.0 (git+https://github.com/RustPython/RustPython)",
+ "rustpython-common",
+ "rustpython-derive",
+ "rustpython-vm",
  "schannel",
  "sha-1",
  "sha2",
@@ -2583,13 +2184,13 @@ dependencies = [
  "ruff_python_parser",
  "ruff_text_size",
  "rustix",
- "rustpython-codegen 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-common 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-compiler 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-derive 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
- "rustpython-sre_engine 0.4.0 (git+https://github.com/RustPython/RustPython?rev=f9ca63893)",
+ "rustpython-codegen",
+ "rustpython-common",
+ "rustpython-compiler",
+ "rustpython-compiler-core",
+ "rustpython-derive",
+ "rustpython-literal",
+ "rustpython-sre_engine",
  "rustyline",
  "scoped-tls",
  "scopeguard",
@@ -2611,91 +2212,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustpython-vm"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "ahash",
- "ascii",
- "bitflags",
- "bstr",
- "caseless",
- "cfg-if",
- "chrono",
- "constant_time_eq",
- "crossbeam-utils",
- "errno",
- "exitcode",
- "getrandom 0.3.4",
- "glob",
- "half",
- "hex",
- "indexmap",
- "is-macro",
- "itertools",
- "junction",
- "libc",
- "libffi",
- "libloading",
- "log",
- "malachite-bigint",
- "memchr",
- "nix 0.30.1",
- "num-complex",
- "num-integer",
- "num-traits",
- "num_cpus",
- "num_enum",
- "optional",
- "parking_lot",
- "paste",
- "psm",
- "result-like",
- "ruff_python_ast",
- "ruff_python_parser",
- "ruff_text_size",
- "rustix",
- "rustpython-codegen 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-common 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-compiler 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-compiler-core 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-derive 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-literal 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustpython-sre_engine 0.4.0 (git+https://github.com/RustPython/RustPython)",
- "rustyline",
- "scoped-tls",
- "scopeguard",
- "static_assertions",
- "strum",
- "strum_macros",
- "thiserror 2.0.18",
- "thread_local",
- "timsort",
- "uname",
- "unic-ucd-bidi",
- "unic-ucd-category",
- "unic-ucd-ident",
- "unicode-casing",
- "which",
- "widestring",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "rustpython-wtf8"
 version = "0.4.0"
 source = "git+https://github.com/RustPython/RustPython?rev=f9ca63893#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
-dependencies = [
- "ascii",
- "bstr",
- "itertools",
- "memchr",
-]
-
-[[package]]
-name = "rustpython-wtf8"
-version = "0.4.0"
-source = "git+https://github.com/RustPython/RustPython#f9ca6389364300d0ecb7437dbe7a3bc1341e55c7"
 dependencies = [
  "ascii",
  "bstr",
@@ -2739,6 +2258,15 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "safe_arch"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f7caad094bd561859bcd467734a720c3c1f5d1f338995351fefe2190c45efed"
@@ -2766,12 +2294,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "seq-macro"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
 
 [[package]]
 name = "serde"
@@ -2862,6 +2384,19 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "simba"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
+dependencies = [
+ "approx",
+ "num-complex",
+ "num-traits",
+ "paste",
+ "wide 0.7.33",
+]
 
 [[package]]
 name = "simd-adler32"
@@ -3469,12 +3004,22 @@ dependencies = [
 
 [[package]]
 name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch 0.7.4",
+]
+
+[[package]]
+name = "wide"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac11b009ebeae802ed758530b6496784ebfee7a87b9abfbcaf3bbe25b814eb25"
 dependencies = [
  "bytemuck",
- "safe_arch",
+ "safe_arch 1.0.0",
 ]
 
 [[package]]

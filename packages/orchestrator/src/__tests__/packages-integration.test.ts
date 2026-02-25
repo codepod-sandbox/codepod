@@ -87,6 +87,32 @@ print('ok')
     expect(result.stdout.trim()).toBe('ok');
   });
 
+  it('numpy array operations work', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(
+      'python3 -c "import numpy as np; a = np.array([1,2,3]); print(a.sum())"'
+    );
+    expect(result.stdout.trim()).toBe('6.0');
+  }, 30000);
+
+  it('numpy linalg works', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(
+      'python3 -c "import numpy as np; a = np.eye(3); print(np.linalg.det(a))"'
+    );
+    expect(result.stdout.trim()).toBe('1.0');
+  }, 30000);
+
   it('works with no packages option', async () => {
     sandbox = await Sandbox.create({
       wasmDir: WASM_DIR,

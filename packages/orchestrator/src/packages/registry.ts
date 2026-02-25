@@ -1,4 +1,28 @@
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { resolve, relative, join } from 'node:path';
 import type { PackageMetadata } from './types';
+
+/** Recursively collect .py files from a directory. */
+function collectPyFiles(dir: string, prefix: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        Object.assign(files, collectPyFiles(full, prefix));
+      } else if (entry.name.endsWith('.py')) {
+        const relPath = relative(prefix, full);
+        files[relPath] = readFileSync(full, 'utf-8');
+      }
+    }
+  } catch {
+    // Directory not found — package files not available (e.g. browser environment)
+  }
+  return files;
+}
+
+/** Root of the packages/ directory (two levels up from packages/orchestrator/src/packages/). */
+const PACKAGES_ROOT = resolve(import.meta.dirname, '..', '..', '..');
 
 const PACKAGES: PackageMetadata[] = [
   {
@@ -287,9 +311,9 @@ class Session:
     summary: 'Numerical computing (ndarray-backed)',
     dependencies: [],
     native: true,
-    pythonFiles: {
-      'numpy/__init__.py': '# placeholder - real impl in Task 6\n',
-    },
+    pythonFiles: {},
+    pythonDir: 'numpy-rust/python',
+    pythonDirPrefix: 'numpy-rust/python',
   },
   {
     name: 'pandas',
@@ -348,6 +372,12 @@ export class PackageRegistry {
 
   constructor() {
     for (const pkg of PACKAGES) {
+      // Load Python files from directory if pythonDir is set
+      if (pkg.pythonDir && Object.keys(pkg.pythonFiles).length === 0) {
+        const dir = resolve(PACKAGES_ROOT, pkg.pythonDir);
+        const prefix = resolve(PACKAGES_ROOT, pkg.pythonDirPrefix ?? pkg.pythonDir);
+        pkg.pythonFiles = collectPyFiles(dir, prefix);
+      }
       this.packages.set(pkg.name, pkg);
     }
   }

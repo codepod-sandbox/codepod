@@ -27,7 +27,7 @@ rustpython = { git = "https://github.com/RustPython/RustPython", rev = "f9ca6389
 ] }
 
 # Native package crates (optional, gated by features)
-numpy-rust-python = { path = "../../../numpy-rust/crates/numpy-rust-python", optional = true }
+numpy-rust-python = { path = "../numpy-rust/crates/numpy-rust-python", optional = true }
 pandas-native = { path = "crates/pandas", optional = true }
 pil-native = { path = "crates/pil", optional = true }
 matplotlib-native = { path = "crates/matplotlib", optional = true }
