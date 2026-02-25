@@ -25,7 +25,7 @@ import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts', 'return', 'local']);
 const SHELL_COMMANDS = new Set(['sh', 'bash']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
@@ -107,6 +107,7 @@ const MAX_FUNCTION_DEPTH = 100;
 
 class BreakSignal { constructor(public depth: number = 1) {} }
 class ContinueSignal { constructor(public depth: number = 1) {} }
+class ReturnSignal { constructor(public code: number) {} }
 class ExitSignal {
   constructor(public code: number, public stdout: string = '', public stderr: string = '') {}
 }
@@ -133,6 +134,8 @@ export class ShellRunner {
   private lastExitCode = 0;
   /** User-defined shell functions. */
   private functions: Map<string, Command> = new Map();
+  /** Stack of saved local variable values for each function call. */
+  private localVarStack: Map<string, string | undefined>[] = [];
   /** Package manager for the pkg builtin. */
   private packageManager: PackageManager | null = null;
   /** Audit event handler for emitting structured audit events. */
@@ -596,11 +599,25 @@ export class ShellRunner {
     } else if (cmdName === 'false') {
       result = { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
     } else if (cmdName === 'set') {
-      for (const arg of args) {
-        if (arg.startsWith('-')) {
-          for (const ch of arg.slice(1)) this.shellFlags.add(ch);
-        } else if (arg.startsWith('+')) {
-          for (const ch of arg.slice(1)) this.shellFlags.delete(ch);
+      const dashDash = args.indexOf('--');
+      if (dashDash !== -1) {
+        // set -- arg1 arg2 ... sets positional parameters
+        const positionals = args.slice(dashDash + 1);
+        // Clear old positional params
+        const prevCount = this.getPositionalArgs().length;
+        for (let i = 1; i <= prevCount; i++) this.env.delete(String(i));
+        // Set new ones
+        for (let i = 0; i < positionals.length; i++) {
+          this.env.set(String(i + 1), positionals[i]);
+        }
+        this.env.set('#', String(positionals.length));
+      } else {
+        for (const arg of args) {
+          if (arg.startsWith('-')) {
+            for (const ch of arg.slice(1)) this.shellFlags.add(ch);
+          } else if (arg.startsWith('+')) {
+            for (const ch of arg.slice(1)) this.shellFlags.delete(ch);
+          }
         }
       }
       result = { ...EMPTY_RESULT };
@@ -610,6 +627,23 @@ export class ShellRunner {
       result = await this.builtinEval(args);
     } else if (cmdName === 'getopts') {
       result = this.builtinGetopts(args);
+    } else if (cmdName === 'return') {
+      const code = args.length > 0 ? parseInt(args[0], 10) || 0 : this.lastExitCode;
+      throw new ReturnSignal(code);
+    } else if (cmdName === 'local') {
+      // local VAR=value or local VAR — save previous value for restore on function return
+      const frame = this.localVarStack.length > 0 ? this.localVarStack[this.localVarStack.length - 1] : null;
+      for (const arg of args) {
+        const eqIdx = arg.indexOf('=');
+        const name = eqIdx !== -1 ? arg.slice(0, eqIdx) : arg;
+        if (frame && !frame.has(name)) {
+          frame.set(name, this.env.get(name));
+        }
+        if (eqIdx !== -1) {
+          this.env.set(name, arg.slice(eqIdx + 1));
+        }
+      }
+      result = { ...EMPTY_RESULT };
     }
 
     if (!result) {
@@ -641,9 +675,23 @@ export class ShellRunner {
         }
         this.env.set('#', String(args.length));
         this.functionDepth++;
+        const localFrame = new Map<string, string | undefined>();
+        this.localVarStack.push(localFrame);
         try {
           result = await this.execCommand(fn);
+        } catch (e) {
+          if (e instanceof ReturnSignal) {
+            result = { exitCode: e.code, stdout: '', stderr: '', executionTimeMs: 0 };
+          } else {
+            throw e;
+          }
         } finally {
+          this.localVarStack.pop();
+          // Restore local variables
+          for (const [name, prev] of localFrame) {
+            if (prev !== undefined) this.env.set(name, prev);
+            else this.env.delete(name);
+          }
           this.functionDepth--;
           // Restore positional parameters
           for (const [key, val] of savedPositionals) {
@@ -674,15 +722,15 @@ export class ShellRunner {
     let stdout = result.stdout;
     let stderr = result.stderr;
 
+    let lastStdoutRedirectPath: string | null = null;
     for (const redirect of simple.redirects) {
       const rt = redirect.redirect_type;
       try {
         if (typeof rt === 'object' && 'StdoutOverwrite' in rt) {
-          this.vfs.writeFile(
-            this.resolvePath(rt.StdoutOverwrite),
-            new TextEncoder().encode(stdout),
-          );
+          const resolved = this.resolvePath(rt.StdoutOverwrite);
+          this.vfs.writeFile(resolved, new TextEncoder().encode(stdout));
           stdout = '';
+          lastStdoutRedirectPath = resolved;
         } else if (typeof rt === 'object' && 'StdoutAppend' in rt) {
           const resolved = this.resolvePath(rt.StdoutAppend);
           const existing = this.tryReadFile(resolved);
@@ -692,6 +740,7 @@ export class ShellRunner {
           );
           this.vfs.writeFile(resolved, combined);
           stdout = '';
+          lastStdoutRedirectPath = resolved;
         } else if (typeof rt === 'object' && 'StderrOverwrite' in rt) {
           this.vfs.writeFile(this.resolvePath(rt.StderrOverwrite), new TextEncoder().encode(stderr));
           stderr = '';
@@ -702,7 +751,14 @@ export class ShellRunner {
           this.vfs.writeFile(resolved, combined);
           stderr = '';
         } else if (rt === 'StderrToStdout') {
-          stdout += stderr;
+          if (lastStdoutRedirectPath && stderr) {
+            // Stdout was already redirected to a file — append stderr there
+            const existing = this.tryReadFile(lastStdoutRedirectPath);
+            const combined = concatBytes(existing, new TextEncoder().encode(stderr));
+            this.vfs.writeFile(lastStdoutRedirectPath, combined);
+          } else {
+            stdout += stderr;
+          }
           stderr = '';
         } else if (typeof rt === 'object' && 'BothOverwrite' in rt) {
           const combined = stdout + stderr;
@@ -1072,6 +1128,11 @@ export class ShellRunner {
           return val;
         }
         case '#': {
+          // ${#VAR} — string length (parser produces var="" op="#" default="VAR")
+          if (name === '' && operand) {
+            const v = this.env.get(operand) ?? '';
+            return String(v.length);
+          }
           if (val === undefined) return '';
           return this.trimPrefix(val, operand, false);
         }
@@ -1409,7 +1470,18 @@ export class ShellRunner {
     let result = '';
     let i = 0;
     while (i < value.length) {
-      if (value[i] === '$' && i + 1 < value.length && value[i + 1] === '(') {
+      if (value[i] === '$' && i + 2 < value.length && value[i + 1] === '(' && value[i + 2] === '(') {
+        // Arithmetic expansion: $((...))
+        const start = i + 3;
+        const endIdx = value.indexOf('))', start);
+        if (endIdx >= 0) {
+          const expr = value.slice(start, endIdx);
+          result += String(this.evalArithmetic(expr));
+          i = endIdx + 2;
+        } else {
+          result += value[i++];
+        }
+      } else if (value[i] === '$' && i + 1 < value.length && value[i + 1] === '(') {
         // Command substitution: $(...)
         if (this.substitutionDepth >= MAX_SUBSTITUTION_DEPTH) {
           i += 2; continue;
@@ -1665,6 +1737,13 @@ export class ShellRunner {
 
   /** Evaluate a shell arithmetic expression. */
   private evalArithmetic(expr: string): number {
+    // Handle simple assignment: VAR=expr (before variable expansion)
+    const assignMatch = expr.match(/^\s*([a-zA-Z_]\w*)\s*=\s*(.+)$/);
+    if (assignMatch) {
+      const value = this.evalArithmetic(assignMatch[2]);
+      this.env.set(assignMatch[1], String(value));
+      return value;
+    }
     // Expand $VAR references and bare variable names
     let expanded = expr.replace(/\$(\w+)/g, (_, name) => this.env.get(name) ?? '0');
     // Replace bare variable names (not already a number)
@@ -1826,6 +1905,19 @@ export class ShellRunner {
         case '-gt': return parseInt(left) > parseInt(right);
         case '-ge': return parseInt(left) >= parseInt(right);
         default: return false;
+      }
+    }
+
+    // Compound operators: -a (AND) and -o (OR)
+    // Search for -o first (lower precedence), then -a
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-o') {
+        return this.evalTest(args.slice(0, i)) || this.evalTest(args.slice(i + 1));
+      }
+    }
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-a') {
+        return this.evalTest(args.slice(0, i)) && this.evalTest(args.slice(i + 1));
       }
     }
 

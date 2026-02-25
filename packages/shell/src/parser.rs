@@ -240,6 +240,14 @@ impl Parser {
                         assignments.push(Assignment { name, value });
                     }
                 }
+                // After the first word, Assignment tokens are arguments (e.g. `local FOO=bar`)
+                Some(Token::Assignment(_, _)) => {
+                    seen_word = true;
+                    if let Token::Assignment(name, value) = self.advance() {
+                        let text = format!("{name}={value}");
+                        words.push(Word::literal(&text));
+                    }
+                }
                 Some(Token::Word(_)) => {
                     seen_word = true;
                     if let Token::Word(w) = self.advance() {
