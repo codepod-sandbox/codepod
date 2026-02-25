@@ -117,6 +117,31 @@ describe('shell conformance', () => {
       const result = await runner.run('X=/usr/local/bin; echo ${X##*/}');
       expect(result.stdout).toBe('bin\n');
     });
+
+    it('${var^^} uppercases', async () => {
+      const r = await runner.run(`x=hello; echo \${x^^}`);
+      expect(r.stdout).toBe('HELLO\n');
+    });
+
+    it('${var,,} lowercases', async () => {
+      const r = await runner.run(`x=HELLO; echo \${x,,}`);
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('${var^} uppercases first char', async () => {
+      const r = await runner.run(`x=hello; echo \${x^}`);
+      expect(r.stdout).toBe('Hello\n');
+    });
+
+    it('${var:offset:length} substring', async () => {
+      const r = await runner.run(`x=hello; echo \${x:1:3}`);
+      expect(r.stdout).toBe('ell\n');
+    });
+
+    it('${var:offset} substring to end', async () => {
+      const r = await runner.run(`x=hello; echo \${x:2}`);
+      expect(r.stdout).toBe('llo\n');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -412,6 +437,11 @@ describe('shell conformance', () => {
     it('here document provides stdin to command', async () => {
       const result = await runner.run('cat <<EOF\nhello from heredoc\nEOF');
       expect(result.stdout).toBe('hello from heredoc\n');
+    });
+
+    it('cat > file with heredoc', async () => {
+      const r = await runner.run(`cat > /tmp/hd_test.txt <<EOF\nhello heredoc\nEOF\ncat /tmp/hd_test.txt`);
+      expect(r.stdout).toBe('hello heredoc\n');
     });
   });
 

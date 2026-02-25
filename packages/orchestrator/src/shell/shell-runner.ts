@@ -1209,6 +1209,26 @@ export class ShellRunner {
           if (val === undefined) return '';
           return this.replacePattern(val, operand, true);
         }
+        case '^^': return (val ?? '').toUpperCase();
+        case ',,': return (val ?? '').toLowerCase();
+        case '^': {
+          const s = val ?? '';
+          return s.charAt(0).toUpperCase() + s.slice(1);
+        }
+        case ',': {
+          const s = val ?? '';
+          return s.charAt(0).toLowerCase() + s.slice(1);
+        }
+        case ':': {
+          const s = val ?? '';
+          const parts = operand.split(':');
+          const offset = parseInt(parts[0], 10) || 0;
+          if (parts.length > 1) {
+            const length = parseInt(parts[1], 10);
+            return s.slice(offset, offset + length);
+          }
+          return s.slice(offset);
+        }
         default: return val ?? '';
       }
     }

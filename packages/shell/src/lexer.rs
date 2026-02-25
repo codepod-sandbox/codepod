@@ -201,10 +201,13 @@ pub fn lex(input: &str) -> Vec<Token> {
                 // Read delimiter (may be quoted with ' or ")
                 let (delimiter, _quoted) = read_heredoc_delimiter(&chars, &mut pos);
 
-                // Skip to next newline, then read content lines until delimiter
+                // Capture any remaining tokens on this line (e.g. `> /tmp/file`)
+                // before consuming the heredoc body on subsequent lines.
+                let rest_of_line_start = pos;
                 while pos < len && chars[pos] != '\n' {
                     pos += 1;
                 }
+                let rest_of_line: String = chars[rest_of_line_start..pos].iter().collect();
                 if pos < len {
                     pos += 1;
                 } // skip newline
@@ -245,6 +248,22 @@ pub fn lex(input: &str) -> Vec<Token> {
                     RedirectType::Heredoc(content)
                 };
                 tokens.push(Token::Redirect(rtype));
+
+                // Lex any remaining tokens from the same line as the heredoc
+                // delimiter (e.g. `> /tmp/file` in `cat <<EOF > /tmp/file`).
+                let trimmed_rest = rest_of_line.trim();
+                if !trimmed_rest.is_empty() {
+                    let extra_tokens = lex(trimmed_rest);
+                    tokens.extend(extra_tokens);
+                }
+
+                // The heredoc body consumed newlines that act as command
+                // separators.  Emit a Newline token so the parser can
+                // recognise the boundary between this command and whatever
+                // follows the heredoc terminator.
+                if pos < len {
+                    tokens.push(Token::Newline);
+                }
                 continue;
             }
             pos += 1;
@@ -769,8 +788,43 @@ fn classify_word(word: String) -> Token {
 }
 
 /// Parse the content of `${...}` into a WordPart.
-/// Detects parameter expansion operators like `:-`, `:=`, `:+`, `:?`.
+/// Detects parameter expansion operators like `:-`, `:=`, `:+`, `:?`,
+/// case modification (`^^`, `,,`, `^`, `,`), and substring (`:N` or `:N:M`).
 fn parse_braced_var(content: &str) -> WordPart {
+    // Case modification: ${var^^}, ${var,,}, ${var^}, ${var,}
+    // Check longest operators first to avoid matching ^ before ^^
+    for op in &["^^", ",,", "^", ","] {
+        if let Some(var_name) = content.strip_suffix(op) {
+            if !var_name.is_empty() && is_valid_var_name(var_name) {
+                return WordPart::ParamExpansion {
+                    var: var_name.to_string(),
+                    op: op.to_string(),
+                    default: String::new(),
+                };
+            }
+        }
+    }
+
+    // Substring: ${var:N} or ${var:N:M} — colon followed by digit or negative
+    // Must check before :- :+ := :? operators
+    if let Some(colon_pos) = content.find(':') {
+        let var_name = &content[..colon_pos];
+        let after = &content[colon_pos + 1..];
+        if !var_name.is_empty() && is_valid_var_name(var_name) && !after.is_empty() {
+            let first_char = after.as_bytes()[0];
+            // Digit means substring; '-' followed by digit means negative offset
+            if first_char.is_ascii_digit()
+                || (first_char == b'-' && after.len() > 1 && after.as_bytes()[1].is_ascii_digit())
+            {
+                return WordPart::ParamExpansion {
+                    var: var_name.to_string(),
+                    op: ":".to_string(),
+                    default: after.to_string(),
+                };
+            }
+        }
+    }
+
     for op in &[":-", ":=", ":+", ":?", "##", "#", "%%", "%", "//", "/"] {
         if let Some(idx) = content.find(op) {
             return WordPart::ParamExpansion {
@@ -1143,6 +1197,84 @@ mod tests {
                     WordPart::Variable("HOME".into()),
                     WordPart::Literal("/bin".into()),
                 ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_with_output_redirect() {
+        // cat > /tmp/file <<EOF\nhello\nEOF should produce both redirects
+        // No trailing content → no Newline emitted
+        let tokens = lex("cat > /tmp/file <<EOF\nhello\nEOF");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("cat".into()),
+                Token::Redirect(RedirectType::StdoutOverwrite("/tmp/file".into())),
+                Token::Redirect(RedirectType::Heredoc("hello\n".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_redirect_after_delimiter() {
+        // cat <<EOF > /tmp/file\nhello\nEOF — redirect comes after heredoc delimiter
+        // No trailing content → no Newline emitted
+        let tokens = lex("cat <<EOF > /tmp/file\nhello\nEOF");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("cat".into()),
+                Token::Redirect(RedirectType::Heredoc("hello\n".into())),
+                Token::Redirect(RedirectType::StdoutOverwrite("/tmp/file".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_followed_by_command() {
+        // Heredoc followed by another command on the next line
+        let tokens = lex("cat <<EOF\nhello\nEOF\necho ok");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("cat".into()),
+                Token::Redirect(RedirectType::Heredoc("hello\n".into())),
+                Token::Newline,
+                Token::Word("echo".into()),
+                Token::Word("ok".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn case_modification_operators() {
+        let tokens = lex("echo ${x^^}");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".into()),
+                Token::DoubleQuoted(vec![WordPart::ParamExpansion {
+                    var: "x".into(),
+                    op: "^^".into(),
+                    default: String::new(),
+                }]),
+            ]
+        );
+    }
+
+    #[test]
+    fn substring_operator() {
+        let tokens = lex("echo ${x:1:3}");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".into()),
+                Token::DoubleQuoted(vec![WordPart::ParamExpansion {
+                    var: "x".into(),
+                    op: ":".into(),
+                    default: "1:3".into(),
+                }]),
             ]
         );
     }
