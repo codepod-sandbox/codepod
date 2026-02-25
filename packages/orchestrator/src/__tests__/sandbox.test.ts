@@ -221,16 +221,18 @@ describe('Sandbox', () => {
     });
 
     it('passes fileCount limit to VFS', async () => {
+      // The limit must be high enough to survive VFS init + populateBin()
+      // which creates ~9 dirs + ~230 tool stubs in /bin and /usr/bin.
       sandbox = await Sandbox.create({
         wasmDir: WASM_DIR,
         shellWasmPath: SHELL_WASM,
         adapter: new NodeAdapter(),
-        security: { limits: { fileCount: 200 } },
+        security: { limits: { fileCount: 500 } },
       });
       sandbox.writeFile('/tmp/a.txt', new Uint8Array(1));
       // Fill remaining slots to trigger the limit
       let hitLimit = false;
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < 500; i++) {
         try {
           sandbox.writeFile(`/tmp/fill-${i}.txt`, new Uint8Array(1));
         } catch (e: unknown) {

@@ -1986,4 +1986,26 @@ describe('Coreutils Integration', () => {
       expect(content).toBe('hello world\n');
     });
   });
+
+  describe('shell quote concatenation', () => {
+    it('concatenates adjacent unquoted and double-quoted text', async () => {
+      const result = await runner.run('echo test"hello"test');
+      expect(result.stdout).toBe('testhellotest\n');
+    });
+
+    it('concatenates adjacent unquoted and single-quoted text', async () => {
+      const result = await runner.run("echo test'hello'test");
+      expect(result.stdout).toBe('testhellotest\n');
+    });
+
+    it('assignment with double-quoted value', async () => {
+      const result = await runner.run('FOO="hello world"; echo $FOO');
+      expect(result.stdout).toBe('hello world\n');
+    });
+
+    it('assignment with single-quoted value', async () => {
+      const result = await runner.run("FOO='hello world'; echo $FOO");
+      expect(result.stdout).toBe('hello world\n');
+    });
+  });
 });

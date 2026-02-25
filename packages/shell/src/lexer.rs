@@ -254,113 +254,13 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
 
-        // $ — variable, command substitution, or arithmetic
-        if chars[pos] == '$' {
-            pos += 1;
-            if pos < len && chars[pos] == '(' {
-                if pos + 1 < len && chars[pos + 1] == '(' {
-                    // Arithmetic: $((...))
-                    pos += 2;
-                    let mut depth = 1;
-                    let mut expr = String::new();
-                    while pos < len && depth > 0 {
-                        if chars[pos] == '(' {
-                            depth += 1;
-                        }
-                        if chars[pos] == ')' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        expr.push(chars[pos]);
-                        pos += 1;
-                    }
-                    if pos < len {
-                        pos += 1;
-                    } // skip inner )
-                    if pos < len && chars[pos] == ')' {
-                        pos += 1;
-                    } // skip outer )
-                    tokens.push(Token::DoubleQuoted(vec![WordPart::ArithmeticExpansion(
-                        expr,
-                    )]));
-                    continue;
-                }
-                // Command substitution: $(...)
-                pos += 1; // skip '('
-                let content = read_balanced_parens(&chars, &mut pos);
-                tokens.push(Token::CommandSub(content));
-                continue;
-            }
-            if pos < len && chars[pos] == '{' {
-                // Braced variable: ${...}
-                pos += 1; // skip '{'
-                let var = read_until_char(&chars, &mut pos, '}');
-                let part = parse_braced_var(&var);
-                match part {
-                    WordPart::Variable(_) => tokens.push(Token::Variable(match part {
-                        WordPart::Variable(v) => v,
-                        _ => unreachable!(),
-                    })),
-                    _ => tokens.push(Token::DoubleQuoted(vec![part])),
-                }
-                continue;
-            }
-            // Special variables: $?, $$, $!, $#, $@, $*, $0-$9
-            if pos < len && "?$!#@*".contains(chars[pos]) {
-                let var = chars[pos].to_string();
-                pos += 1;
-                tokens.push(Token::Variable(var));
-                continue;
-            }
-            if pos < len && chars[pos].is_ascii_digit() {
-                let var = chars[pos].to_string();
-                pos += 1;
-                tokens.push(Token::Variable(var));
-                continue;
-            }
-            // Simple variable: $NAME
-            let var = read_var_name(&chars, &mut pos);
-            tokens.push(Token::Variable(var));
-            continue;
-        }
-
-        // Backtick command substitution
-        if chars[pos] == '`' {
-            pos += 1; // skip opening backtick
-            let content = read_until_char(&chars, &mut pos, '`');
-            tokens.push(Token::CommandSub(content));
-            continue;
-        }
-
-        // Single-quoted string
-        if chars[pos] == '\'' {
-            pos += 1; // skip opening quote
-            let content = read_until_char(&chars, &mut pos, '\'');
-            tokens.push(Token::QuotedWord(content));
-            continue;
-        }
-
-        // Double-quoted string — parse $VAR and $(cmd) interpolations
-        if chars[pos] == '"' {
-            pos += 1; // skip opening quote
-            let parts = lex_double_quoted(&chars, &mut pos);
-            // Optimize: if there's a single quoted literal part, emit a QuotedWord token
-            if parts.len() == 1 {
-                if let WordPart::QuotedLiteral(ref s) = parts[0] {
-                    tokens.push(Token::QuotedWord(s.clone()));
-                    continue;
-                }
-            }
-            tokens.push(Token::DoubleQuoted(parts));
-            continue;
-        }
-
-        // Word (possibly containing escape sequences or an assignment)
-        let word = read_word(&chars, &mut pos);
-        if !word.is_empty() {
-            tokens.push(classify_word(word));
+        // --- Compound word: accumulate adjacent word parts (unquoted text,
+        // quoted strings, variables, command subs) with no whitespace between
+        // them into a single word.  POSIX shells treat e.g. test"hello"$VAR
+        // as one word.
+        let parts = read_compound_word(&chars, &mut pos);
+        if !parts.is_empty() {
+            tokens.push(compound_to_token(parts));
         }
     }
 
@@ -372,6 +272,189 @@ fn skip_whitespace(chars: &[char], pos: &mut usize) {
     while *pos < chars.len() && (chars[*pos] == ' ' || chars[*pos] == '\t') {
         *pos += 1;
     }
+}
+
+/// Check if a character can start or continue a word (not a structural delimiter).
+fn is_word_char(ch: char) -> bool {
+    !matches!(
+        ch,
+        ' ' | '\t' | '\n' | ';' | '|' | '&' | '>' | '<' | '(' | ')' | '#'
+    )
+}
+
+/// Read a compound word: a sequence of adjacent unquoted text, quoted strings,
+/// variables, and command substitutions with no whitespace between them.
+/// In POSIX shells, `test"hello"$VAR` forms a single word.
+fn read_compound_word(chars: &[char], pos: &mut usize) -> Vec<WordPart> {
+    let mut parts: Vec<WordPart> = Vec::new();
+
+    while *pos < chars.len() && is_word_char(chars[*pos]) {
+        let ch = chars[*pos];
+
+        // Single-quoted string
+        if ch == '\'' {
+            *pos += 1;
+            let content = read_until_char(chars, pos, '\'');
+            parts.push(WordPart::QuotedLiteral(content));
+            continue;
+        }
+
+        // Double-quoted string
+        if ch == '"' {
+            *pos += 1;
+            let inner = lex_double_quoted(chars, pos);
+            parts.extend(inner);
+            continue;
+        }
+
+        // $ — variable, command substitution, or arithmetic
+        if ch == '$' {
+            *pos += 1;
+            if *pos < chars.len() && chars[*pos] == '(' {
+                if *pos + 1 < chars.len() && chars[*pos + 1] == '(' {
+                    // Arithmetic: $((...))
+                    *pos += 2;
+                    let mut depth = 1;
+                    let mut expr = String::new();
+                    while *pos < chars.len() && depth > 0 {
+                        if chars[*pos] == '(' {
+                            depth += 1;
+                        }
+                        if chars[*pos] == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        expr.push(chars[*pos]);
+                        *pos += 1;
+                    }
+                    if *pos < chars.len() {
+                        *pos += 1; // skip inner )
+                    }
+                    if *pos < chars.len() && chars[*pos] == ')' {
+                        *pos += 1; // skip outer )
+                    }
+                    parts.push(WordPart::ArithmeticExpansion(expr));
+                    continue;
+                }
+                // Command substitution: $(...)
+                *pos += 1; // skip '('
+                let content = read_balanced_parens(chars, pos);
+                parts.push(WordPart::CommandSub(content));
+                continue;
+            }
+            if *pos < chars.len() && chars[*pos] == '{' {
+                // Braced variable: ${...}
+                *pos += 1; // skip '{'
+                let var = read_until_char(chars, pos, '}');
+                parts.push(parse_braced_var(&var));
+                continue;
+            }
+            // Special variables: $?, $$, $!, $#, $@, $*, $0-$9
+            if *pos < chars.len() && "?$!#@*".contains(chars[*pos]) {
+                let var = chars[*pos].to_string();
+                *pos += 1;
+                parts.push(WordPart::Variable(var));
+                continue;
+            }
+            if *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                let var = chars[*pos].to_string();
+                *pos += 1;
+                parts.push(WordPart::Variable(var));
+                continue;
+            }
+            // Simple variable: $NAME
+            let var = read_var_name(chars, pos);
+            parts.push(WordPart::Variable(var));
+            continue;
+        }
+
+        // Backtick command substitution
+        if ch == '`' {
+            *pos += 1;
+            let content = read_until_char(chars, pos, '`');
+            parts.push(WordPart::CommandSub(content));
+            continue;
+        }
+
+        // Unquoted word characters (read_word stops at quotes/$, which is
+        // exactly what we want — the outer loop handles those).
+        let word = read_word(chars, pos);
+        if !word.is_empty() {
+            parts.push(WordPart::Literal(word));
+        } else {
+            break; // safety: avoid infinite loop if nothing was consumed
+        }
+    }
+
+    parts
+}
+
+/// Convert accumulated compound word parts into the most specific Token.
+fn compound_to_token(parts: Vec<WordPart>) -> Token {
+    // Single part — use the more specific token types
+    if parts.len() == 1 {
+        match &parts[0] {
+            WordPart::Literal(s) => return classify_word(s.clone()),
+            WordPart::QuotedLiteral(s) => return Token::QuotedWord(s.clone()),
+            WordPart::Variable(v) => return Token::Variable(v.clone()),
+            WordPart::CommandSub(c) => return Token::CommandSub(c.clone()),
+            _ => return Token::DoubleQuoted(parts),
+        }
+    }
+
+    // Check for assignment: first part is a Literal containing '='
+    if let WordPart::Literal(ref first) = parts[0] {
+        if let Some(eq_pos) = first.find('=') {
+            let name = &first[..eq_pos];
+            if !name.is_empty() && is_valid_var_name(name) {
+                // Concatenate the value portion: rest of first literal + all remaining parts
+                let after_eq = &first[eq_pos + 1..];
+                let mut value = after_eq.to_string();
+                for part in &parts[1..] {
+                    match part {
+                        WordPart::Literal(s) | WordPart::QuotedLiteral(s) => {
+                            value.push_str(s);
+                        }
+                        _ => {
+                            // For variable/cmdsub in assignment values, embed the
+                            // raw syntax so the evaluator can expand it later.
+                            // This keeps the existing Assignment(name, value) contract.
+                            match part {
+                                WordPart::Variable(v) => {
+                                    value.push('$');
+                                    value.push_str(v);
+                                }
+                                WordPart::CommandSub(c) => {
+                                    value.push_str("$(");
+                                    value.push_str(c);
+                                    value.push(')');
+                                }
+                                WordPart::ParamExpansion { var, op, default } => {
+                                    value.push_str("${");
+                                    value.push_str(var);
+                                    value.push_str(op);
+                                    value.push_str(default);
+                                    value.push('}');
+                                }
+                                WordPart::ArithmeticExpansion(e) => {
+                                    value.push_str("$((");
+                                    value.push_str(e);
+                                    value.push_str("))");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                return Token::Assignment(name.to_string(), value);
+            }
+        }
+    }
+
+    // Multiple parts — emit as DoubleQuoted (compound word)
+    Token::DoubleQuoted(parts)
 }
 
 /// Read an unquoted word for a redirect target (stops at whitespace and operators).
@@ -1004,6 +1087,62 @@ mod tests {
             vec![
                 Token::Word("cmd".into()),
                 Token::Redirect(RedirectType::StdinFrom("input.txt".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_word_unquoted_and_double_quoted() {
+        // test"hello"test → single compound word
+        let tokens = lex(r#"echo test"hello"test"#);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".into()),
+                Token::DoubleQuoted(vec![
+                    WordPart::Literal("test".into()),
+                    WordPart::QuotedLiteral("hello".into()),
+                    WordPart::Literal("test".into()),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_word_unquoted_and_single_quoted() {
+        let tokens = lex("echo test'hello'test");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".into()),
+                Token::DoubleQuoted(vec![
+                    WordPart::Literal("test".into()),
+                    WordPart::QuotedLiteral("hello".into()),
+                    WordPart::Literal("test".into()),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_word_assignment_with_quotes() {
+        // FOO="bar" → single assignment with value "bar"
+        let tokens = lex(r#"FOO="bar""#);
+        assert_eq!(tokens, vec![Token::Assignment("FOO".into(), "bar".into())]);
+    }
+
+    #[test]
+    fn compound_word_variable_suffix() {
+        // $HOME/bin → compound word
+        let tokens = lex("echo $HOME/bin");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".into()),
+                Token::DoubleQuoted(vec![
+                    WordPart::Variable("HOME".into()),
+                    WordPart::Literal("/bin".into()),
+                ]),
             ]
         );
     }

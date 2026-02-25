@@ -117,6 +117,58 @@ describe('MCP Server (integration)', () => {
     expect(parsed.stdout.trim()).toBe('3');
   }, 30_000);
 
+  it('run_command preserves double quotes in commands', async () => {
+    const ctx = createClient();
+    transport = ctx.transport;
+    await ctx.client.connect(ctx.transport);
+
+    const result = await ctx.client.callTool({
+      name: 'run_command',
+      arguments: { command: 'echo "hello world"' },
+    });
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0].text);
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout.trim()).toBe('hello world');
+  }, 30_000);
+
+  it('run_command preserves single quotes in commands', async () => {
+    const ctx = createClient();
+    transport = ctx.transport;
+    await ctx.client.connect(ctx.transport);
+
+    const result = await ctx.client.callTool({
+      name: 'run_command',
+      arguments: { command: "echo 'hello world'" },
+    });
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0].text);
+    expect(parsed.exit_code).toBe(0);
+    expect(parsed.stdout.trim()).toBe('hello world');
+  }, 30_000);
+
+  it('run_command preserves quoted redirect content', async () => {
+    const ctx = createClient();
+    transport = ctx.transport;
+    await ctx.client.connect(ctx.transport);
+
+    // Write via quoted echo + redirect
+    await ctx.client.callTool({
+      name: 'run_command',
+      arguments: { command: 'echo "hello" > /tmp/quote-test.txt' },
+    });
+    // Read it back
+    const result = await ctx.client.callTool({
+      name: 'read_file',
+      arguments: { path: '/tmp/quote-test.txt' },
+    });
+    expect(result.isError).toBeFalsy();
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0].text.trim()).toBe('hello');
+  }, 30_000);
+
   it('read_file returns error for missing file', async () => {
     const ctx = createClient();
     transport = ctx.transport;
