@@ -145,6 +145,53 @@ except RpcError as e:
     print(e.message)  # "ENOENT: ..."
 ```
 
+### MCP Server
+
+wasmsand includes an MCP (Model Context Protocol) server, so AI assistants like Claude can use the sandbox directly as a tool.
+
+**Claude Code** (`~/.claude/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "sandbox": {
+      "command": "bun",
+      "args": ["run", "/path/to/wasmsand/packages/mcp-server/src/index.ts"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "sandbox": {
+      "command": "bun",
+      "args": ["run", "/path/to/wasmsand/packages/mcp-server/src/index.ts"]
+    }
+  }
+}
+```
+
+The server exposes 4 tools over stdio:
+
+| Tool | Description |
+|------|-------------|
+| `run_command` | Execute a shell command (95+ coreutils, pipes, redirects, variables) |
+| `read_file` | Read a file from the sandbox filesystem |
+| `write_file` | Write a file to the sandbox filesystem |
+| `list_directory` | List files and directories |
+
+Configuration via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WASMSAND_TIMEOUT_MS` | 30000 | Per-command timeout |
+| `WASMSAND_FS_LIMIT_BYTES` | 268435456 | VFS size limit (256 MB) |
+| `WASMSAND_WASM_DIR` | auto | Path to WASM binaries |
+
 ## Available tools
 
 | Category | Tools |

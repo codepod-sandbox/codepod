@@ -22,7 +22,7 @@ jobs:
 
       - name: Run TypeScript tests
         timeout-minutes: 10
-        run: bun test packages/orchestrator packages/sdk-server
+        run: bun test packages/orchestrator packages/sdk-server packages/mcp-server
 
       - name: Install Python SDK
         run: cd packages/python-sdk && pip install -e ".[dev]"
