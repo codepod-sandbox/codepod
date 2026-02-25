@@ -523,7 +523,7 @@ export class ShellRunner {
     // Expand words (async — may contain command substitutions)
     let rawWords: string[];
     try {
-      rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
+      rawWords = await this.expandWordsWithSplitting(simple.words);
     } catch (err: unknown) {
       if (err instanceof CancelledError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
@@ -828,7 +828,7 @@ export class ShellRunner {
       // For pipeline stages, we need to inject stdin from previous stage
       if (typeof cmd === 'object' && 'Simple' in cmd) {
         const simple = cmd.Simple;
-        const rawWords = await Promise.all(simple.words.map(w => this.expandWord(w)));
+        const rawWords = await this.expandWordsWithSplitting(simple.words);
         const bracedWords = this.expandBraces(rawWords);
         const restoredWords = bracedWords.map(w => w.replace(/\uE000/g, '{').replace(/\uE001/g, '}'));
         const expandedWords = this.expandGlobs(restoredWords);
@@ -999,7 +999,7 @@ export class ShellRunner {
     words: Word[];
     body: Command;
   }): Promise<RunResult> {
-    const rawWords = await Promise.all(forCmd.words.map(w => this.expandWord(w)));
+    const rawWords = await this.expandWordsWithSplitting(forCmd.words);
     const bracedWords = this.expandBraces(rawWords);
     const restoredWords = bracedWords.map(w => w.replace(/\uE000/g, '{').replace(/\uE001/g, '}'));
     const expandedWords = this.expandGlobs(restoredWords);
@@ -1089,6 +1089,35 @@ export class ShellRunner {
     return parts.join('');
   }
 
+  /**
+   * Does this word need IFS-based splitting after expansion?
+   * A word needs splitting if it contains CommandSub or Variable parts
+   * and is not inside double quotes (indicated by QuotedLiteral parts).
+   */
+  private wordNeedsSplitting(word: Word): boolean {
+    const hasSubstitution = word.parts.some(p => 'CommandSub' in p || 'Variable' in p);
+    const isQuoted = word.parts.some(p => 'QuotedLiteral' in p);
+    return hasSubstitution && !isQuoted;
+  }
+
+  /**
+   * Expand a list of Words, performing IFS-based word splitting on unquoted
+   * command substitutions and variable expansions.
+   */
+  private async expandWordsWithSplitting(words: Word[]): Promise<string[]> {
+    const result: string[] = [];
+    for (const w of words) {
+      const expanded = await this.expandWord(w);
+      if (this.wordNeedsSplitting(w)) {
+        const split = expanded.split(/[ \t\n]+/).filter(s => s !== '');
+        result.push(...split);
+      } else {
+        result.push(expanded);
+      }
+    }
+    return result;
+  }
+
   private async expandWordPart(part: WordPart): Promise<string> {
     if ('Literal' in part) {
       const s = part.Literal;
@@ -1109,6 +1138,9 @@ export class ShellRunner {
       }
       if (part.Variable === '#') {
         return String(this.getPositionalArgs().length);
+      }
+      if (part.Variable === 'RANDOM') {
+        return String(Math.floor(Math.random() * 32768));
       }
       const val = this.env.get(part.Variable);
       if (val === undefined && this.shellFlags.has('u') && !/^\d+$/.test(part.Variable)) {
@@ -1948,13 +1980,90 @@ export class ShellRunner {
   /** Builtin: echo — print arguments to stdout. */
   private builtinEcho(args: string[]): RunResult {
     let trailingNewline = true;
+    let interpretEscapes = false;
     let startIdx = 0;
-    if (args[0] === '-n') {
-      trailingNewline = false;
-      startIdx = 1;
+
+    // Parse flags: -n (no newline), -e (interpret escapes), -E (no escapes, default)
+    // Support combined flags like -en, -ne, -neE, etc.
+    while (startIdx < args.length && args[startIdx].startsWith('-') && args[startIdx].length > 1 && /^-[neE]+$/.test(args[startIdx])) {
+      const flags = args[startIdx].slice(1);
+      for (const ch of flags) {
+        if (ch === 'n') trailingNewline = false;
+        else if (ch === 'e') interpretEscapes = true;
+        else if (ch === 'E') interpretEscapes = false;
+      }
+      startIdx++;
     }
-    const output = args.slice(startIdx).join(' ') + (trailingNewline ? '\n' : '');
+
+    let output = args.slice(startIdx).join(' ');
+
+    if (interpretEscapes) {
+      output = this.interpretEchoEscapes(output);
+    }
+
+    output += trailingNewline ? '\n' : '';
     return { exitCode: 0, stdout: output, stderr: '', executionTimeMs: 0 };
+  }
+
+  /** Interpret backslash escape sequences for echo -e. */
+  private interpretEchoEscapes(s: string): string {
+    let result = '';
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '\\' && i + 1 < s.length) {
+        const next = s[i + 1];
+        switch (next) {
+          case 'n': result += '\n'; i += 2; break;
+          case 't': result += '\t'; i += 2; break;
+          case 'r': result += '\r'; i += 2; break;
+          case 'a': result += '\x07'; i += 2; break;
+          case 'b': result += '\b'; i += 2; break;
+          case 'f': result += '\f'; i += 2; break;
+          case 'v': result += '\v'; i += 2; break;
+          case '\\': result += '\\'; i += 2; break;
+          case '0': {
+            // Octal: \0NNN (up to 3 octal digits)
+            let octal = '';
+            let j = i + 2;
+            while (j < s.length && j < i + 5 && s[j] >= '0' && s[j] <= '7') {
+              octal += s[j];
+              j++;
+            }
+            result += String.fromCharCode(parseInt(octal || '0', 8));
+            i = j;
+            break;
+          }
+          case 'x': {
+            // Hex: \xHH (up to 2 hex digits)
+            let hex = '';
+            let j = i + 2;
+            while (j < s.length && j < i + 4 && /[0-9a-fA-F]/.test(s[j])) {
+              hex += s[j];
+              j++;
+            }
+            if (hex.length > 0) {
+              result += String.fromCharCode(parseInt(hex, 16));
+              i = j;
+            } else {
+              result += '\\x';
+              i += 2;
+            }
+            break;
+          }
+          case 'c':
+            // \c — suppress further output (including trailing newline)
+            return result;
+          default:
+            result += '\\' + next;
+            i += 2;
+            break;
+        }
+      } else {
+        result += s[i];
+        i++;
+      }
+    }
+    return result;
   }
 
   /** Builtin: read — read a line from stdin and assign to variables. */

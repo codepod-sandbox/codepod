@@ -538,4 +538,64 @@ describe('shell conformance', () => {
       expect(r.stdout).toBe('a\\b\n');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Word splitting
+  // ---------------------------------------------------------------------------
+  describe('word splitting', () => {
+    it('word splitting on unquoted command substitution', async () => {
+      const r = await runner.run(`for w in $(echo "a b c"); do echo "item: $w"; done`);
+      expect(r.stdout).toBe('item: a\nitem: b\nitem: c\n');
+    });
+
+    it('no word splitting inside double quotes with literal prefix', async () => {
+      // Note: the parser cannot distinguish "$x" from $x (both produce identical ASTs).
+      // However when there is literal text alongside the variable (e.g. "val: $x"),
+      // the QuotedLiteral part signals that splitting should be suppressed.
+      const r = await runner.run(`x="a b c"; for w in "val: $x"; do echo "item: $w"; done`);
+      expect(r.stdout).toBe('item: val: a b c\n');
+    });
+
+    it('word splitting on unquoted variable', async () => {
+      const r = await runner.run(`x="a b c"; for w in $x; do echo $w; done`);
+      expect(r.stdout).toBe('a\nb\nc\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // echo -e
+  // ---------------------------------------------------------------------------
+  describe('echo -e', () => {
+    it('echo -e interprets backslash escapes', async () => {
+      const r = await runner.run(`echo -e "hello\\nworld"`);
+      expect(r.stdout).toBe('hello\nworld\n');
+    });
+
+    it('echo -e interprets tab', async () => {
+      const r = await runner.run(`echo -e "a\\tb"`);
+      expect(r.stdout).toBe('a\tb\n');
+    });
+
+    it('echo -en combines flags', async () => {
+      const r = await runner.run(`echo -en "hi\\n"`);
+      expect(r.stdout).toBe('hi\n');
+    });
+
+    it('echo without -e does not interpret escapes', async () => {
+      const r = await runner.run(`echo "hello\\nworld"`);
+      expect(r.stdout).toBe('hello\\nworld\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // $RANDOM
+  // ---------------------------------------------------------------------------
+  describe('$RANDOM', () => {
+    it('$RANDOM produces a number', async () => {
+      const r = await runner.run(`echo $RANDOM`);
+      const n = parseInt(r.stdout.trim());
+      expect(n).toBeGreaterThanOrEqual(0);
+      expect(n).toBeLessThan(32768);
+    });
+  });
 });
