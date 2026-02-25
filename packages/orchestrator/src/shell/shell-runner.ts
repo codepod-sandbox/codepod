@@ -23,6 +23,7 @@ import { PkgError } from '../pkg/manager.js';
 import { CommandHistory } from './history.js';
 import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
+import { PackageRegistry } from '../packages/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
 const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts', 'return', 'local', 'trap']);
@@ -157,6 +158,10 @@ export class ShellRunner {
   private inConditionalContext = false;
   /** Pipe stdin data threaded through compound commands (while, for, if, subshell). */
   private pipeStdin: Uint8Array | undefined;
+  /** Sandbox-native package registry for pip install/uninstall at runtime. */
+  private packageRegistry: PackageRegistry | null = null;
+  /** Set of package names currently installed from PackageRegistry. */
+  private installedPackages = new Set<string>();
 
   constructor(
     vfs: VfsLike,
@@ -259,6 +264,16 @@ export class ShellRunner {
         } catch { /* ignore if exists */ }
       }
     });
+  }
+
+  /** Set the sandbox-native package registry for runtime pip install/uninstall. */
+  setPackageRegistry(registry: PackageRegistry): void {
+    this.packageRegistry = registry;
+  }
+
+  /** Mark a package as already installed (e.g. from Sandbox.create pre-install). */
+  markPackageInstalled(name: string): void {
+    this.installedPackages.add(name);
   }
 
   /** Set the tool allowlist so extension commands are also gated. */
@@ -2456,63 +2471,130 @@ export class ShellRunner {
     return this.run(script);
   }
 
-  /** Builtin: pip — extension package discovery. */
+  /** Builtin: pip — package install/uninstall/list/show. */
   private builtinPip(args: string[]): RunResult {
     const sub = args[0];
     if (sub === '--help' || sub === '-h' || sub === undefined) {
       return {
         exitCode: 0,
-        stdout: 'Usage: pip <command> [options]\n\nCommands:\n  list     List installed packages\n  show     Show package details\n  install  Install packages\n',
+        stdout: 'Usage: pip <command> [options]\n\nCommands:\n  install    Install packages\n  uninstall  Uninstall packages\n  list       List installed packages\n  show       Show package details\n',
         stderr: '',
         executionTimeMs: 0,
       };
     }
-    if (sub === 'list') {
-      const names = this.extensionRegistry?.getPackageNames() ?? [];
-      if (names.length === 0) {
-        return { exitCode: 0, stdout: 'Package    Version\n---------- -------\n', stderr: '', executionTimeMs: 0 };
-      }
-      let out = 'Package    Version\n---------- -------\n';
-      for (const name of names) {
-        const ext = this.extensionRegistry!.get(name)!;
-        const ver = ext.pythonPackage!.version;
-        out += `${name.padEnd(10)} ${ver}\n`;
-      }
-      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-    }
-    if (sub === 'show') {
-      const name = args[1];
-      if (!name) {
-        return { exitCode: 1, stdout: '', stderr: 'ERROR: Please provide a package name\n', executionTimeMs: 0 };
-      }
-      const ext = this.extensionRegistry?.get(name);
-      if (!ext?.pythonPackage) {
-        return { exitCode: 1, stdout: '', stderr: `WARNING: Package(s) not found: ${name}\n`, executionTimeMs: 0 };
-      }
-      const pkg = ext.pythonPackage;
-      const files = Object.keys(pkg.files);
-      let out = `Name: ${name}\nVersion: ${pkg.version}\n`;
-      if (pkg.summary) out += `Summary: ${pkg.summary}\n`;
-      out += `Location: /usr/lib/python\nFiles:\n`;
-      for (const f of files) out += `  ${name}/${f}\n`;
-      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-    }
+
     if (sub === 'install') {
       const name = args[1];
       if (!name) {
         return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to install\n', executionTimeMs: 0 };
       }
+      // Check extension registry first (backwards compat)
       const ext = this.extensionRegistry?.get(name);
       if (ext?.pythonPackage) {
         return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
       }
+      // Check if already installed from PackageRegistry
+      if (this.installedPackages.has(name)) {
+        return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
+      }
+      // Try to install from PackageRegistry
+      if (this.packageRegistry?.has(name)) {
+        const toInstall = this.packageRegistry.resolveDeps(name);
+        const newlyInstalled: string[] = [];
+        this.vfs.withWriteAccess(() => {
+          for (const depName of toInstall) {
+            if (this.installedPackages.has(depName)) continue;
+            const meta = this.packageRegistry!.get(depName)!;
+            for (const [relPath, content] of Object.entries(meta.pythonFiles)) {
+              const fullPath = `/usr/lib/python/${relPath}`;
+              const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+              this.vfs.mkdirp(dir);
+              this.vfs.writeFile(fullPath, new TextEncoder().encode(content));
+            }
+            this.installedPackages.add(depName);
+            newlyInstalled.push(`${depName}-${meta.version}`);
+          }
+        });
+        return { exitCode: 0, stdout: `Successfully installed ${newlyInstalled.join(' ')}\n`, stderr: '', executionTimeMs: 0 };
+      }
+      // Not found anywhere
       return {
         exitCode: 1,
         stdout: '',
-        stderr: `ERROR: Could not find a version that satisfies the requirement ${name}\n`,
+        stderr: `ERROR: Could not find a version that satisfies the requirement ${name} (not found in sandbox registry)\nAvailable packages: ${this.packageRegistry?.available().join(', ') ?? ''}\n`,
         executionTimeMs: 0,
       };
     }
+
+    if (sub === 'uninstall') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to uninstall\n', executionTimeMs: 0 };
+      }
+      if (!this.installedPackages.has(name)) {
+        return { exitCode: 1, stdout: '', stderr: `WARNING: Skipping ${name} as it is not installed\n`, executionTimeMs: 0 };
+      }
+      const meta = this.packageRegistry?.get(name);
+      if (meta) {
+        this.vfs.withWriteAccess(() => {
+          for (const relPath of Object.keys(meta.pythonFiles)) {
+            try { this.vfs.unlink(`/usr/lib/python/${relPath}`); } catch {}
+          }
+          try { this.vfs.rmdir(`/usr/lib/python/${name}`); } catch {}
+        });
+      }
+      this.installedPackages.delete(name);
+      return { exitCode: 0, stdout: `Successfully uninstalled ${name}\n`, stderr: '', executionTimeMs: 0 };
+    }
+
+    if (sub === 'list') {
+      let out = 'Package         Version\n--------------- -------\n';
+      // Show packages from PackageRegistry that are installed
+      for (const name of [...this.installedPackages].sort()) {
+        const meta = this.packageRegistry?.get(name);
+        if (meta) {
+          out += `${name.padEnd(16)}${meta.version}\n`;
+        }
+      }
+      // Show extension packages (backwards compat)
+      const extNames = this.extensionRegistry?.getPackageNames() ?? [];
+      for (const name of extNames) {
+        if (!this.installedPackages.has(name)) {
+          const ext = this.extensionRegistry!.get(name)!;
+          out += `${name.padEnd(16)}${ext.pythonPackage!.version}\n`;
+        }
+      }
+      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+    }
+
+    if (sub === 'show') {
+      const name = args[1];
+      if (!name) {
+        return { exitCode: 1, stdout: '', stderr: 'ERROR: Please provide a package name\n', executionTimeMs: 0 };
+      }
+      // Check PackageRegistry first
+      const meta = this.packageRegistry?.get(name);
+      if (meta) {
+        const installed = this.installedPackages.has(name);
+        let out = `Name: ${meta.name}\nVersion: ${meta.version}\nSummary: ${meta.summary}\n`;
+        out += `Status: ${installed ? 'installed' : 'available'}\nLocation: /usr/lib/python\n`;
+        if (meta.dependencies.length > 0) out += `Requires: ${meta.dependencies.join(', ')}\n`;
+        return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+      }
+      // Check extension registry (backwards compat)
+      const ext = this.extensionRegistry?.get(name);
+      if (ext?.pythonPackage) {
+        const pkg = ext.pythonPackage;
+        const files = Object.keys(pkg.files);
+        let out = `Name: ${name}\nVersion: ${pkg.version}\n`;
+        if (pkg.summary) out += `Summary: ${pkg.summary}\n`;
+        out += `Location: /usr/lib/python\nFiles:\n`;
+        for (const f of files) out += `  ${name}/${f}\n`;
+        return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
+      }
+      return { exitCode: 1, stdout: '', stderr: `WARNING: Package(s) not found: ${name}\n`, executionTimeMs: 0 };
+    }
+
     return {
       exitCode: 1,
       stdout: '',

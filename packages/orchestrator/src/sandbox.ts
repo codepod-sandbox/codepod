@@ -235,9 +235,12 @@ export class Sandbox {
       });
     }
 
+    // Always create PackageRegistry for pip builtin (runtime install/uninstall)
+    const pkgRegistry = new PackageRegistry();
+    runner.setPackageRegistry(pkgRegistry);
+
     // Install sandbox-native packages from PackageRegistry
     if (options.packages && options.packages.length > 0) {
-      const pkgRegistry = new PackageRegistry();
       const toInstall = new Set<string>();
       for (const name of options.packages) {
         for (const dep of pkgRegistry.resolveDeps(name)) {
@@ -254,6 +257,7 @@ export class Sandbox {
             vfs.mkdirp(dir);
             vfs.writeFile(fullPath, new TextEncoder().encode(content));
           }
+          runner.markPackageInstalled(name);
         }
       });
     }
