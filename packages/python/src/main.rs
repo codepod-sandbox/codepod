@@ -5,23 +5,38 @@ use rustpython::InterpreterBuilderExt;
 fn main() -> ExitCode {
     let config = rustpython::InterpreterBuilder::new().init_stdlib();
 
+    // Extract module defs while config is still borrowed, then move config.
+    // Each cfg block gets the def first, then re-binds config.
+
     #[cfg(feature = "numpy")]
-    let config = config.add_native_module(numpy_rust_python::numpy_module_def(&config.ctx));
+    let numpy_def = numpy_rust_python::numpy_module_def(&config.ctx);
+    #[cfg(feature = "numpy")]
+    let config = config.add_native_module(numpy_def);
 
     #[cfg(feature = "pandas")]
-    let config = config.add_native_module(pandas_native::module_def(&config.ctx));
+    let pandas_def = pandas_native::module_def(&config.ctx);
+    #[cfg(feature = "pandas")]
+    let config = config.add_native_module(pandas_def);
 
     #[cfg(feature = "pil")]
-    let config = config.add_native_module(pil_native::module_def(&config.ctx));
+    let pil_def = pil_native::module_def(&config.ctx);
+    #[cfg(feature = "pil")]
+    let config = config.add_native_module(pil_def);
 
     #[cfg(feature = "matplotlib")]
-    let config = config.add_native_module(matplotlib_native::module_def(&config.ctx));
+    let matplotlib_def = matplotlib_native::module_def(&config.ctx);
+    #[cfg(feature = "matplotlib")]
+    let config = config.add_native_module(matplotlib_def);
 
     #[cfg(feature = "sklearn")]
-    let config = config.add_native_module(sklearn_native::module_def(&config.ctx));
+    let sklearn_def = sklearn_native::module_def(&config.ctx);
+    #[cfg(feature = "sklearn")]
+    let config = config.add_native_module(sklearn_def);
 
     #[cfg(feature = "sqlite3")]
-    let config = config.add_native_module(sqlite3_native::module_def(&config.ctx));
+    let sqlite3_def = sqlite3_native::module_def(&config.ctx);
+    #[cfg(feature = "sqlite3")]
+    let config = config.add_native_module(sqlite3_def);
 
     rustpython::run(config)
 }

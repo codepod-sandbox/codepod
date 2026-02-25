@@ -18,7 +18,7 @@ sklearn = ["numpy", "dep:sklearn-native"]
 sqlite3 = ["dep:sqlite3-native"]
 
 [dependencies]
-rustpython = { git = "https://github.com/RustPython/RustPython", default-features = false, features = [
+rustpython = { git = "https://github.com/RustPython/RustPython", rev = "f9ca63893", default-features = false, features = [
   "freeze-stdlib",
   "importlib",
   "stdio",
