@@ -1921,4 +1921,69 @@ describe('Coreutils Integration', () => {
       expect(result.stdout).toContain('c.txt');
     });
   });
+
+  // ── Bug fix tests (discovered via MCP sandbox usage) ────────────────
+
+  describe('sort (field support)', () => {
+    it('supports -t for field separator', async () => {
+      vfs.writeFile('/home/user/data.csv', new TextEncoder().encode('alice,95\nbob,87\ncharlie,92\n'));
+      const result = await runner.run('sort -t, -k2 -n /home/user/data.csv');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('bob,87\ncharlie,92\nalice,95\n');
+    });
+
+    it('supports -k for key specification', async () => {
+      vfs.writeFile('/home/user/data.txt', new TextEncoder().encode('alice 95\nbob 87\ncharlie 92\n'));
+      const result = await runner.run('sort -k2 -rn /home/user/data.txt');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('alice 95\ncharlie 92\nbob 87\n');
+    });
+
+    it('supports -t with space-separated argument', async () => {
+      vfs.writeFile('/home/user/data.csv', new TextEncoder().encode('alice,95\nbob,87\ncharlie,92\n'));
+      const result = await runner.run('sort -t , -k 2 -rn /home/user/data.csv');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('alice,95\ncharlie,92\nbob,87\n');
+    });
+  });
+
+  describe('awk (attached -F)', () => {
+    it('supports -F with attached separator (-F,)', async () => {
+      vfs.writeFile('/home/user/data.csv', new TextEncoder().encode('alice,30\nbob,25\n'));
+      const result = await runner.run("awk -F, '{print $2}' /home/user/data.csv");
+      expect(result.stdout).toBe('30\n25\n');
+    });
+  });
+
+  describe('jq (file arguments)', () => {
+    it('reads from file argument instead of stdin', async () => {
+      vfs.writeFile('/home/user/data.json', new TextEncoder().encode('{"name":"test","value":42}'));
+      const result = await runner.run('jq .name /home/user/data.json');
+      expect(result.stdout.trim()).toBe('"test"');
+    });
+
+    it('reads from multiple file arguments', async () => {
+      vfs.writeFile('/home/user/a.json', new TextEncoder().encode('{"x":1}'));
+      vfs.writeFile('/home/user/b.json', new TextEncoder().encode('{"x":2}'));
+      const result = await runner.run('jq .x /home/user/a.json /home/user/b.json');
+      expect(result.stdout.trim()).toBe('1\n2');
+    });
+  });
+
+  describe('grep (special characters)', () => {
+    it('matches commas in pattern', async () => {
+      vfs.writeFile('/home/user/data.csv', new TextEncoder().encode('name,score\nalice,95\n'));
+      const result = await runner.run('grep -c "," /home/user/data.csv');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('2');
+    });
+  });
+
+  describe('echo (quoted redirect)', () => {
+    it('writes quoted string to file via redirect', async () => {
+      await runner.run('echo "hello world" > /home/user/quoted.txt');
+      const content = new TextDecoder().decode(vfs.readFile('/home/user/quoted.txt'));
+      expect(content).toBe('hello world\n');
+    });
+  });
 });
