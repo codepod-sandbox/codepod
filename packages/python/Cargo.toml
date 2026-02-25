@@ -7,6 +7,16 @@ edition = "2021"
 name = "python3"
 path = "src/main.rs"
 
+[features]
+default = []
+all-packages = ["numpy", "pandas", "pil", "matplotlib", "sklearn", "sqlite3"]
+numpy = ["dep:numpy-rust-python"]
+pandas = ["numpy", "dep:pandas-native"]
+pil = ["dep:pil-native"]
+matplotlib = ["numpy", "dep:matplotlib-native"]
+sklearn = ["numpy", "dep:sklearn-native"]
+sqlite3 = ["dep:sqlite3-native"]
+
 [dependencies]
 rustpython = { git = "https://github.com/RustPython/RustPython", default-features = false, features = [
   "freeze-stdlib",
@@ -15,3 +25,11 @@ rustpython = { git = "https://github.com/RustPython/RustPython", default-feature
   "encodings",
   "host_env",
 ] }
+
+# Native package crates (optional, gated by features)
+numpy-rust-python = { path = "../../../numpy-rust/crates/numpy-rust-python", optional = true }
+pandas-native = { path = "crates/pandas", optional = true }
+pil-native = { path = "crates/pil", optional = true }
+matplotlib-native = { path = "crates/matplotlib", optional = true }
+sklearn-native = { path = "crates/sklearn", optional = true }
+sqlite3-native = { path = "crates/sqlite3", optional = true }
