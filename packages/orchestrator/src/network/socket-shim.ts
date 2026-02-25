@@ -36,6 +36,26 @@ error = OSError
 herror = OSError
 gaierror = OSError
 
+# Additional constants needed by asyncio, selectors, ssl, etc.
+AF_UNSPEC = 0
+SOCK_RAW = 3
+IPPROTO_UDP = 17
+IPPROTO_IP = 0
+SOL_TCP = 6
+SO_REUSEADDR = 2
+SO_ERROR = 4
+MSG_DONTWAIT = 64
+MSG_PEEK = 2
+AI_PASSIVE = 1
+AI_CANONNAME = 2
+AI_NUMERICHOST = 4
+AI_NUMERICSERV = 1024
+NI_NUMERICHOST = 1
+NI_NUMERICSERV = 2
+EAI_NONAME = -2
+SOMAXCONN = 128
+has_ipv6 = True
+
 
 def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=None):
     host, port = address
@@ -48,8 +68,13 @@ def create_connection(address, timeout=_GLOBAL_DEFAULT_TIMEOUT, source_address=N
 
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     if isinstance(port, str):
-        port = int(port)
-    return [(AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (host, port or 80))]
+        port = int(port) if port else 0
+    results = []
+    if family == 0 or family == AF_INET:
+        results.append((AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (host, port or 80)))
+    if family == 0 or family == AF_INET6:
+        results.append((AF_INET6, SOCK_STREAM, IPPROTO_TCP, '', (host, port or 80)))
+    return results if results else [(AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (host, port or 80))]
 
 
 def getfqdn(name=''):
@@ -62,6 +87,20 @@ def gethostname():
 
 def gethostbyname(hostname):
     return '127.0.0.1'
+
+
+def inet_aton(ip_string):
+    parts = ip_string.split('.')
+    return bytes(int(p) for p in parts)
+
+
+def inet_ntoa(packed_ip):
+    return '.'.join(str(b) for b in packed_ip)
+
+
+def getnameinfo(sockaddr, flags):
+    host, port = sockaddr[:2]
+    return (str(host), str(port))
 
 
 def _control(cmd):
