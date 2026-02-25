@@ -134,6 +134,18 @@ export class VfsProxy {
     };
   }
 
+  lstat(path: string): StatResult {
+    const { metadata } = this.call('lstat', { path });
+    return {
+      type: metadata.type as StatResult['type'],
+      size: metadata.size as number,
+      permissions: metadata.permissions as number,
+      mtime: new Date(metadata.mtime as string),
+      ctime: new Date(metadata.ctime as string),
+      atime: new Date(metadata.atime as string),
+    };
+  }
+
   readdir(path: string): DirEntry[] {
     const { metadata } = this.call('readdir', { path });
     return metadata.entries as DirEntry[];
@@ -165,6 +177,11 @@ export class VfsProxy {
 
   symlink(target: string, path: string): void {
     this.call('symlink', { target, path });
+  }
+
+  readlink(path: string): string {
+    const { metadata } = this.call('readlink', { path });
+    return metadata.target as string;
   }
 
   /** Run a callback — on the proxy side this is a no-op pass-through. */

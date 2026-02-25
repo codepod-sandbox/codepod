@@ -338,8 +338,8 @@ export class WasiHost {
         fd_renumber: this.stub.bind(this),
         path_filestat_set_times: this.stub.bind(this),
         path_link: this.stub.bind(this),
-        path_readlink: this.stub.bind(this),
-        path_symlink: this.stub.bind(this),
+        path_readlink: this.pathReadlink.bind(this),
+        path_symlink: this.pathSymlink.bind(this),
         poll_oneoff: this.stub.bind(this),
         proc_raise: this.stub.bind(this),
         sock_accept: this.stub.bind(this),
@@ -897,7 +897,7 @@ export class WasiHost {
 
   private pathFilestatGet(
     dirFd: number,
-    _flags: number,
+    flags: number,
     pathPtr: number,
     pathLen: number,
     bufPtr: number,
@@ -906,7 +906,9 @@ export class WasiHost {
     try {
       const relativePath = this.readString(pathPtr, pathLen);
       const absPath = this.resolvePath(dirFd, relativePath);
-      return this.writeFilestat(bufPtr, absPath);
+      // flags bit 0 = SYMLINK_FOLLOW; when not set, use lstat
+      const followSymlinks = (flags & 1) !== 0;
+      return this.writeFilestat(bufPtr, absPath, followSymlinks);
     } catch (err) {
       if (err instanceof VfsError) {
         return vfsErrnoToWasi(err.errno);
@@ -995,6 +997,56 @@ export class WasiHost {
     }
   }
 
+  private pathSymlink(
+    oldPathPtr: number,
+    oldPathLen: number,
+    dirFd: number,
+    newPathPtr: number,
+    newPathLen: number,
+  ): number {
+    this.checkDeadline();
+    try {
+      const target = this.readString(oldPathPtr, oldPathLen);
+      const newRelative = this.readString(newPathPtr, newPathLen);
+      const newAbs = this.resolvePath(dirFd, newRelative);
+      this.vfs.symlink(target, newAbs);
+      return WASI_ESUCCESS;
+    } catch (err) {
+      if (err instanceof VfsError) {
+        return vfsErrnoToWasi(err.errno);
+      }
+      return fdErrorToWasi(err);
+    }
+  }
+
+  private pathReadlink(
+    dirFd: number,
+    pathPtr: number,
+    pathLen: number,
+    bufPtr: number,
+    bufLen: number,
+    bufUsedPtr: number,
+  ): number {
+    this.checkDeadline();
+    try {
+      const relativePath = this.readString(pathPtr, pathLen);
+      const absPath = this.resolvePath(dirFd, relativePath);
+      const target = this.vfs.readlink(absPath);
+      const encoded = this.encoder.encode(target);
+      const bytes = this.getBytes();
+      const view = this.getView();
+      const written = Math.min(encoded.length, bufLen);
+      bytes.set(encoded.subarray(0, written), bufPtr);
+      view.setUint32(bufUsedPtr, written, true);
+      return WASI_ESUCCESS;
+    } catch (err) {
+      if (err instanceof VfsError) {
+        return vfsErrnoToWasi(err.errno);
+      }
+      return fdErrorToWasi(err);
+    }
+  }
+
   private clockTimeGet(
     clockId: number,
     _precision: bigint,
@@ -1062,9 +1114,9 @@ export class WasiHost {
   }
 
   /** Write a WASI filestat structure at bufPtr for the given VFS path. */
-  private writeFilestat(bufPtr: number, absPath: string): number {
+  private writeFilestat(bufPtr: number, absPath: string, followSymlinks = true): number {
     try {
-      const stat = this.vfs.stat(absPath);
+      const stat = followSymlinks ? this.vfs.stat(absPath) : this.vfs.lstat(absPath);
       const view = this.getView();
 
       // filestat layout (64 bytes):

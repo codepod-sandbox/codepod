@@ -220,7 +220,7 @@ export class WorkerExecutor {
     // Only use withWriteAccess for write operations targeting system paths.
     // Read operations never need it; user-path writes go through normal
     // writable-path checks.
-    const READ_OPS = new Set(['readFile', 'stat', 'readdir']);
+    const READ_OPS = new Set(['readFile', 'stat', 'lstat', 'readdir']);
     const SYSTEM_PREFIXES = ['/bin', '/usr', '/.wasi'];
     const isRead = READ_OPS.has(op);
     const isSystemPath = SYSTEM_PREFIXES.some(p => path.startsWith(p));
@@ -249,6 +249,19 @@ export class WorkerExecutor {
             mtime: st.mtime.toISOString(),
             ctime: st.ctime.toISOString(),
             atime: st.atime.toISOString(),
+          });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'lstat': {
+          const lst = vfs.lstat(metadata.path as string);
+          encodeResponse(this.sab, {
+            type: lst.type,
+            size: lst.size,
+            permissions: lst.permissions,
+            mtime: lst.mtime.toISOString(),
+            ctime: lst.ctime.toISOString(),
+            atime: lst.atime.toISOString(),
           });
           Atomics.store(this.int32, 0, STATUS_RESPONSE);
           break;
@@ -298,6 +311,12 @@ export class WorkerExecutor {
         case 'symlink': {
           vfs.symlink(metadata.target as string, metadata.path as string);
           encodeResponse(this.sab, { ok: true });
+          Atomics.store(this.int32, 0, STATUS_RESPONSE);
+          break;
+        }
+        case 'readlink': {
+          const target = vfs.readlink(metadata.path as string);
+          encodeResponse(this.sab, { target });
           Atomics.store(this.int32, 0, STATUS_RESPONSE);
           break;
         }

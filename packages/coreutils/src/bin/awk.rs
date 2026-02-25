@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
 
 // ---- Lexer ----
@@ -59,10 +59,12 @@ enum Token {
     And,
     Or,
     Not,
-    Match,    // ~
-    NotMatch, // !~
-    Append,   // >>
-    Pipe,     // |
+    Match,     // ~
+    NotMatch,  // !~
+    Increment, // ++
+    Decrement, // --
+    Append,    // >>
+    Pipe,      // |
     // Delimiters
     LParen,
     RParen,
@@ -74,6 +76,8 @@ enum Token {
     Comma,
     Newline,
     Dollar,
+    Question, // ?
+    Colon,    // :
     // Special
     Eof,
 }
@@ -225,7 +229,10 @@ impl Lexer {
                     }
                 }
                 '+' => {
-                    if self.peek() == '=' {
+                    if self.peek() == '+' {
+                        self.advance();
+                        tokens.push(Token::Increment);
+                    } else if self.peek() == '=' {
                         self.advance();
                         tokens.push(Token::PlusAssign);
                     } else {
@@ -233,7 +240,10 @@ impl Lexer {
                     }
                 }
                 '-' => {
-                    if self.peek() == '=' {
+                    if self.peek() == '-' {
+                        self.advance();
+                        tokens.push(Token::Decrement);
+                    } else if self.peek() == '=' {
                         self.advance();
                         tokens.push(Token::MinusAssign);
                     } else {
@@ -259,6 +269,8 @@ impl Lexer {
                 ';' => tokens.push(Token::Semi),
                 ',' => tokens.push(Token::Comma),
                 '|' => tokens.push(Token::Pipe),
+                '?' => tokens.push(Token::Question),
+                ':' => tokens.push(Token::Colon),
                 '~' => tokens.push(Token::Match),
                 '=' => {
                     if self.peek() == '=' {
@@ -370,6 +382,12 @@ enum Expr {
     Call(String, Vec<Expr>),
     Getline,
     InArray(String, Box<Expr>),
+    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+    PreIncrement(Box<Expr>),
+    PostIncrement(Box<Expr>),
+    PreDecrement(Box<Expr>),
+    PostDecrement(Box<Expr>),
+    Regex(String), // bare regex for pattern matching
 }
 
 #[derive(Debug, Clone)]
@@ -393,8 +411,8 @@ enum BinOp {
 #[derive(Debug, Clone)]
 enum Stmt {
     Expr(Expr),
-    Print(Vec<Expr>, Option<String>), // exprs, output_redirect
-    Printf(String, Vec<Expr>),
+    Print(Vec<Expr>, Option<Expr>), // exprs, output_redirect (expr for filename)
+    Printf(Vec<Expr>, Option<Expr>), // format_expr + args, output_redirect
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
     While(Expr, Box<Stmt>),
     For(Box<Stmt>, Expr, Box<Stmt>, Box<Stmt>),
@@ -410,6 +428,7 @@ enum Pattern {
     Begin,
     End,
     Expr(Expr),
+    Range(Expr, Expr),
     Always,
 }
 
@@ -424,11 +443,16 @@ struct Rule {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    in_print: bool, // suppress > as comparison in print context
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            in_print: false,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -484,7 +508,15 @@ impl Parser {
             Token::LBrace => Pattern::Always,
             _ => {
                 let expr = self.parse_expr();
-                Pattern::Expr(expr)
+                // Check for range pattern: expr1, expr2
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    let expr2 = self.parse_expr();
+                    Pattern::Range(expr, expr2)
+                } else {
+                    Pattern::Expr(expr)
+                }
             }
         };
 
@@ -522,11 +554,18 @@ impl Parser {
         match self.peek().clone() {
             Token::Print => {
                 self.advance();
+                self.in_print = true;
                 let mut exprs = Vec::new();
                 let mut redirect = None;
                 if !matches!(
                     self.peek(),
-                    Token::Newline | Token::Semi | Token::RBrace | Token::Eof | Token::Pipe
+                    Token::Newline
+                        | Token::Semi
+                        | Token::RBrace
+                        | Token::Eof
+                        | Token::Pipe
+                        | Token::Gt
+                        | Token::Append
                 ) {
                     exprs.push(self.parse_expr());
                     while matches!(self.peek(), Token::Comma) {
@@ -535,28 +574,32 @@ impl Parser {
                     }
                 }
                 if matches!(self.peek(), Token::Gt | Token::Append) {
-                    let _redir = self.advance();
-                    if let Token::Str(s) = self.advance() {
-                        redirect = Some(s);
-                    }
+                    self.advance();
+                    self.in_print = false;
+                    redirect = Some(self.parse_primary());
                 }
+                self.in_print = false;
                 self.skip_term();
                 Stmt::Print(exprs, redirect)
             }
             Token::Printf => {
                 self.advance();
-                let fmt = if let Token::Str(s) = self.advance() {
-                    s
-                } else {
-                    String::new()
-                };
-                let mut args = Vec::new();
+                self.in_print = true;
+                let mut all_args = Vec::new();
+                all_args.push(self.parse_expr());
                 while matches!(self.peek(), Token::Comma) {
                     self.advance();
-                    args.push(self.parse_expr());
+                    all_args.push(self.parse_expr());
                 }
+                let mut redirect = None;
+                if matches!(self.peek(), Token::Gt | Token::Append) {
+                    self.advance();
+                    self.in_print = false;
+                    redirect = Some(self.parse_primary());
+                }
+                self.in_print = false;
                 self.skip_term();
-                Stmt::Printf(fmt, args)
+                Stmt::Printf(all_args, redirect)
             }
             Token::If => {
                 self.advance();
@@ -670,7 +713,7 @@ impl Parser {
     }
 
     fn parse_assign(&mut self) -> Expr {
-        let lhs = self.parse_or();
+        let lhs = self.parse_ternary();
         match self.peek() {
             Token::Assign => {
                 self.advance();
@@ -710,6 +753,19 @@ impl Parser {
                 )
             }
             _ => lhs,
+        }
+    }
+
+    fn parse_ternary(&mut self) -> Expr {
+        let cond = self.parse_or();
+        if matches!(self.peek(), Token::Question) {
+            self.advance();
+            let then_expr = self.parse_assign();
+            self.expect(&Token::Colon);
+            let else_expr = self.parse_assign();
+            Expr::Ternary(Box::new(cond), Box::new(then_expr), Box::new(else_expr))
+        } else {
+            cond
         }
     }
 
@@ -757,19 +813,30 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Expr {
-        let lhs = self.parse_concat();
+        let lhs = self.parse_in_expr();
         let op = match self.peek() {
             Token::Eq => BinOp::Eq,
             Token::Ne => BinOp::Ne,
             Token::Lt => BinOp::Lt,
             Token::Le => BinOp::Le,
-            Token::Gt => BinOp::Gt,
-            Token::Ge => BinOp::Ge,
+            Token::Gt if !self.in_print => BinOp::Gt,
+            Token::Ge if !self.in_print => BinOp::Ge,
             _ => return lhs,
         };
         self.advance();
-        let rhs = self.parse_concat();
+        let rhs = self.parse_in_expr();
         Expr::BinOp(Box::new(lhs), op, Box::new(rhs))
+    }
+
+    fn parse_in_expr(&mut self) -> Expr {
+        let lhs = self.parse_concat();
+        if matches!(self.peek(), Token::In) {
+            self.advance();
+            if let Token::Ident(arr) = self.advance() {
+                return Expr::InArray(arr, Box::new(lhs));
+            }
+        }
+        lhs
     }
 
     fn parse_concat(&mut self) -> Expr {
@@ -856,13 +923,38 @@ impl Parser {
         match self.peek() {
             Token::Minus => {
                 self.advance();
-                Expr::UnaryMinus(Box::new(self.parse_primary()))
+                Expr::UnaryMinus(Box::new(self.parse_unary()))
             }
             Token::Not => {
                 self.advance();
-                Expr::Not(Box::new(self.parse_primary()))
+                Expr::Not(Box::new(self.parse_unary()))
             }
-            _ => self.parse_primary(),
+            Token::Increment => {
+                self.advance();
+                let operand = self.parse_primary();
+                Expr::PreIncrement(Box::new(operand))
+            }
+            Token::Decrement => {
+                self.advance();
+                let operand = self.parse_primary();
+                Expr::PreDecrement(Box::new(operand))
+            }
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Expr {
+        let expr = self.parse_primary();
+        match self.peek() {
+            Token::Increment => {
+                self.advance();
+                Expr::PostIncrement(Box::new(expr))
+            }
+            Token::Decrement => {
+                self.advance();
+                Expr::PostDecrement(Box::new(expr))
+            }
+            _ => expr,
         }
     }
 
@@ -878,8 +970,10 @@ impl Parser {
             }
             Token::Regex(pat) => {
                 self.advance();
-                // Bare regex matches $0
-                Expr::Match(Box::new(Expr::Field(Box::new(Expr::Num(0.0)))), pat)
+                // In expression context, bare regex matches $0.
+                // But as function argument, we need to keep the pattern available.
+                // Store as Regex expr - eval handles both pattern matching and string conversion.
+                Expr::Regex(pat)
             }
             Token::Field(n) => {
                 self.advance();
@@ -921,7 +1015,10 @@ impl Parser {
             }
             Token::LParen => {
                 self.advance();
+                let saved_in_print = self.in_print;
+                self.in_print = false;
                 let expr = self.parse_expr();
+                self.in_print = saved_in_print;
                 self.expect(&Token::RParen);
                 expr
             }
@@ -985,6 +1082,10 @@ struct AwkInterp {
     fnr: usize,
     nf: usize,
     output: String,
+    output_files: HashMap<String, Vec<u8>>,
+    /// Lines for getline support — set by the main loop
+    input_lines: Vec<String>,
+    input_line_idx: usize,
 }
 
 enum ControlFlow {
@@ -1006,17 +1107,27 @@ impl AwkInterp {
             fnr: 0,
             nf: 0,
             output: String::new(),
+            output_files: HashMap::new(),
+            input_lines: Vec::new(),
+            input_line_idx: 0,
         }
     }
 
     fn set_record(&mut self, line: &str) {
-        self.fields = if self.fs.len() == 1 && self.fs != " " {
+        self.fields = if self.fs == " " {
+            // Default: split on whitespace (leading/trailing whitespace stripped)
+            line.split_whitespace().map(|s| s.to_string()).collect()
+        } else if self.fs.len() == 1 {
+            // Single character separator: exact split
             line.split(self.fs.chars().next().unwrap())
                 .map(|s| s.to_string())
                 .collect()
+        } else if is_regex_pattern(&self.fs) {
+            // Regex separator
+            regex_split(&self.fs, line)
         } else {
-            // Default: split on whitespace
-            line.split_whitespace().map(|s| s.to_string()).collect()
+            // Multi-character literal separator
+            line.split(&self.fs).map(|s| s.to_string()).collect()
         };
         self.nf = self.fields.len();
         self.vars
@@ -1152,10 +1263,49 @@ impl AwkInterp {
             }
             Expr::Match(expr, pat) => {
                 let s = self.eval_expr(expr).to_str();
-                Value::Num(if s.contains(pat.as_str()) { 1.0 } else { 0.0 })
+                Value::Num(if regex_matches(pat, &s) { 1.0 } else { 0.0 })
+            }
+            Expr::Regex(pat) => {
+                let s = self.get_field(0);
+                Value::Num(if regex_matches(pat, &s) { 1.0 } else { 0.0 })
             }
             Expr::Call(name, args) => self.call_function(name, args),
-            Expr::Getline => Value::Num(0.0), // Not implemented for simple use
+            Expr::Getline => {
+                if self.do_getline() {
+                    Value::Num(1.0)
+                } else {
+                    Value::Num(0.0)
+                }
+            }
+            Expr::Ternary(cond, then_expr, else_expr) => {
+                if self.eval_expr(cond).is_true() {
+                    self.eval_expr(then_expr)
+                } else {
+                    self.eval_expr(else_expr)
+                }
+            }
+            Expr::PreIncrement(operand) => {
+                let val = self.eval_expr(operand).to_num() + 1.0;
+                let new_val = Value::Num(val);
+                self.assign(operand, new_val.clone());
+                new_val
+            }
+            Expr::PostIncrement(operand) => {
+                let old = self.eval_expr(operand).to_num();
+                self.assign(operand, Value::Num(old + 1.0));
+                Value::Num(old)
+            }
+            Expr::PreDecrement(operand) => {
+                let val = self.eval_expr(operand).to_num() - 1.0;
+                let new_val = Value::Num(val);
+                self.assign(operand, new_val.clone());
+                new_val
+            }
+            Expr::PostDecrement(operand) => {
+                let old = self.eval_expr(operand).to_num();
+                self.assign(operand, Value::Num(old - 1.0));
+                Value::Num(old)
+            }
             Expr::InArray(arr, key) => {
                 let k = self.eval_expr(key).to_str();
                 let exists = self.arrays.get(arr).is_some_and(|m| m.contains_key(&k));
@@ -1187,6 +1337,7 @@ impl AwkInterp {
     }
 
     fn call_function(&mut self, name: &str, args: &[Expr]) -> Value {
+        // Helper is defined outside impl block
         match name {
             "length" => {
                 if args.is_empty() {
@@ -1237,7 +1388,7 @@ impl AwkInterp {
                 Value::Num(parts.len() as f64)
             }
             "sub" | "gsub" => {
-                let pat = self.eval_expr(&args[0]).to_str();
+                let pat = extract_regex_or_str(&args[0], self);
                 let repl = self.eval_expr(&args[1]).to_str();
                 let is_global = name == "gsub";
 
@@ -1248,13 +1399,29 @@ impl AwkInterp {
                     self.get_field(0)
                 };
 
-                let (result, count) = str_replace(&target, &pat, &repl, is_global);
+                let (result, count) = regex_replace(&target, &pat, &repl, is_global);
                 if args.len() > 2 {
                     self.assign(&args[2], Value::Str(result));
                 } else {
                     self.set_field(0, result);
                 }
                 Value::Num(count as f64)
+            }
+            "match" => {
+                let s = self.eval_expr(&args[0]).to_str();
+                let pat = extract_regex_or_str(&args[1], self);
+                if let Some((start, end)) = regex_find(&pat, &s) {
+                    // RSTART is 1-based byte position, RLENGTH is byte length of match
+                    let rstart = (start + 1) as f64;
+                    let rlength = (end - start) as f64;
+                    self.set_var("RSTART", Value::Num(rstart));
+                    self.set_var("RLENGTH", Value::Num(rlength));
+                    Value::Num(rstart)
+                } else {
+                    self.set_var("RSTART", Value::Num(0.0));
+                    self.set_var("RLENGTH", Value::Num(-1.0));
+                    Value::Num(0.0)
+                }
             }
             "tolower" => Value::Str(self.eval_expr(&args[0]).to_str().to_lowercase()),
             "toupper" => Value::Str(self.eval_expr(&args[0]).to_str().to_uppercase()),
@@ -1279,20 +1446,37 @@ impl AwkInterp {
                 self.eval_expr(expr);
                 ControlFlow::Normal
             }
-            Stmt::Print(exprs, _redirect) => {
-                if exprs.is_empty() {
-                    self.output.push_str(&self.get_field(0));
+            Stmt::Print(exprs, redirect) => {
+                let mut line = if exprs.is_empty() {
+                    self.get_field(0)
                 } else {
                     let parts: Vec<String> =
                         exprs.iter().map(|e| self.eval_expr(e).to_str()).collect();
-                    self.output.push_str(&parts.join(&self.ofs));
+                    parts.join(&self.ofs)
+                };
+                let ors = self.ors.clone();
+                line.push_str(&ors);
+                if let Some(redir_expr) = redirect {
+                    let filename = self.eval_expr(redir_expr).to_str();
+                    self.write_to_file(&filename, &line);
+                } else {
+                    self.output.push_str(&line);
                 }
-                self.output.push_str(&self.ors);
                 ControlFlow::Normal
             }
-            Stmt::Printf(fmt, args) => {
-                let vals: Vec<Value> = args.iter().map(|a| self.eval_expr(a)).collect();
-                self.output.push_str(&awk_sprintf(fmt, &vals));
+            Stmt::Printf(all_args, redirect) => {
+                if all_args.is_empty() {
+                    return ControlFlow::Normal;
+                }
+                let fmt = self.eval_expr(&all_args[0]).to_str();
+                let vals: Vec<Value> = all_args[1..].iter().map(|a| self.eval_expr(a)).collect();
+                let formatted = awk_sprintf(&fmt, &vals);
+                if let Some(redir_expr) = redirect {
+                    let filename = self.eval_expr(redir_expr).to_str();
+                    self.write_to_file(&filename, &formatted);
+                } else {
+                    self.output.push_str(&formatted);
+                }
                 ControlFlow::Normal
             }
             Stmt::If(cond, then_body, else_body) => {
@@ -1379,12 +1563,58 @@ impl AwkInterp {
         }
     }
 
-    fn exec_rules(&mut self, rules: &[Rule], line: &str) -> ControlFlow {
-        for rule in rules {
+    fn write_to_file(&mut self, filename: &str, data: &str) {
+        self.output_files
+            .entry(filename.to_string())
+            .or_default()
+            .extend_from_slice(data.as_bytes());
+    }
+
+    fn do_getline(&mut self) -> bool {
+        if self.input_line_idx < self.input_lines.len() {
+            let line = self.input_lines[self.input_line_idx].clone();
+            self.input_line_idx += 1;
+            self.nr += 1;
+            self.fnr += 1;
+            self.set_record(&line);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn exec_rules(
+        &mut self,
+        rules: &[Rule],
+        line: &str,
+        range_active: &mut Vec<bool>,
+    ) -> ControlFlow {
+        // Ensure range_active has an entry for each rule
+        while range_active.len() < rules.len() {
+            range_active.push(false);
+        }
+        for (idx, rule) in rules.iter().enumerate() {
             let matches = match &rule.pattern {
                 Pattern::Begin | Pattern::End => false,
                 Pattern::Always => true,
                 Pattern::Expr(expr) => self.eval_expr(expr).is_true(),
+                Pattern::Range(start_expr, end_expr) => {
+                    if range_active[idx] {
+                        // We're in the range; check if end matches
+                        if self.eval_expr(end_expr).is_true() {
+                            range_active[idx] = false;
+                        }
+                        true
+                    } else {
+                        // Check if start matches
+                        if self.eval_expr(start_expr).is_true() {
+                            range_active[idx] = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
             };
             if matches {
                 for stmt in &rule.action {
@@ -1401,18 +1631,350 @@ impl AwkInterp {
     }
 }
 
-fn str_replace(s: &str, pat: &str, repl: &str, global: bool) -> (String, usize) {
-    if pat.is_empty() {
+// ---- Simple regex engine ----
+
+/// A minimal regex engine supporting: literal chars, `.`, `*`, `+`, `?`, `^`, `$`,
+/// character classes `[abc]`, `[a-z]`, `[^abc]`, `\d`, `\w`, `\s`, and `|` alternation.
+/// Returns Some((start, end)) for the first match in the string, or None.
+fn regex_find(pattern: &str, text: &str) -> Option<(usize, usize)> {
+    let pchars: Vec<char> = pattern.chars().collect();
+    // Handle alternation at top level: split on unbracketed '|'
+    let alts = split_alternatives(&pchars);
+    if alts.len() > 1 {
+        let mut best: Option<(usize, usize)> = None;
+        for alt in &alts {
+            if let Some((s, e)) = regex_find_single(alt, text) {
+                match best {
+                    None => best = Some((s, e)),
+                    Some((bs, _)) if s < bs => best = Some((s, e)),
+                    _ => {}
+                }
+            }
+        }
+        return best;
+    }
+    regex_find_single(&pchars, text)
+}
+
+fn split_alternatives(pchars: &[char]) -> Vec<Vec<char>> {
+    let mut alts = Vec::new();
+    let mut current = Vec::new();
+    let mut in_bracket = false;
+    for &ch in pchars {
+        if ch == '[' && !in_bracket {
+            in_bracket = true;
+            current.push(ch);
+        } else if ch == ']' && in_bracket {
+            in_bracket = false;
+            current.push(ch);
+        } else if ch == '|' && !in_bracket {
+            alts.push(current.clone());
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    alts.push(current);
+    alts
+}
+
+/// Element of a compiled regex pattern
+#[derive(Debug, Clone)]
+enum Re {
+    Literal(char),
+    Dot,
+    Class(Vec<(char, char)>, bool), // ranges, negated
+    #[allow(dead_code)]
+    Anchor(bool), // true = start ^, false = end $
+}
+
+fn compile_pattern(pchars: &[char]) -> (Vec<(Re, Quantifier)>, bool, bool) {
+    let mut items = Vec::new();
+    let mut anchored_start = false;
+    let mut anchored_end = false;
+    let mut i = 0;
+
+    if !pchars.is_empty() && pchars[0] == '^' {
+        anchored_start = true;
+        i = 1;
+    }
+
+    while i < pchars.len() {
+        if pchars[i] == '$' && i + 1 >= pchars.len() {
+            anchored_end = true;
+            i += 1;
+            continue;
+        }
+        let elem = match pchars[i] {
+            '.' => {
+                i += 1;
+                Re::Dot
+            }
+            '[' => {
+                i += 1;
+                let negated = i < pchars.len() && pchars[i] == '^';
+                if negated {
+                    i += 1;
+                }
+                let mut ranges = Vec::new();
+                while i < pchars.len() && pchars[i] != ']' {
+                    let ch = pchars[i];
+                    i += 1;
+                    if i + 1 < pchars.len() && pchars[i] == '-' && pchars[i + 1] != ']' {
+                        let end = pchars[i + 1];
+                        i += 2;
+                        ranges.push((ch, end));
+                    } else {
+                        ranges.push((ch, ch));
+                    }
+                }
+                if i < pchars.len() {
+                    i += 1; // skip ']'
+                }
+                Re::Class(ranges, negated)
+            }
+            '\\' => {
+                i += 1;
+                if i < pchars.len() {
+                    let esc = pchars[i];
+                    i += 1;
+                    match esc {
+                        'd' => Re::Class(vec![('0', '9')], false),
+                        'w' => {
+                            Re::Class(vec![('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')], false)
+                        }
+                        's' => Re::Class(vec![(' ', ' '), ('\t', '\t'), ('\n', '\n')], false),
+                        _ => Re::Literal(esc),
+                    }
+                } else {
+                    Re::Literal('\\')
+                }
+            }
+            ch => {
+                i += 1;
+                Re::Literal(ch)
+            }
+        };
+
+        let quant = if i < pchars.len() {
+            match pchars[i] {
+                '*' => {
+                    i += 1;
+                    Quantifier::Star
+                }
+                '+' => {
+                    i += 1;
+                    Quantifier::Plus
+                }
+                '?' => {
+                    i += 1;
+                    Quantifier::Opt
+                }
+                _ => Quantifier::One,
+            }
+        } else {
+            Quantifier::One
+        };
+
+        items.push((elem, quant));
+    }
+    (items, anchored_start, anchored_end)
+}
+
+#[derive(Debug, Clone)]
+enum Quantifier {
+    One,
+    Star,
+    Plus,
+    Opt,
+}
+
+fn re_match_elem(elem: &Re, ch: char) -> bool {
+    match elem {
+        Re::Literal(c) => ch == *c,
+        Re::Dot => ch != '\n',
+        Re::Class(ranges, negated) => {
+            let in_class = ranges.iter().any(|(lo, hi)| ch >= *lo && ch <= *hi);
+            if *negated {
+                !in_class
+            } else {
+                in_class
+            }
+        }
+        Re::Anchor(_) => false,
+    }
+}
+
+fn re_match_at(items: &[(Re, Quantifier)], text: &[char], pos: usize) -> Option<usize> {
+    re_match_items(items, 0, text, pos)
+}
+
+fn re_match_items(
+    items: &[(Re, Quantifier)],
+    item_idx: usize,
+    text: &[char],
+    pos: usize,
+) -> Option<usize> {
+    if item_idx >= items.len() {
+        return Some(pos);
+    }
+    let (ref elem, ref quant) = items[item_idx];
+    match quant {
+        Quantifier::One => {
+            if pos < text.len() && re_match_elem(elem, text[pos]) {
+                re_match_items(items, item_idx + 1, text, pos + 1)
+            } else {
+                None
+            }
+        }
+        Quantifier::Opt => {
+            // Try matching one, then zero
+            if pos < text.len() && re_match_elem(elem, text[pos]) {
+                if let Some(end) = re_match_items(items, item_idx + 1, text, pos + 1) {
+                    return Some(end);
+                }
+            }
+            re_match_items(items, item_idx + 1, text, pos)
+        }
+        Quantifier::Star => {
+            // Greedy: try matching as many as possible, then backtrack
+            let mut count = 0;
+            while pos + count < text.len() && re_match_elem(elem, text[pos + count]) {
+                count += 1;
+            }
+            for c in (0..=count).rev() {
+                if let Some(end) = re_match_items(items, item_idx + 1, text, pos + c) {
+                    return Some(end);
+                }
+            }
+            None
+        }
+        Quantifier::Plus => {
+            // Must match at least one
+            let mut count = 0;
+            while pos + count < text.len() && re_match_elem(elem, text[pos + count]) {
+                count += 1;
+            }
+            for c in (1..=count).rev() {
+                if let Some(end) = re_match_items(items, item_idx + 1, text, pos + c) {
+                    return Some(end);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn regex_find_single(pchars: &[char], text: &str) -> Option<(usize, usize)> {
+    let tchars: Vec<char> = text.chars().collect();
+    let (items, anchored_start, anchored_end) = compile_pattern(pchars);
+
+    if anchored_start {
+        if let Some(end) = re_match_at(&items, &tchars, 0) {
+            if anchored_end && end != tchars.len() {
+                return None;
+            }
+            // Convert char indices to byte offsets
+            let byte_start = 0;
+            let byte_end: usize = tchars[..end].iter().map(|c| c.len_utf8()).sum();
+            return Some((byte_start, byte_end));
+        }
+        return None;
+    }
+
+    for start in 0..=tchars.len() {
+        if let Some(end) = re_match_at(&items, &tchars, start) {
+            if anchored_end && end != tchars.len() {
+                continue;
+            }
+            let byte_start: usize = tchars[..start].iter().map(|c| c.len_utf8()).sum();
+            let byte_end: usize = tchars[..end].iter().map(|c| c.len_utf8()).sum();
+            return Some((byte_start, byte_end));
+        }
+    }
+    None
+}
+
+fn regex_matches(pattern: &str, text: &str) -> bool {
+    regex_find(pattern, text).is_some()
+}
+
+/// Check if a string looks like it contains regex metacharacters
+fn is_regex_pattern(s: &str) -> bool {
+    s.contains('[')
+        || s.contains('(')
+        || s.contains('*')
+        || s.contains('+')
+        || s.contains('?')
+        || s.contains('.')
+        || s.contains('^')
+        || s.contains('$')
+        || s.contains('|')
+        || s.contains('\\')
+}
+
+/// Split a string by a regex pattern, returning the parts between matches
+fn regex_split(pattern: &str, text: &str) -> Vec<String> {
+    if pattern.is_empty() {
+        return vec![text.to_string()];
+    }
+    let mut parts = Vec::new();
+    let mut pos = 0;
+    loop {
+        if let Some((start, end)) = regex_find(pattern, &text[pos..]) {
+            if start == end && start == 0 {
+                // Zero-length match at current position; take one char and advance
+                if pos < text.len() {
+                    let ch_len = text[pos..].chars().next().map_or(1, |c| c.len_utf8());
+                    parts.push(text[pos..pos + ch_len].to_string());
+                    pos += ch_len;
+                } else {
+                    break;
+                }
+                continue;
+            }
+            parts.push(text[pos..pos + start].to_string());
+            pos += end;
+        } else {
+            parts.push(text[pos..].to_string());
+            break;
+        }
+    }
+    parts
+}
+
+/// Replace regex matches in a string
+fn regex_replace(s: &str, pattern: &str, repl: &str, global: bool) -> (String, usize) {
+    if pattern.is_empty() {
         return (s.to_string(), 0);
     }
     let mut result = String::new();
     let mut count = 0;
     let mut pos = 0;
-    while pos < s.len() {
-        if let Some(idx) = s[pos..].find(pat) {
-            result.push_str(&s[pos..pos + idx]);
+    while pos <= s.len() {
+        if let Some((start, end)) = regex_find(pattern, &s[pos..]) {
+            if start == end && start == 0 {
+                // Zero-length match
+                if pos < s.len() {
+                    result.push_str(repl);
+                    count += 1;
+                    let ch_len = s[pos..].chars().next().map_or(1, |c| c.len_utf8());
+                    result.push_str(&s[pos..pos + ch_len]);
+                    pos += ch_len;
+                } else {
+                    result.push_str(repl);
+                    count += 1;
+                    break;
+                }
+                if !global {
+                    result.push_str(&s[pos..]);
+                    return (result, count);
+                }
+                continue;
+            }
+            result.push_str(&s[pos..pos + start]);
             result.push_str(repl);
-            pos += idx + pat.len();
+            pos += end;
             count += 1;
             if !global {
                 result.push_str(&s[pos..]);
@@ -1424,6 +1986,16 @@ fn str_replace(s: &str, pat: &str, repl: &str, global: bool) -> (String, usize) 
         }
     }
     (result, count)
+}
+
+/// Extract a regex pattern string from an Expr, or evaluate as a string.
+/// This handles the case where a regex literal /pat/ is passed as a function argument.
+fn extract_regex_or_str(expr: &Expr, interp: &mut AwkInterp) -> String {
+    match expr {
+        Expr::Regex(pat) => pat.clone(),
+        Expr::Match(_, pat) => pat.clone(),
+        _ => interp.eval_expr(expr).to_str(),
+    }
 }
 
 fn awk_sprintf(fmt: &str, args: &[Value]) -> String {
@@ -1441,12 +2013,23 @@ fn awk_sprintf(fmt: &str, args: &[Value]) -> String {
                 continue;
             }
             // Parse flags and width
-            let mut width_str = String::new();
             let mut left_align = false;
-            if chars[i] == '-' {
-                left_align = true;
-                i += 1;
+            let mut zero_pad = false;
+            // Parse flags (-, 0, etc.)
+            while i < chars.len() {
+                match chars[i] {
+                    '-' => {
+                        left_align = true;
+                        i += 1;
+                    }
+                    '0' => {
+                        zero_pad = true;
+                        i += 1;
+                    }
+                    _ => break,
+                }
             }
+            let mut width_str = String::new();
             while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                 width_str.push(chars[i]);
                 i += 1;
@@ -1496,6 +2079,12 @@ fn awk_sprintf(fmt: &str, args: &[Value]) -> String {
                 .parse()
                 .unwrap_or(0);
             if width > 0 && formatted.len() < width {
+                let pad_char =
+                    if zero_pad && !left_align && matches!(spec, 'd' | 'i' | 'f' | 'x' | 'o') {
+                        '0'
+                    } else {
+                        ' '
+                    };
                 if left_align {
                     result.push_str(&formatted);
                     for _ in 0..width - formatted.len() {
@@ -1503,7 +2092,7 @@ fn awk_sprintf(fmt: &str, args: &[Value]) -> String {
                     }
                 } else {
                     for _ in 0..width - formatted.len() {
-                        result.push(' ');
+                        result.push(pad_char);
                     }
                     result.push_str(&formatted);
                 }
@@ -1611,12 +2200,19 @@ fn main() {
     }
 
     let mut exit_code = 0;
+    let mut range_active: Vec<bool> = Vec::new();
 
     if files.is_empty() {
         let stdin = io::stdin();
         let mut lock = stdin.lock();
         let lines = read_input(&mut lock);
-        for line in &lines {
+        // Store lines for getline support
+        interp.input_lines = lines.clone();
+        interp.input_line_idx = 0;
+        let mut line_idx = 0;
+        while line_idx < lines.len() {
+            interp.input_line_idx = line_idx + 1; // getline reads from next line
+            let line = &lines[line_idx];
             interp.nr += 1;
             interp.fnr += 1;
             interp.set_record(line);
@@ -1626,10 +2222,12 @@ fn main() {
             interp
                 .vars
                 .insert("FNR".to_string(), Value::Num(interp.fnr as f64));
-            if let ControlFlow::Exit(code) = interp.exec_rules(&rules, line) {
+            if let ControlFlow::Exit(code) = interp.exec_rules(&rules, line, &mut range_active) {
                 exit_code = code;
                 break;
             }
+            // If getline advanced, sync
+            line_idx = interp.input_line_idx;
         }
     } else {
         'outer: for file in &files {
@@ -1644,7 +2242,13 @@ fn main() {
                     continue;
                 }
             };
-            for line in &lines {
+            // Store lines for getline support
+            interp.input_lines = lines.clone();
+            interp.input_line_idx = 0;
+            let mut line_idx = 0;
+            while line_idx < lines.len() {
+                interp.input_line_idx = line_idx + 1;
+                let line = &lines[line_idx];
                 interp.nr += 1;
                 interp.fnr += 1;
                 interp.set_record(line);
@@ -1654,10 +2258,12 @@ fn main() {
                 interp
                     .vars
                     .insert("FNR".to_string(), Value::Num(interp.fnr as f64));
-                if let ControlFlow::Exit(code) = interp.exec_rules(&rules, line) {
+                if let ControlFlow::Exit(code) = interp.exec_rules(&rules, line, &mut range_active)
+                {
                     exit_code = code;
                     break 'outer;
                 }
+                line_idx = interp.input_line_idx;
             }
         }
     }
@@ -1671,6 +2277,13 @@ fn main() {
                     break;
                 }
             }
+        }
+    }
+
+    // Write output files
+    for (filename, data) in &interp.output_files {
+        if let Ok(mut f) = File::create(filename) {
+            let _ = f.write_all(data);
         }
     }
 

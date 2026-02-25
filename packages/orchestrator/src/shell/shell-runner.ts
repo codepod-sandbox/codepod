@@ -292,7 +292,7 @@ export class ShellRunner {
 
   // Commands whose non-flag args are NOT file paths and should not be resolved.
   private static readonly PASSTHROUGH_ARGS = new Set([
-    'echo', 'printf', 'basename', 'dirname', 'env', 'true', 'false',
+    'echo', 'printf', 'basename', 'dirname', 'env', 'true', 'false', 'find',
   ]);
 
   // Commands that always create files/dirs — resolve args unconditionally.

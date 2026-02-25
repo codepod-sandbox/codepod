@@ -5,13 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::process;
 
-struct Options {
-    name_pattern: Option<String>,
-    file_type: Option<char>, // 'f' for file, 'd' for directory
-    max_depth: Option<usize>,
-}
+// ---------------------------------------------------------------------------
+// Glob matching (supports *, ?, and [abc] character classes)
+// ---------------------------------------------------------------------------
 
-/// Simple glob matching supporting * and ? wildcards.
 fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
@@ -22,68 +19,524 @@ fn glob_match_inner(pattern: &[char], text: &[char]) -> bool {
     if pattern.is_empty() {
         return text.is_empty();
     }
-    if pattern[0] == '*' {
-        // * matches zero or more characters
-        for i in 0..=text.len() {
-            if glob_match_inner(&pattern[1..], &text[i..]) {
-                return true;
-            }
-        }
-        false
-    } else if text.is_empty() {
-        false
-    } else if pattern[0] == '?' || pattern[0] == text[0] {
-        glob_match_inner(&pattern[1..], &text[1..])
-    } else {
-        false
-    }
-}
-
-fn should_print(path: &Path, opts: &Options) -> bool {
-    // Check -type filter
-    if let Some(t) = opts.file_type {
-        match t {
-            'f' => {
-                if !path.is_file() {
-                    return false;
+    match pattern[0] {
+        '*' => {
+            // * matches zero or more characters
+            for i in 0..=text.len() {
+                if glob_match_inner(&pattern[1..], &text[i..]) {
+                    return true;
                 }
             }
-            'd' => {
-                if !path.is_dir() {
-                    return false;
-                }
-            }
-            _ => {}
+            false
         }
-    }
-
-    // Check -name filter
-    if let Some(ref pattern) = opts.name_pattern {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if !glob_match(pattern, name) {
+        '[' => {
+            // Character class [abc] or [a-z]
+            if text.is_empty() {
                 return false;
             }
-        } else {
-            return false;
+            if let Some(end) = pattern.iter().position(|&c| c == ']') {
+                let class = &pattern[1..end];
+                let ch = text[0];
+                let mut matched = false;
+                let mut ci = 0;
+                while ci < class.len() {
+                    if ci + 2 < class.len() && class[ci + 1] == '-' {
+                        // range like a-z
+                        if ch >= class[ci] && ch <= class[ci + 2] {
+                            matched = true;
+                        }
+                        ci += 3;
+                    } else {
+                        if ch == class[ci] {
+                            matched = true;
+                        }
+                        ci += 1;
+                    }
+                }
+                if matched {
+                    glob_match_inner(&pattern[end + 1..], &text[1..])
+                } else {
+                    false
+                }
+            } else {
+                // No closing ']', treat '[' as literal
+                if text.is_empty() {
+                    false
+                } else if pattern[0] == text[0] {
+                    glob_match_inner(&pattern[1..], &text[1..])
+                } else {
+                    false
+                }
+            }
+        }
+        '?' => {
+            if text.is_empty() {
+                false
+            } else {
+                glob_match_inner(&pattern[1..], &text[1..])
+            }
+        }
+        _ => {
+            if text.is_empty() {
+                false
+            } else if pattern[0] == text[0] {
+                glob_match_inner(&pattern[1..], &text[1..])
+            } else {
+                false
+            }
         }
     }
-
-    true
 }
 
-fn walk(dir: &Path, opts: &Options, depth: usize) {
-    if let Some(max) = opts.max_depth {
+fn glob_match_ci(pattern: &str, text: &str) -> bool {
+    glob_match(&pattern.to_lowercase(), &text.to_lowercase())
+}
+
+// ---------------------------------------------------------------------------
+// Expression tree for predicates
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum Expr {
+    // Predicates
+    Name(String),
+    IName(String),
+    Path(String),
+    Type(char),
+    Size(SizeSpec),
+    Empty,
+    // Logical
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
+    Not(Box<Expr>),
+    // Actions
+    Print,
+    Exec(Vec<String>), // command tokens; {} is placeholder
+    Delete,
+    // Always true (no-op placeholder)
+    True,
+}
+
+#[derive(Debug)]
+struct SizeSpec {
+    op: char,   // '+', '-', or '='
+    bytes: u64, // value in bytes (only 'c' suffix supported for now)
+}
+
+fn eval_expr(expr: &Expr, path: &Path, printed: &mut bool) -> bool {
+    match expr {
+        Expr::True => true,
+        Expr::Name(pat) => {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                glob_match(pat, name)
+            } else {
+                false
+            }
+        }
+        Expr::IName(pat) => {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                glob_match_ci(pat, name)
+            } else {
+                false
+            }
+        }
+        Expr::Path(pat) => {
+            if let Some(p) = path.to_str() {
+                glob_match(pat, p)
+            } else {
+                false
+            }
+        }
+        Expr::Type(t) => match t {
+            'f' => path.is_file() && !is_symlink(path),
+            'd' => path.is_dir() && !is_symlink(path),
+            'l' => is_symlink(path),
+            _ => false,
+        },
+        Expr::Size(spec) => {
+            if let Ok(meta) = fs::symlink_metadata(path) {
+                let size = meta.len();
+                match spec.op {
+                    '+' => size > spec.bytes,
+                    '-' => size < spec.bytes,
+                    _ => size == spec.bytes,
+                }
+            } else {
+                false
+            }
+        }
+        Expr::Empty => {
+            if path.is_file() {
+                if let Ok(meta) = fs::symlink_metadata(path) {
+                    meta.len() == 0
+                } else {
+                    false
+                }
+            } else if path.is_dir() {
+                match fs::read_dir(path) {
+                    Ok(mut rd) => rd.next().is_none(),
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        }
+        Expr::And(a, b) => {
+            if !eval_expr(a, path, printed) {
+                false
+            } else {
+                eval_expr(b, path, printed)
+            }
+        }
+        Expr::Or(a, b) => {
+            if eval_expr(a, path, printed) {
+                true
+            } else {
+                eval_expr(b, path, printed)
+            }
+        }
+        Expr::Not(e) => !eval_expr(e, path, printed),
+        Expr::Print => {
+            println!("{}", path.display());
+            *printed = true;
+            true
+        }
+        Expr::Exec(tokens) => {
+            // Build the command string with {} replaced by the path
+            let path_str = path.display().to_string();
+            let output: Vec<String> = tokens
+                .iter()
+                .map(|t| {
+                    if t == "{}" {
+                        path_str.clone()
+                    } else {
+                        t.clone()
+                    }
+                })
+                .collect();
+            // For echo, just print the arguments
+            if !output.is_empty() && output[0] == "echo" {
+                println!("{}", output[1..].join(" "));
+                *printed = true;
+                return true;
+            }
+            // For cat, read and print the file
+            if !output.is_empty() && output[0] == "cat" {
+                for arg in &output[1..] {
+                    if let Ok(contents) = fs::read_to_string(arg) {
+                        print!("{}", contents);
+                    }
+                }
+                *printed = true;
+                return true;
+            }
+            // For other commands, just print the path (best effort in WASM)
+            println!("{}", path_str);
+            *printed = true;
+            true
+        }
+        Expr::Delete => {
+            if path.is_file() || is_symlink(path) {
+                if fs::remove_file(path).is_err() {
+                    eprintln!("find: cannot delete '{}'", path.display());
+                    return false;
+                }
+            } else if path.is_dir() && fs::remove_dir(path).is_err() {
+                eprintln!("find: cannot delete '{}'", path.display());
+                return false;
+            }
+            true
+        }
+    }
+}
+
+fn is_symlink(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
+/// Check whether the expression tree contains any action (Print, Exec, Delete).
+fn has_action(expr: &Expr) -> bool {
+    match expr {
+        Expr::Print | Expr::Exec(_) | Expr::Delete => true,
+        Expr::And(a, b) | Expr::Or(a, b) => has_action(a) || has_action(b),
+        Expr::Not(e) => has_action(e),
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing into expression tree
+// ---------------------------------------------------------------------------
+
+fn parse_args(args: &[String]) -> (Vec<String>, Option<usize>, Option<usize>, Expr) {
+    let mut paths: Vec<String> = Vec::new();
+    let mut min_depth: Option<usize> = None;
+    let mut max_depth: Option<usize> = None;
+    let mut i = 0;
+
+    // First, consume paths and global options (before predicates start)
+    while i < args.len() {
+        let a = args[i].as_str();
+        // If it starts with '-' (but not a bare '-'), or is '(' or '!' or '(', it's an expression
+        if a == "!" || a == "(" || a == ")" {
+            break;
+        }
+        if a.starts_with('-') {
+            // Check if it's a global option
+            match a {
+                "-mindepth" => {
+                    i += 1;
+                    if i < args.len() {
+                        min_depth = args[i].parse().ok();
+                    }
+                    i += 1;
+                    continue;
+                }
+                "-maxdepth" => {
+                    i += 1;
+                    if i < args.len() {
+                        max_depth = args[i].parse().ok();
+                    }
+                    i += 1;
+                    continue;
+                }
+                _ => break, // other flags are predicates
+            }
+        }
+        // Not a flag — must be a path
+        paths.push(args[i].to_string());
+        i += 1;
+    }
+
+    if paths.is_empty() {
+        paths.push(".".to_string());
+    }
+
+    // Parse the rest as an expression
+    let remaining = &args[i..];
+    let expr = if remaining.is_empty() {
+        Expr::True
+    } else {
+        let (e, rest) = parse_or(remaining);
+        if !rest.is_empty() {
+            eprintln!("find: unexpected argument '{}'", rest[0]);
+            process::exit(1);
+        }
+        e
+    };
+
+    (paths, min_depth, max_depth, expr)
+}
+
+/// Parse OR expressions: A -or B
+fn parse_or(tokens: &[String]) -> (Expr, &[String]) {
+    let (mut left, mut rest) = parse_and(tokens);
+    while !rest.is_empty() {
+        let t = rest[0].as_str();
+        if t == "-or" || t == "-o" {
+            let (right, r) = parse_and(&rest[1..]);
+            left = Expr::Or(Box::new(left), Box::new(right));
+            rest = r;
+        } else {
+            break;
+        }
+    }
+    (left, rest)
+}
+
+/// Parse AND expressions: A B (implicit AND) or A -and B
+fn parse_and(tokens: &[String]) -> (Expr, &[String]) {
+    let (mut left, mut rest) = parse_unary(tokens);
+    loop {
+        if rest.is_empty() {
+            break;
+        }
+        let t = rest[0].as_str();
+        // Stop if we see OR, close paren, or end-of-expression markers
+        if t == "-or" || t == "-o" || t == ")" {
+            break;
+        }
+        // Explicit -and / -a
+        if t == "-and" || t == "-a" {
+            let (right, r) = parse_unary(&rest[1..]);
+            left = Expr::And(Box::new(left), Box::new(right));
+            rest = r;
+            continue;
+        }
+        // Implicit AND: next token is another primary
+        let (right, r) = parse_unary(rest);
+        left = Expr::And(Box::new(left), Box::new(right));
+        rest = r;
+    }
+    (left, rest)
+}
+
+/// Parse unary: -not / ! or primary
+fn parse_unary(tokens: &[String]) -> (Expr, &[String]) {
+    if tokens.is_empty() {
+        return (Expr::True, tokens);
+    }
+    let t = tokens[0].as_str();
+    if t == "-not" || t == "!" {
+        let (expr, rest) = parse_unary(&tokens[1..]);
+        return (Expr::Not(Box::new(expr)), rest);
+    }
+    parse_primary(tokens)
+}
+
+/// Parse a primary expression
+fn parse_primary(tokens: &[String]) -> (Expr, &[String]) {
+    if tokens.is_empty() {
+        return (Expr::True, tokens);
+    }
+    let t = tokens[0].as_str();
+    match t {
+        "(" => {
+            let (expr, rest) = parse_or(&tokens[1..]);
+            if rest.is_empty() || rest[0] != ")" {
+                eprintln!("find: missing closing ')'");
+                process::exit(1);
+            }
+            (expr, &rest[1..])
+        }
+        "-name" => {
+            if tokens.len() < 2 {
+                eprintln!("find: missing argument to '-name'");
+                process::exit(1);
+            }
+            (Expr::Name(tokens[1].clone()), &tokens[2..])
+        }
+        "-iname" => {
+            if tokens.len() < 2 {
+                eprintln!("find: missing argument to '-iname'");
+                process::exit(1);
+            }
+            (Expr::IName(tokens[1].clone()), &tokens[2..])
+        }
+        "-path" => {
+            if tokens.len() < 2 {
+                eprintln!("find: missing argument to '-path'");
+                process::exit(1);
+            }
+            (Expr::Path(tokens[1].clone()), &tokens[2..])
+        }
+        "-type" => {
+            if tokens.len() < 2 {
+                eprintln!("find: missing argument to '-type'");
+                process::exit(1);
+            }
+            let ch = tokens[1].chars().next().unwrap_or('f');
+            (Expr::Type(ch), &tokens[2..])
+        }
+        "-size" => {
+            if tokens.len() < 2 {
+                eprintln!("find: missing argument to '-size'");
+                process::exit(1);
+            }
+            let spec = parse_size(&tokens[1]);
+            (Expr::Size(spec), &tokens[2..])
+        }
+        "-empty" => (Expr::Empty, &tokens[1..]),
+        "-print" => (Expr::Print, &tokens[1..]),
+        "-delete" => (Expr::Delete, &tokens[1..]),
+        "-exec" => {
+            // Collect tokens until ";" or "+"
+            let mut cmd_tokens = Vec::new();
+            let mut idx = 1;
+            while idx < tokens.len() {
+                if tokens[idx] == ";" {
+                    idx += 1;
+                    break;
+                }
+                cmd_tokens.push(tokens[idx].clone());
+                idx += 1;
+            }
+            (Expr::Exec(cmd_tokens), &tokens[idx..])
+        }
+        // Handle -mindepth / -maxdepth that might appear mixed with predicates
+        "-mindepth" | "-maxdepth" => {
+            // These are global options that should have been consumed earlier,
+            // but if they appear here, skip them.
+            if tokens.len() >= 2 {
+                (Expr::True, &tokens[2..])
+            } else {
+                (Expr::True, &tokens[1..])
+            }
+        }
+        _ => {
+            eprintln!("find: unknown predicate '{}'", t);
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_size(s: &str) -> SizeSpec {
+    let mut chars = s.chars().peekable();
+    let op = match chars.peek() {
+        Some('+') => {
+            chars.next();
+            '+'
+        }
+        Some('-') => {
+            chars.next();
+            '-'
+        }
+        _ => '=',
+    };
+    let num_str: String = chars.clone().take_while(|c| c.is_ascii_digit()).collect();
+    let n: u64 = num_str.parse().unwrap_or(0);
+    // Consume the digits
+    for _ in 0..num_str.len() {
+        chars.next();
+    }
+    // Check suffix
+    let suffix = chars.next().unwrap_or('b');
+    let bytes = match suffix {
+        'c' => n,           // bytes
+        'k' => n * 1024,    // kilobytes
+        'M' => n * 1048576, // megabytes
+        _ => n * 512,       // default: 512-byte blocks
+    };
+    SizeSpec { op, bytes }
+}
+
+// ---------------------------------------------------------------------------
+// Directory walker
+// ---------------------------------------------------------------------------
+
+fn walk(
+    dir: &Path,
+    expr: &Expr,
+    depth: usize,
+    min_depth: Option<usize>,
+    max_depth: Option<usize>,
+    has_act: bool,
+) {
+    if let Some(max) = max_depth {
         if depth > max {
             return;
         }
     }
 
-    if should_print(dir, opts) {
-        println!("{}", dir.display());
+    let should_eval = match min_depth {
+        Some(min) => depth >= min,
+        None => true,
+    };
+
+    if should_eval {
+        let mut printed = false;
+        let matched = eval_expr(expr, dir, &mut printed);
+        // If there's no explicit action in the expression, default to -print
+        if matched && !has_act && !printed {
+            println!("{}", dir.display());
+        }
     }
 
-    if dir.is_dir() {
-        if let Some(max) = opts.max_depth {
+    if dir.is_dir() && !is_symlink(dir) {
+        if let Some(max) = max_depth {
             if depth >= max {
                 return;
             }
@@ -100,68 +553,37 @@ fn walk(dir: &Path, opts: &Options, depth: usize) {
 
         for entry in entries {
             let child = entry.path();
-            if child.is_dir() {
-                walk(&child, opts, depth + 1);
-            } else if should_print(&child, opts) {
-                println!("{}", child.display());
+            if child.is_dir() && !is_symlink(&child) {
+                walk(&child, expr, depth + 1, min_depth, max_depth, has_act);
+            } else {
+                // File or symlink
+                if let Some(max) = max_depth {
+                    if depth + 1 > max {
+                        continue;
+                    }
+                }
+                let should_eval_child = match min_depth {
+                    Some(min) => depth + 1 >= min,
+                    None => true,
+                };
+                if should_eval_child {
+                    let mut printed = false;
+                    let matched = eval_expr(expr, &child, &mut printed);
+                    if matched && !has_act && !printed {
+                        println!("{}", child.display());
+                    }
+                }
             }
         }
     }
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut opts = Options {
-        name_pattern: None,
-        file_type: None,
-        max_depth: None,
-    };
-    let mut paths: Vec<String> = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-name" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("find: missing argument to '-name'");
-                    process::exit(1);
-                }
-                opts.name_pattern = Some(args[i].clone());
-            }
-            "-type" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("find: missing argument to '-type'");
-                    process::exit(1);
-                }
-                opts.file_type = args[i].chars().next();
-            }
-            "-maxdepth" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("find: missing argument to '-maxdepth'");
-                    process::exit(1);
-                }
-                opts.max_depth = args[i].parse().ok();
-            }
-            arg => {
-                if !arg.starts_with('-') {
-                    paths.push(arg.to_string());
-                } else {
-                    eprintln!("find: unknown predicate '{}'", arg);
-                    process::exit(1);
-                }
-            }
-        }
-        i += 1;
-    }
-
-    if paths.is_empty() {
-        paths.push(".".to_string());
-    }
+    let args: Vec<String> = env::args().skip(1).collect();
+    let (paths, min_depth, max_depth, expr) = parse_args(&args);
+    let has_act = has_action(&expr);
 
     for path in &paths {
-        walk(Path::new(path), &opts, 0);
+        walk(Path::new(path), &expr, 0, min_depth, max_depth, has_act);
     }
 }

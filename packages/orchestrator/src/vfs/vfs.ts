@@ -355,6 +355,35 @@ export class VFS {
     };
   }
 
+  /** Like stat but does not follow symlinks at the leaf. */
+  lstat(path: string): StatResult {
+    const match = this.matchProvider(path);
+    if (match) {
+      return this.stat(path);
+    }
+
+    const inode = this.resolve(path, false);
+    const { metadata } = inode;
+
+    let size: number;
+    if (inode.type === 'file') {
+      size = inode.content.byteLength;
+    } else if (inode.type === 'dir') {
+      size = inode.children.size;
+    } else {
+      size = inode.target.length;
+    }
+
+    return {
+      type: inode.type,
+      size,
+      permissions: metadata.permissions,
+      mtime: metadata.mtime,
+      ctime: metadata.ctime,
+      atime: metadata.atime,
+    };
+  }
+
   readFile(path: string): Uint8Array {
     const match = this.matchProvider(path);
     if (match) {
