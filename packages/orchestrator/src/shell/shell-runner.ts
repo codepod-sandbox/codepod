@@ -25,7 +25,7 @@ import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 
 const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts', 'return', 'local']);
+const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts', 'return', 'local', 'trap']);
 const SHELL_COMMANDS = new Set(['sh', 'bash']);
 
 /** Interpreter names that should be dispatched to PythonRunner. */
@@ -43,7 +43,8 @@ type WordPart =
   | { Variable: string }
   | { CommandSub: string }
   | { ParamExpansion: { var: string; op: string; default: string } }
-  | { ArithmeticExpansion: string };
+  | { ArithmeticExpansion: string }
+  | { ProcessSub: string };
 
 interface Redirect {
   redirect_type: RedirectType;
@@ -148,6 +149,10 @@ export class ShellRunner {
   private toolAllowlist: Set<string> | null = null;
   /** Shell option flags (e=errexit, u=nounset). */
   private shellFlags = new Set<string>();
+  /** Trap handlers (e.g. EXIT trap). */
+  private trapHandlers: Map<string, string> = new Map();
+  /** Array storage for bash-style arrays. */
+  private arrays: Map<string, string[]> = new Map();
   /** Whether we're in a conditional context (if condition, || / && chains). */
   private inConditionalContext = false;
   /** Pipe stdin data threaded through compound commands (while, for, if, subshell). */
@@ -179,6 +184,7 @@ export class ShellRunner {
     this.env.set('USER', 'user');
     this.env.set('PATH', '/bin:/usr/bin');
     this.env.set('PYTHONPATH', '/usr/lib/python');
+    this.env.set('SHELL', '/bin/sh');
   }
 
   /** Write executable stub files into /bin and /usr/bin for all registered tools + python. */
@@ -359,18 +365,35 @@ export class ShellRunner {
     if (ast === null) {
       return EMPTY_RESULT;
     }
+    let result: RunResult;
     try {
-      const result = await this.execCommand(ast);
+      result = await this.execCommand(ast);
       this.lastExitCode = result.exitCode;
       result.executionTimeMs = performance.now() - startTime;
-      return result;
     } catch (e) {
       if (e instanceof ExitSignal) {
         this.lastExitCode = e.code;
-        return { exitCode: e.code, stdout: e.stdout, stderr: e.stderr, executionTimeMs: performance.now() - startTime };
+        result = { exitCode: e.code, stdout: e.stdout, stderr: e.stderr, executionTimeMs: performance.now() - startTime };
+      } else {
+        throw e;
       }
-      throw e;
     }
+
+    // Execute EXIT trap handler at top level (not inside command substitutions)
+    if (this.substitutionDepth === 0) {
+      const exitHandler = this.trapHandlers.get('EXIT');
+      if (exitHandler) {
+        this.trapHandlers.delete('EXIT'); // prevent re-entrant firing
+        const trapResult = await this.run(exitHandler);
+        result = {
+          ...result,
+          stdout: result.stdout + trapResult.stdout,
+          stderr: result.stderr + trapResult.stderr,
+        };
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -512,7 +535,14 @@ export class ShellRunner {
     // Process assignments (expand variables and command substitutions in values)
     for (const assignment of simple.assignments) {
       const value = await this.expandAssignmentValue(assignment.value);
-      this.env.set(assignment.name, value);
+      // Detect array assignment: value is "(elem1 elem2 ...)"
+      if (value.startsWith('(') && value.endsWith(')')) {
+        const inner = value.slice(1, -1).trim();
+        const elements = inner.length > 0 ? inner.split(/\s+/) : [];
+        this.arrays.set(assignment.name, elements);
+      } else {
+        this.env.set(assignment.name, value);
+      }
     }
 
     // If there are only assignments and no command words, it's a variable-setting command
@@ -650,6 +680,8 @@ export class ShellRunner {
         }
       }
       result = { ...EMPTY_RESULT };
+    } else if (cmdName === 'trap') {
+      result = this.builtinTrap(args);
     }
 
     if (!result) {
@@ -1142,6 +1174,24 @@ export class ShellRunner {
       if (part.Variable === 'RANDOM') {
         return String(Math.floor(Math.random() * 32768));
       }
+      // Array access: arr[n], arr[@], arr[*]
+      const arrMatch = part.Variable.match(/^(\w+)\[(.+)\]$/);
+      if (arrMatch) {
+        const arrName = arrMatch[1];
+        const index = arrMatch[2];
+        const arr = this.arrays.get(arrName);
+        if (arr) {
+          if (index === '@' || index === '*') {
+            return arr.join(' ');
+          }
+          const idx = parseInt(index, 10);
+          if (!isNaN(idx) && idx >= 0 && idx < arr.length) {
+            return arr[idx];
+          }
+          return '';
+        }
+        return '';
+      }
       const val = this.env.get(part.Variable);
       if (val === undefined && this.shellFlags.has('u') && !/^\d+$/.test(part.Variable)) {
         throw new Error(`${part.Variable}: unbound variable`);
@@ -1160,6 +1210,14 @@ export class ShellRunner {
       } finally {
         this.substitutionDepth--;
       }
+    }
+    if ('ProcessSub' in part) {
+      // Process substitution: execute the command, write output to a temp VFS file,
+      // and return the file path so the outer command can read it.
+      const tmpPath = `/tmp/.procsub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const result = await this.run(part.ProcessSub);
+      this.vfs.writeFile(tmpPath, new TextEncoder().encode(result.stdout));
+      return tmpPath;
     }
     if ('ParamExpansion' in part) {
       const { var: name, op, default: operand } = part.ParamExpansion;
@@ -1183,6 +1241,12 @@ export class ShellRunner {
         case '#': {
           // ${#VAR} — string length (parser produces var="" op="#" default="VAR")
           if (name === '' && operand) {
+            // Check for array length: ${#arr[@]} or ${#arr[*]}
+            const arrLenMatch = operand.match(/^(\w+)\[[@*]\]$/);
+            if (arrLenMatch) {
+              const arr = this.arrays.get(arrLenMatch[1]);
+              return String(arr ? arr.length : 0);
+            }
             const v = this.env.get(operand) ?? '';
             return String(v.length);
           }
@@ -1890,6 +1954,23 @@ export class ShellRunner {
   private builtinUnset(args: string[]): RunResult {
     for (const name of args) {
       this.env.delete(name);
+    }
+    return { ...EMPTY_RESULT };
+  }
+
+  /** Builtin: trap — set signal/exit handlers. */
+  private builtinTrap(args: string[]): RunResult {
+    if (args.length < 2) {
+      return { ...EMPTY_RESULT };
+    }
+    const action = args[0];
+    for (let i = 1; i < args.length; i++) {
+      const signal = args[i];
+      if (action === '') {
+        this.trapHandlers.delete(signal);
+      } else {
+        this.trapHandlers.set(signal, action);
+      }
     }
     return { ...EMPTY_RESULT };
   }

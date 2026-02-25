@@ -628,4 +628,64 @@ describe('shell conformance', () => {
       expect(n).toBeLessThan(32768);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // trap builtin
+  // ---------------------------------------------------------------------------
+  describe('trap', () => {
+    it('trap EXIT runs handler on exit', async () => {
+      const r = await runner.run(`trap "echo cleanup" EXIT; echo running`);
+      expect(r.stdout).toBe('running\ncleanup\n');
+    });
+
+    it('trap with empty string removes handler', async () => {
+      const r = await runner.run(`trap "echo cleanup" EXIT; trap "" EXIT; echo finished`);
+      expect(r.stdout).toBe('finished\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // process substitution
+  // ---------------------------------------------------------------------------
+  describe('process substitution', () => {
+    it('process substitution <(cmd)', async () => {
+      const r = await runner.run(`cat <(echo hello)`);
+      expect(r.stdout).toBe('hello\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // arrays
+  // ---------------------------------------------------------------------------
+  describe('arrays', () => {
+    it('array assignment and indexed access', async () => {
+      const r = await runner.run(`arr=(one two three); echo \${arr[1]}`);
+      expect(r.stdout).toBe('two\n');
+    });
+
+    it('array length ${#arr[@]}', async () => {
+      const r = await runner.run(`arr=(a b c d); echo \${#arr[@]}`);
+      expect(r.stdout).toBe('4\n');
+    });
+
+    it('array all elements ${arr[@]}', async () => {
+      const r = await runner.run(`arr=(x y z); echo \${arr[@]}`);
+      expect(r.stdout).toBe('x y z\n');
+    });
+
+    it('array ${arr[0]} first element', async () => {
+      const r = await runner.run(`arr=(first second); echo \${arr[0]}`);
+      expect(r.stdout).toBe('first\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // $SHELL
+  // ---------------------------------------------------------------------------
+  describe('$SHELL', () => {
+    it('$SHELL is set', async () => {
+      const r = await runner.run(`echo $SHELL`);
+      expect(r.stdout).toBe('/bin/sh\n');
+    });
+  });
 });

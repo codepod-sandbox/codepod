@@ -189,6 +189,13 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
         if chars[pos] == '<' {
+            // Process substitution: <(cmd) — emit as a word with ProcessSub part
+            if pos + 1 < len && chars[pos + 1] == '(' {
+                pos += 2; // skip '<('
+                let content = read_balanced_parens(&chars, &mut pos);
+                tokens.push(Token::DoubleQuoted(vec![WordPart::ProcessSub(content)]));
+                continue;
+            }
             if pos + 1 < len && chars[pos + 1] == '<' {
                 // Here-document: <<EOF or <<-EOF
                 pos += 2;
@@ -687,6 +694,15 @@ fn read_word(chars: &[char], pos: &mut usize) -> String {
             || ch == '\''
             || ch == '"'
         {
+            // Array assignment: NAME=( ... ) — include parenthesized content in value
+            if ch == '(' && seen_eq {
+                word.push('(');
+                *pos += 1;
+                let content = read_balanced_parens(chars, pos);
+                word.push_str(&content);
+                word.push(')');
+                continue;
+            }
             break;
         }
 

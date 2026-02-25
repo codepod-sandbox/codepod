@@ -15,6 +15,7 @@ pub enum WordPart {
         default: String,
     },
     ArithmeticExpansion(String),
+    ProcessSub(String),
 }
 
 /// A shell word composed of one or more parts.
