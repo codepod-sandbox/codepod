@@ -1,4 +1,5 @@
 .worktrees/
+.mcp.json
 node_modules/
 dist/
 target/
