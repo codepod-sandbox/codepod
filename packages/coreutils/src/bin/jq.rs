@@ -2117,9 +2117,26 @@ fn main() {
     }
 
     let mut input_str = String::new();
-    io::stdin()
-        .read_to_string(&mut input_str)
-        .unwrap_or_default();
+    if files.is_empty() {
+        io::stdin()
+            .read_to_string(&mut input_str)
+            .unwrap_or_default();
+    } else {
+        for file in &files {
+            match std::fs::read_to_string(file) {
+                Ok(content) => {
+                    if !input_str.is_empty() {
+                        input_str.push('\n');
+                    }
+                    input_str.push_str(&content);
+                }
+                Err(e) => {
+                    eprintln!("jq: {}: {}", file, e);
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
 
     let mut parser = FilterParser::new(&filter_str);
     let filter = parser.parse();

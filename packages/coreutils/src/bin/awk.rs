@@ -1552,6 +1552,9 @@ fn main() {
                     fs = args[i].clone();
                 }
             }
+            s if s.starts_with("-F") && s.len() > 2 => {
+                fs = s[2..].to_string();
+            }
             "-v" => {
                 i += 1;
                 if i < args.len() {
