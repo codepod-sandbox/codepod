@@ -11,7 +11,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Sandbox } from '@wasmsand/sandbox';
-import { NodeAdapter } from '@wasmsand/sandbox/node';
+import type { NetworkPolicy } from '@wasmsand/sandbox';
+import { NodeAdapter, HostFsProvider } from '@wasmsand/sandbox/node';
+import { loadConfig } from './config.js';
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..');
 
@@ -19,29 +21,55 @@ function log(msg: string): void {
   process.stderr.write(`[mcp-server] ${msg}\n`);
 }
 
-// --- Environment configuration ---
-const TIMEOUT_MS = Number(process.env.WASMSAND_TIMEOUT_MS) || 30_000;
-const FS_LIMIT_BYTES = Number(process.env.WASMSAND_FS_LIMIT_BYTES) || 256 * 1024 * 1024;
-const WASM_DIR = process.env.WASMSAND_WASM_DIR
-  ?? resolve(__dirname, '../../orchestrator/src/platform/__tests__/fixtures');
-const SHELL_WASM = process.env.WASMSAND_SHELL_WASM
-  ?? resolve(__dirname, '../../orchestrator/src/shell/__tests__/fixtures/wasmsand-shell.wasm');
+// --- Configuration ---
+const config = loadConfig(process.argv.slice(2), {
+  timeoutMs: 30_000,
+  fsLimitBytes: 256 * 1024 * 1024,
+  wasmDir: process.env.WASMSAND_WASM_DIR
+    ?? resolve(__dirname, '../../orchestrator/src/platform/__tests__/fixtures'),
+  shellWasm: process.env.WASMSAND_SHELL_WASM
+    ?? resolve(__dirname, '../../orchestrator/src/shell/__tests__/fixtures/wasmsand-shell.wasm'),
+});
 
 async function main(): Promise<void> {
   log('Starting wasmsand MCP server...');
-  log(`  wasmDir:    ${WASM_DIR}`);
-  log(`  shellWasm:  ${SHELL_WASM}`);
-  log(`  timeoutMs:  ${TIMEOUT_MS}`);
-  log(`  fsLimit:    ${FS_LIMIT_BYTES}`);
+  log(`  wasmDir:    ${config.wasmDir}`);
+  log(`  shellWasm:  ${config.shellWasm}`);
+  log(`  timeoutMs:  ${config.timeoutMs}`);
+  log(`  fsLimit:    ${config.fsLimitBytes}`);
+  log(`  mounts:     ${config.mounts.length}`);
+
+  // --- Build network policy (only if allow/block are non-empty) ---
+  const hasNetwork = config.network.allow.length > 0 || config.network.block.length > 0;
+  const network: NetworkPolicy | undefined = hasNetwork
+    ? {
+        allowedHosts: config.network.allow.length > 0 ? config.network.allow : undefined,
+        blockedHosts: config.network.block.length > 0 ? config.network.block : undefined,
+      }
+    : undefined;
+
+  if (network) {
+    log(`  network:    allow=${config.network.allow.join(',')} block=${config.network.block.join(',')}`);
+  } else {
+    log('  network:    disabled');
+  }
 
   // --- Create sandbox ---
   const sandbox = await Sandbox.create({
-    wasmDir: WASM_DIR,
+    wasmDir: config.wasmDir,
     adapter: new NodeAdapter(),
-    timeoutMs: TIMEOUT_MS,
-    fsLimitBytes: FS_LIMIT_BYTES,
-    shellWasmPath: SHELL_WASM,
+    timeoutMs: config.timeoutMs,
+    fsLimitBytes: config.fsLimitBytes,
+    shellWasmPath: config.shellWasm,
+    network,
   });
+
+  // --- Mount host directories ---
+  for (const mount of config.mounts) {
+    const provider = new HostFsProvider(mount.hostPath, { writable: mount.writable });
+    sandbox.mount(mount.sandboxPath, provider);
+    log(`  mounted:    ${mount.hostPath} → ${mount.sandboxPath} (${mount.writable ? 'rw' : 'ro'})`);
+  }
 
   // --- Create MCP server ---
   const server = new McpServer({
