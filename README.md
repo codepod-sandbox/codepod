@@ -1,6 +1,6 @@
 # wasmsand
 
-A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 95+ commands, and a Python runtime — no containers, no kernel, no hardware emulation.
+A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 95+ commands, and a Python runtime — no containers, no kernel, no hardware emulation. Ships with an [MCP server](#mcp-server) so Claude can use it directly as a tool.
 
 **[Try it in your browser](https://sunnymar.github.io/wasmsand/)**
 
@@ -18,6 +18,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 - **Package manager** — install WASI binaries into the sandbox at runtime with `pkg install`
 - **State persistence** — ephemeral, session (manual save/load), or persistent (debounced autosave) modes for long-running agent workflows
 - **Command history** — `history list` and `history clear` for agent session tracking
+- **MCP server** — plug into Claude Code, Claude Desktop, or any MCP client with zero integration code — just point it at the server
 - **Runs everywhere** — same code works server-side ([Bun](https://bun.sh) or Node.js) and in the browser
 
 ## Install
@@ -645,20 +646,23 @@ Subclass to implement custom file sources. All paths are relative to the mount p
 ## Architecture
 
 ```
-Host Application / LLM
-        │
-        ▼
-TypeScript Orchestrator ─── VFS (in-memory) ── Process Manager
-        │
-        ▼
-   WASI P1 Host
-   ┌────┴────┐
-   │         │
-Shell    Coreutils    Python
-(Rust)   (Rust)      (RustPython)
-   └────┬────┘
-   WebAssembly
+Claude / MCP Client          Host Application
+        │ (stdio, MCP)              │ (TypeScript / Python API)
+        ▼                           ▼
+   MCP Server ──────────► TypeScript Orchestrator ─── VFS (in-memory)
+                                    │
+                              Process Manager
+                                    │
+                               WASI P1 Host
+                              ┌─────┴─────┐
+                              │     │     │
+                           Shell  Utils  Python
+                           (Rust) (Rust) (RustPython)
+                              └─────┬─────┘
+                              WebAssembly
 ```
+
+The MCP server (`packages/mcp-server`) wraps the orchestrator and exposes it over the [Model Context Protocol](https://modelcontextprotocol.io), so AI assistants like Claude can run shell commands, read/write files, and list directories in the sandbox with no integration code.
 
 The shell parser is written in Rust and compiled to WASI. It emits a JSON AST that the TypeScript orchestrator executes, managing the virtual filesystem, process lifecycle, and I/O plumbing. Coreutils are individual Rust binaries compiled to WASM. Python runs via RustPython (also compiled to WASI) sharing the same VFS.
 
@@ -667,7 +671,7 @@ The shell parser is written in Rust and compiled to WASI. It emits a JSON AST th
 - **No networking by default.** Network access is off and must be explicitly enabled with a domain allowlist.
 - **In-memory filesystem.** The VFS is in-memory (256 MB default, configurable). Use persistence modes or `exportState`/`importState` to persist across sessions.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O rather than in parallel. This is correct but slower than a real shell for streaming workloads.
-- **Bash-compatible, not full POSIX.** Covers most scripting needs — control flow, functions, parameter expansion, here-docs, subshells, arithmetic. Missing: aliases, `eval`, `trap`, job control (`&`, `fg`, `bg`), arrays, process substitution (`<(...)`), advanced file descriptor manipulation (`>&3`).
+- **Bash-compatible, not full POSIX.** Covers most scripting needs — control flow, functions, parameter expansion, here-docs, subshells, arithmetic. Missing: aliases, `trap`, job control (`&`, `fg`, `bg`), arrays, process substitution (`<(...)`), advanced file descriptor manipulation (`>&3`).
 - **No runtime pip install from PyPI.** `pip install` only works for host-registered extensions. There is no PyPI access — Python packages are either standard library or provided via extensions.
 - **Security is defense-in-depth, not formally audited.** Hard-kill timeout via `Worker.terminate()`, tool allowlist, output/memory limits, VFS isolation (no host filesystem access), network default-deny with domain allowlist, file count limits, command length limits, and session isolation are all implemented. Not yet pen-tested against adversarial untrusted input in production.
 
