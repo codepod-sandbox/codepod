@@ -29,6 +29,7 @@ import type { VirtualProvider } from './vfs/provider.js';
 import { ExtensionRegistry } from './extension/registry.js';
 import type { ExtensionConfig } from './extension/types.js';
 import { WASMSAND_EXT_SOURCE } from './extension/wasmsand-ext-shim.js';
+import { PackageRegistry } from './packages/registry.js';
 
 /** Describes a set of host-provided files to mount into the VFS. */
 export interface MountConfig {
@@ -63,6 +64,8 @@ export interface SandboxOptions {
   pythonPath?: string[];
   /** Host-provided extensions (custom commands and/or Python packages). */
   extensions?: ExtensionConfig[];
+  /** Sandbox-native packages to install from PackageRegistry (e.g. ['requests', 'pandas']). */
+  packages?: string[];
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -232,8 +235,31 @@ export class Sandbox {
       });
     }
 
+    // Install sandbox-native packages from PackageRegistry
+    if (options.packages && options.packages.length > 0) {
+      const pkgRegistry = new PackageRegistry();
+      const toInstall = new Set<string>();
+      for (const name of options.packages) {
+        for (const dep of pkgRegistry.resolveDeps(name)) {
+          toInstall.add(dep);
+        }
+      }
+      vfs.withWriteAccess(() => {
+        for (const name of toInstall) {
+          const meta = pkgRegistry.get(name);
+          if (!meta) continue;
+          for (const [relPath, content] of Object.entries(meta.pythonFiles)) {
+            const fullPath = `/usr/lib/python/${relPath}`;
+            const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+            vfs.mkdirp(dir);
+            vfs.writeFile(fullPath, new TextEncoder().encode(content));
+          }
+        }
+      });
+    }
+
     // Set PYTHONPATH: user-provided paths + /usr/lib/python (always included)
-    if (options.pythonPath || bridge || extensionRegistry.getPackageNames().length > 0) {
+    if (options.pythonPath || bridge || extensionRegistry.getPackageNames().length > 0 || (options.packages && options.packages.length > 0)) {
       const paths = [...(options.pythonPath ?? []), '/usr/lib/python'];
       runner.setEnv('PYTHONPATH', paths.join(':'));
     }
