@@ -113,6 +113,90 @@ print('ok')
     expect(result.stdout.trim()).toBe('1.0');
   }, 30000);
 
+  it('numpy exp/log roundtrip', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(`python3 -c "
+import numpy as np
+a = np.array([1.0, 2.0, 3.0])
+result = np.log(np.exp(a))
+assert np.allclose(result, a), f'exp/log roundtrip failed: {result}'
+print('ok')
+"`);
+    expect(result.stdout.trim()).toBe('ok');
+  }, 30000);
+
+  it('numpy sin/cos at known values', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(`python3 -c "
+import numpy as np
+assert abs(float(np.sin(np.array([0.0]))[0])) < 1e-10
+assert abs(float(np.cos(np.array([0.0]))[0]) - 1.0) < 1e-10
+print('ok')
+"`);
+    expect(result.stdout.trim()).toBe('ok');
+  }, 30000);
+
+  it('numpy squeeze and expand_dims', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(`python3 -c "
+import numpy as np
+a = np.array([1.0, 2.0, 3.0])
+b = np.expand_dims(a, 0)
+assert b.shape == (1, 3), f'expand_dims shape: {b.shape}'
+c = np.squeeze(b)
+assert c.shape == (3,), f'squeeze shape: {c.shape}'
+print('ok')
+"`);
+    expect(result.stdout.trim()).toBe('ok');
+  }, 30000);
+
+  it('numpy argmax with axis', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(`python3 -c "
+import numpy as np
+a = np.array([[1.0, 5.0, 3.0], [4.0, 2.0, 6.0]])
+result = np.argmax(a, axis=1)
+print(result.tolist())
+"`);
+    expect(result.stdout.trim()).toBe('[1, 2]');
+  }, 30000);
+
+  it('numpy slice syntax', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['numpy'],
+    });
+    const result = await sandbox.run(`python3 -c "
+import numpy as np
+a = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+sliced = a[1:3]
+print(sliced.tolist())
+"`);
+    expect(result.stdout.trim()).toBe('[20.0, 30.0]');
+  }, 30000);
+
   it('sqlite3 in-memory database CRUD', async () => {
     sandbox = await Sandbox.create({
       wasmDir: WASM_DIR,
