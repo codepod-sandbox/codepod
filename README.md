@@ -9,7 +9,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 ## What it does
 
 - **Shell execution** — pipes, redirects, variables, globbing, control flow (`if`/`for`/`while`/`case`), functions, `source`, command substitution, arithmetic, subshells
-- **95+ commands** — cat, grep, sed, awk, find, sort, jq, tar, gzip, curl, sqlite3, bc, and more — coreutils compiled to WebAssembly plus shell builtins
+- **95+ commands** — cat, grep, rg, sed, awk, find, sort, jq, tar, gzip, curl, sqlite3, bc, and more — coreutils compiled to WebAssembly plus shell builtins
 - **Python 3** via RustPython compiled to WASI — standard library available
 - **Virtual filesystem** — in-memory POSIX VFS with optional persistence to IndexedDB (browser) or filesystem (Node)
 - **Virtual `/dev` and `/proc`** — `/dev/null`, `/dev/zero`, `/dev/random`, `/proc/uptime`, `/proc/cpuinfo`, and more
@@ -201,7 +201,7 @@ Configuration via environment variables:
 | Text processing | grep, sort, uniq, wc, head, tail, cut, tr, tac, tee, rev |
 | Text formatting | fmt, fold, nl, expand, unexpand, paste, column, numfmt |
 | Advanced text | sed, awk, diff, comm, join, csplit |
-| Search & inspection | find, xargs, strings, file, tree, stat |
+| Search & inspection | find, rg, xargs, strings, file, tree, stat |
 | Data formats | jq |
 | Archiving | tar, gzip, gunzip, zip, unzip |
 | Disk usage | du, df |
