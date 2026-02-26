@@ -318,6 +318,29 @@ export class ShellRunner {
     'echo', 'printf', 'basename', 'dirname', 'env', 'true', 'false', 'find',
   ]);
 
+  // Commands whose first positional arg is a regex/pattern, not a file path.
+  // For these, skip path resolution on the first non-flag positional argument.
+  private static readonly PATTERN_COMMANDS = new Set([
+    'grep', 'sed', 'awk', 'rg',
+  ]);
+
+  /**
+   * Resolve command args, but for PATTERN_COMMANDS skip resolution of
+   * the first positional (non-flag) argument (the regex/script pattern).
+   */
+  private static resolveCommandArgs(
+    cmdName: string,
+    args: string[],
+    resolve: (a: string) => string,
+  ): string[] {
+    if (!ShellRunner.PATTERN_COMMANDS.has(cmdName)) {
+      return args.map(resolve);
+    }
+    // Find the first positional arg (not a flag) — that's the pattern.
+    const patIdx = args.findIndex(a => !a.startsWith('-'));
+    return args.map((a, i) => (i === patIdx ? a : resolve(a)));
+  }
+
   // Commands that always create files/dirs — resolve args unconditionally.
   private static readonly CREATION_COMMANDS = new Set([
     'mkdir', 'touch', 'cp', 'mv', 'tee',
@@ -1435,7 +1458,7 @@ export class ShellRunner {
       // Resolve relative path args for WASI binaries. WASI resolves all
       // paths against the root preopen (/), so we must convert relative
       // paths to absolute ones using PWD before spawning.
-      const resolvedArgs = args.map(a => this.resolveArgIfPath(cmdName, a));
+      const resolvedArgs = ShellRunner.resolveCommandArgs(cmdName, args, a => this.resolveArgIfPath(cmdName, a));
       result = await this.mgr.spawn(cmdName, {
         args: resolvedArgs,
         env: Object.fromEntries(this.env),
