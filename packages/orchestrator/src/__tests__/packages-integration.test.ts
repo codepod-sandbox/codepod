@@ -172,6 +172,69 @@ print('ok')
     expect(result.stdout.trim()).toBe('ok');
   }, 30000);
 
+  it('PIL Image.new and size', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['PIL'],
+    });
+    const result = await sandbox.run(
+      'python3 -c "from PIL import Image; img = Image.new(\'RGB\', (100, 100)); print(img.size)"'
+    );
+    expect(result.stdout.trim()).toBe('(100, 100)');
+  }, 30000);
+
+  it('PIL getpixel/putpixel round-trip', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['PIL'],
+    });
+    const result = await sandbox.run(`python3 -c "
+from PIL import Image
+img = Image.new('RGB', (10, 10))
+img.putpixel((3, 4), (10, 20, 30))
+print(img.getpixel((3, 4)))
+"`);
+    expect(result.stdout.trim()).toBe('(10, 20, 30)');
+  }, 30000);
+
+  it('PIL resize and crop', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['PIL'],
+    });
+    const result = await sandbox.run(`python3 -c "
+from PIL import Image
+img = Image.new('RGB', (100, 50))
+resized = img.resize((50, 25))
+cropped = img.crop((10, 10, 60, 40))
+print(resized.size, cropped.size)
+"`);
+    expect(result.stdout.trim()).toBe('(50, 25) (50, 30)');
+  }, 30000);
+
+  it('PIL save/open PNG round-trip', async () => {
+    sandbox = await Sandbox.create({
+      wasmDir: WASM_DIR,
+      shellWasmPath: SHELL_WASM,
+      adapter: new NodeAdapter(),
+      packages: ['PIL'],
+    });
+    const result = await sandbox.run(`python3 -c "
+from PIL import Image
+img = Image.new('RGB', (10, 10), (42, 43, 44))
+img.save('/tmp/test.png')
+img2 = Image.open('/tmp/test.png')
+print(img2.size, img2.getpixel((0, 0)))
+"`);
+    expect(result.stdout.trim()).toBe('(10, 10) (42, 43, 44)');
+  }, 30000);
+
   it('works with no packages option', async () => {
     sandbox = await Sandbox.create({
       wasmDir: WASM_DIR,

@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     let config = config.add_native_module(pandas_def);
 
     #[cfg(feature = "pil")]
-    let pil_def = pil_native::module_def(&config.ctx);
+    let pil_def = pil_native::pil_module_def(&config.ctx);
     #[cfg(feature = "pil")]
     let config = config.add_native_module(pil_def);
 

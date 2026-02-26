@@ -331,9 +331,9 @@ class Session:
     summary: 'Image processing (image crate-backed)',
     dependencies: [],
     native: true,
-    pythonFiles: {
-      'PIL/__init__.py': '# placeholder - real impl in Task 8\n',
-    },
+    pythonFiles: {},
+    pythonDir: 'pillow-rust/python',
+    pythonDirPrefix: 'pillow-rust/python',
   },
   {
     name: 'matplotlib',

@@ -12,6 +12,7 @@ members = [
 ]
 exclude = [
   "packages/numpy-rust",
+  "packages/pillow-rust",
 ]
 resolver = "2"
 
