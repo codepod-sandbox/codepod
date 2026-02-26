@@ -109,6 +109,17 @@ impl fmt::Debug for DbPtr {
     }
 }
 
+/// Non-owning reference to a db pointer (for cursors — does NOT close on drop).
+struct DbRef(*mut ffi::sqlite3);
+unsafe impl Send for DbRef {}
+unsafe impl Sync for DbRef {}
+
+impl fmt::Debug for DbRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DbRef").field(&self.0).finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper types
 // ---------------------------------------------------------------------------
@@ -175,7 +186,8 @@ fn execute_sql(
                 SqlValue::Integer(v) => ffi::sqlite3_bind_int64(stmt, idx, *v),
                 SqlValue::Float(v) => ffi::sqlite3_bind_double(stmt, idx, *v),
                 SqlValue::Text(v) => {
-                    let c = CString::new(v.as_str()).unwrap_or_default();
+                    let c = CString::new(v.as_str())
+                        .map_err(|_| "string parameter contains null byte".to_string())?;
                     ffi::sqlite3_bind_text(
                         stmt,
                         idx,
@@ -304,7 +316,7 @@ fn py_to_sql_params(
         if py_vm.is_none(obj) {
             out.push(SqlValue::Null);
         } else if let Some(i) = obj.payload::<PyInt>() {
-            let val = i.try_to_primitive::<i64>(py_vm).unwrap_or(0);
+            let val = i.try_to_primitive::<i64>(py_vm)?;
             out.push(SqlValue::Integer(val));
         } else if let Some(f) = obj.payload::<PyFloat>() {
             out.push(SqlValue::Float(f.to_f64()));
@@ -390,7 +402,7 @@ impl PyConnection {
         };
 
         Ok(PyCursor {
-            db: Mutex::new(Some(DbPtr(db))),
+            db: Mutex::new(Some(DbRef(db))),
             rows: Mutex::new(result.rows),
             row_index: Mutex::new(0),
             description: Mutex::new(description),
@@ -403,7 +415,7 @@ impl PyConnection {
     fn cursor(&self, py_vm: &vm::VirtualMachine) -> vm::PyResult<PyCursor> {
         let db = self.get_db(py_vm)?;
         Ok(PyCursor {
-            db: Mutex::new(Some(DbPtr(db))),
+            db: Mutex::new(Some(DbRef(db))),
             rows: Mutex::new(Vec::new()),
             row_index: Mutex::new(0),
             description: Mutex::new(None),
@@ -415,7 +427,15 @@ impl PyConnection {
     #[pymethod]
     fn commit(&self, py_vm: &vm::VirtualMachine) -> vm::PyResult<()> {
         let db = self.get_db(py_vm)?;
-        let _ = execute_sql(db, "COMMIT", &[]);
+        if let Err(e) = execute_sql(db, "COMMIT", &[]) {
+            // Ignore "no transaction" errors — matches CPython behavior
+            // where commit() is a no-op in autocommit mode.
+            if !e.contains("no transaction") {
+                return Err(
+                    py_vm.new_exception_msg(py_vm.ctx.exceptions.runtime_error.to_owned(), e)
+                );
+            }
+        }
         Ok(())
     }
 
@@ -429,6 +449,19 @@ impl PyConnection {
                     py_vm.ctx.exceptions.runtime_error.to_owned(),
                     "Failed to close database".to_owned(),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    #[pymethod]
+    fn rollback(&self, py_vm: &vm::VirtualMachine) -> vm::PyResult<()> {
+        let db = self.get_db(py_vm)?;
+        if let Err(e) = execute_sql(db, "ROLLBACK", &[]) {
+            if !e.contains("no transaction") {
+                return Err(
+                    py_vm.new_exception_msg(py_vm.ctx.exceptions.runtime_error.to_owned(), e)
+                );
             }
         }
         Ok(())
@@ -451,6 +484,16 @@ impl PyConnection {
     }
 }
 
+impl Drop for PyConnection {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.db.lock() {
+            if let Some(ptr) = guard.take() {
+                unsafe { ffi::sqlite3_close(ptr.0) };
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PyCursor
 // ---------------------------------------------------------------------------
@@ -458,7 +501,7 @@ impl PyConnection {
 #[vm::pyclass(module = "_sqlite3", name = "Cursor")]
 #[derive(Debug, vm::PyPayload)]
 struct PyCursor {
-    db: Mutex<Option<DbPtr>>,
+    db: Mutex<Option<DbRef>>,
     rows: Mutex<Vec<Vec<SqlValue>>>,
     row_index: Mutex<usize>,
     description: Mutex<Option<Vec<String>>>,
