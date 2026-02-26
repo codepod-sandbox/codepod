@@ -338,6 +338,110 @@ describe('awk conformance', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Regex features (exercises regex crate port)
+  // ---------------------------------------------------------------------------
+  describe('regex', () => {
+    it('pattern with character class matches lines', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('abc\n123\nA1b\n'));
+      const result = await runner.run("awk '/[0-9]+/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('123');
+      expect(result.stdout).toContain('A1b');
+      expect(result.stdout).not.toContain('abc');
+    });
+
+    it('anchored pattern with ^ and $', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('hello\nhello world\nworld hello\n'));
+      const result = await runner.run("awk '/^hello$/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello');
+    });
+
+    it('alternation with | in pattern', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('cat\ndog\nbird\nfish\n'));
+      const result = await runner.run("awk '/cat|fish/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('cat');
+      expect(result.stdout).toContain('fish');
+      expect(result.stdout).not.toContain('dog');
+    });
+
+    it('dot metacharacter in pattern', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('bat\nbet\nbit\nbot\nbut\n'));
+      const result = await runner.run("awk '/b.t/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('bat\nbet\nbit\nbot\nbut\n');
+    });
+
+    it('sub() with regex pattern', async () => {
+      const result = await runner.run("echo 'abc123def' | awk '{sub(/[0-9]+/, \"NUM\"); print}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('abcNUMdef\n');
+    });
+
+    it('gsub() with character class', async () => {
+      const result = await runner.run("echo 'a1b2c3' | awk '{gsub(/[0-9]/, \"X\"); print}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('aXbXcX\n');
+    });
+
+    it('gsub() with alternation', async () => {
+      const result = await runner.run("echo 'cat and dog' | awk '{gsub(/cat|dog/, \"pet\"); print}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('pet and pet\n');
+    });
+
+    it('match() with character class pattern', async () => {
+      const result = await runner.run("echo 'abc123def' | awk '{match($0, /[a-z]+$/); print RSTART, RLENGTH}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('7 3\n');
+    });
+
+    it('field separator as regex (-F)', async () => {
+      const result = await runner.run("echo 'a::b:::c' | awk -F ':+' '{print $1, $2, $3}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('a b c\n');
+    });
+
+    it('negated pattern with !', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('foo\nbar\nbaz\n'));
+      const result = await runner.run("awk '!/bar/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('foo');
+      expect(result.stdout).toContain('baz');
+      expect(result.stdout).not.toContain('bar');
+    });
+
+    it('~ operator tests field against regex', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('alice 30\nbob 25\ncharlie 35\n'));
+      const result = await runner.run("awk '$1 ~ /^[ab]/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('alice');
+      expect(result.stdout).toContain('bob');
+      expect(result.stdout).not.toContain('charlie');
+    });
+
+    it('!~ operator negates field regex test', async () => {
+      vfs.writeFile('/home/user/re.txt', new TextEncoder().encode('alice 30\nbob 25\ncharlie 35\n'));
+      const result = await runner.run("awk '$1 !~ /^[ab]/' /home/user/re.txt");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('charlie 35');
+    });
+
+    it('gsub returns replacement count', async () => {
+      const result = await runner.run("echo 'aaa' | awk '{n = gsub(/a/, \"b\"); print n, $0}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('3 bbb\n');
+    });
+
+    it('sub with & in replacement inserts matched text', async () => {
+      const result = await runner.run("echo 'hello' | awk '{sub(/ell/, \"[&]\"); print}'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('h[ell]o\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Arithmetic
   // ---------------------------------------------------------------------------
   describe('arithmetic', () => {

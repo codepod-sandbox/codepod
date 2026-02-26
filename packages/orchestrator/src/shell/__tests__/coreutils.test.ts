@@ -1927,6 +1927,29 @@ describe('Coreutils Integration', () => {
       // Should print byte counts
       expect(result.stdout.trim().split('\n').length).toBeGreaterThanOrEqual(2);
     });
+
+    it('splits at regex with character class', async () => {
+      vfs.writeFile('/home/user/nums.txt', new TextEncoder().encode('intro\n== Section 1 ==\nalpha\n== Section 2 ==\nbeta\n'));
+      const result = await runner.run('csplit -f /tmp/sec_ /home/user/nums.txt "/^== /" "/^== /"');
+      expect(result.exitCode).toBe(0);
+      const lines = result.stdout.trim().split('\n');
+      expect(lines.length).toBe(3); // 3 sections → 3 byte counts
+    });
+
+    it('splits with skip pattern (%regex%)', async () => {
+      vfs.writeFile('/home/user/skip.txt', new TextEncoder().encode('preamble\nSTART\ndata1\ndata2\n'));
+      const result = await runner.run('csplit -f /tmp/sk_ /home/user/skip.txt "%START%"');
+      expect(result.exitCode).toBe(0);
+      // The preamble section is skipped, remaining content is output
+    });
+
+    it('splits with repeat count', async () => {
+      vfs.writeFile('/home/user/rep.txt', new TextEncoder().encode('a\n---\nb\n---\nc\n---\nd\n'));
+      const result = await runner.run('csplit -f /tmp/rep_ /home/user/rep.txt "/---/" "{2}"');
+      expect(result.exitCode).toBe(0);
+      const lines = result.stdout.trim().split('\n');
+      expect(lines.length).toBeGreaterThanOrEqual(3);
+    });
   });
 
   describe('zip and unzip', () => {
