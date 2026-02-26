@@ -2,7 +2,7 @@
 
 A portable WebAssembly sandbox that gives LLMs access to a POSIX shell, 95+ commands, and a Python runtime — no containers, no kernel, no hardware emulation. Ships with an [MCP server](#mcp-server) so Claude can use it directly as a tool.
 
-**[Try it in your browser](https://sunnymar.github.io/codepod/)**
+**[Try it in your browser](https://codepod-sandbox.github.io/codepod/)**
 
 LLMs are trained on enormous amounts of shell and Python usage. Rather than inventing a new API for code execution, codepod speaks the language they already know: bash, coreutils, and Python 3.
 
