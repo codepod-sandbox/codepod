@@ -1,19 +1,38 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import { resolve } from 'node:path';
+
+// Stub Node builtins that get pulled into the browser bundle via Node-only
+// code paths (PackageRegistry, FsBackend, HostFsProvider) that are never
+// called in the browser.
+function nodeStubs(): Plugin {
+  const stubs: Record<string, string> = {
+    'node:fs': 'export function readFileSync(){} export function readdirSync(){return []} export function statSync(){} export function readdir(){} export function readFile(){} export function writeFileSync(){} export function mkdirSync(){} export function rmSync(){} export function mkdtemp(){} export function rm(){} export function existsSync(){return false} export default {}',
+    'node:fs/promises': 'export function readFile(){} export function writeFile(){} export function mkdir(){} export function unlink(){} export function readdir(){} export default {}',
+    'node:path': 'export function resolve(...a){return a.join("/")} export function join(...a){return a.join("/")} export function relative(){return ""} export function dirname(p){return p} export function normalize(p){return p} export default {}',
+    'node:os': 'export function homedir(){return "/"} export function tmpdir(){return "/tmp"} export default {}',
+    'node:worker_threads': 'export const parentPort = null; export default {}',
+    'node:readline': 'export function createInterface(){return {}} export default {}',
+    'node:url': 'export function fileURLToPath(u){return u} export default {}',
+    'node:child_process': 'export function spawn(){return {}} export default {}',
+  };
+  return {
+    name: 'node-stubs',
+    enforce: 'pre',
+    resolveId(id) {
+      if (stubs[id]) return `\0node-stub:${id}`;
+    },
+    load(id) {
+      if (id.startsWith('\0node-stub:')) return stubs[id.slice('\0node-stub:'.length)];
+    },
+  };
+}
 
 export default defineConfig({
   base: process.env.VITE_BASE ?? '/',
+  plugins: [nodeStubs()],
   resolve: {
     alias: {
       '@codepod/sandbox': resolve(__dirname, '../orchestrator/src/index.ts'),
-    },
-  },
-  build: {
-    rollupOptions: {
-      // The Sandbox class has a dynamic import of node-adapter.ts (for auto-detection).
-      // That path is never hit in the browser, but Rollup still follows it.
-      // Mark node: builtins as external so the build succeeds.
-      external: [/^node:/],
     },
   },
   server: {
