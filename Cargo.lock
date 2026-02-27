@@ -332,6 +332,7 @@ name = "codepod-shell-exec"
 version = "0.1.0"
 dependencies = [
  "codepod-shell",
+ "regex",
  "serde",
  "serde_json",
 ]

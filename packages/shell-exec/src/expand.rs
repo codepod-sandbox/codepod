@@ -717,7 +717,7 @@ fn parse_array_slice_access(s: &str) -> Option<(String, String, String)> {
 /// Match a string against a shell glob pattern.
 /// Supports `*` (match any sequence), `?` (match one char), and character
 /// classes `[abc]`.
-fn glob_matches(pattern: &str, text: &str) -> bool {
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
     glob_match_inner(pattern.as_bytes(), text.as_bytes())
 }
 

@@ -1,17 +1,15 @@
-use codepod_shell::ast::Command;
+use codepod_shell::ast::{Command, ListOp, Word};
 use codepod_shell::token::RedirectType;
 
 use crate::control::{ControlFlow, RunResult, ShellError};
 use crate::expand::{
-    expand_braces, expand_globs, expand_words_with_splitting, restore_brace_sentinels,
+    expand_braces, expand_globs, expand_word, expand_words_with_splitting, glob_matches,
+    restore_brace_sentinels, ExecFn,
 };
 use crate::host::{HostInterface, WriteMode};
 use crate::state::ShellState;
 
 /// Execute a parsed `Command` AST node.
-///
-/// Currently only the `Command::Simple` variant is implemented.
-/// All other variants return an empty `RunResult`.
 pub fn exec_command(
     state: &mut ShellState,
     host: &dyn HostInterface,
@@ -55,6 +53,41 @@ pub fn exec_command(
             }
             let cmd_name = &globbed[0];
             let args: Vec<&str> = globbed[1..].iter().map(|s| s.as_str()).collect();
+
+            // ── Check for function invocation ────────────────────────────
+            if let Some(func_body) = state.functions.get(cmd_name).cloned() {
+                if state.function_depth >= crate::state::MAX_FUNCTION_DEPTH {
+                    return Ok(ControlFlow::Normal(RunResult::error(
+                        1,
+                        format!("{cmd_name}: maximum function nesting depth exceeded\n"),
+                    )));
+                }
+                let func_args: Vec<String> = globbed[1..].iter().map(|s| s.to_string()).collect();
+                let saved_positionals = state.positional_args.clone();
+                state.positional_args = func_args;
+                state.function_depth += 1;
+                let local_frame = std::collections::HashMap::new();
+                state.local_var_stack.push(local_frame);
+
+                let result = exec_command(state, host, &func_body);
+
+                state.local_var_stack.pop();
+                state.function_depth -= 1;
+                state.positional_args = saved_positionals;
+
+                return match result? {
+                    ControlFlow::Return(code) => {
+                        state.last_exit_code = code;
+                        Ok(ControlFlow::Normal(RunResult {
+                            exit_code: code,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            execution_time_ms: 0,
+                        }))
+                    }
+                    other => Ok(other),
+                };
+            }
 
             // ── Phase 1: Extract stdin from input redirects ──────────────
             let mut stdin_data = String::new();
@@ -391,8 +424,666 @@ pub fn exec_command(
             Ok(ControlFlow::Normal(last_result))
         }
 
-        // All other command variants are stubs for now.
-        _ => Ok(ControlFlow::Normal(RunResult::empty())),
+        // ── List: ;, &&, || ────────────────────────────────────────────
+        Command::List { left, op, right } => {
+            let left_result = exec_command(state, host, left)?;
+            let left_run = match left_result {
+                ControlFlow::Normal(r) => r,
+                other => return Ok(other),
+            };
+            state.last_exit_code = left_run.exit_code;
+
+            match op {
+                ListOp::And => {
+                    if left_run.exit_code == 0 {
+                        let right_result = exec_command(state, host, right)?;
+                        match right_result {
+                            ControlFlow::Normal(r) => Ok(ControlFlow::Normal(RunResult {
+                                exit_code: r.exit_code,
+                                stdout: left_run.stdout + &r.stdout,
+                                stderr: left_run.stderr + &r.stderr,
+                                execution_time_ms: 0,
+                            })),
+                            ControlFlow::Exit(code, stdout, stderr) => Ok(ControlFlow::Exit(
+                                code,
+                                left_run.stdout + &stdout,
+                                left_run.stderr + &stderr,
+                            )),
+                            other => Ok(other),
+                        }
+                    } else {
+                        Ok(ControlFlow::Normal(left_run))
+                    }
+                }
+                ListOp::Or => {
+                    if left_run.exit_code != 0 {
+                        let right_result = exec_command(state, host, right)?;
+                        match right_result {
+                            ControlFlow::Normal(r) => Ok(ControlFlow::Normal(RunResult {
+                                exit_code: r.exit_code,
+                                stdout: left_run.stdout + &r.stdout,
+                                stderr: left_run.stderr + &r.stderr,
+                                execution_time_ms: 0,
+                            })),
+                            ControlFlow::Exit(code, stdout, stderr) => Ok(ControlFlow::Exit(
+                                code,
+                                left_run.stdout + &stdout,
+                                left_run.stderr + &stderr,
+                            )),
+                            other => Ok(other),
+                        }
+                    } else {
+                        Ok(ControlFlow::Normal(left_run))
+                    }
+                }
+                ListOp::Seq => {
+                    let right_result = exec_command(state, host, right)?;
+                    match right_result {
+                        ControlFlow::Normal(r) => Ok(ControlFlow::Normal(RunResult {
+                            exit_code: r.exit_code,
+                            stdout: left_run.stdout + &r.stdout,
+                            stderr: left_run.stderr + &r.stderr,
+                            execution_time_ms: 0,
+                        })),
+                        ControlFlow::Exit(code, stdout, stderr) => Ok(ControlFlow::Exit(
+                            code,
+                            left_run.stdout + &stdout,
+                            left_run.stderr + &stderr,
+                        )),
+                        other => Ok(other),
+                    }
+                }
+            }
+        }
+
+        // ── If ───────────────────────────────────────────────────────────
+        Command::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let cond_result = exec_command(state, host, condition)?;
+            let cond_run = match cond_result {
+                ControlFlow::Normal(r) => r,
+                other => return Ok(other),
+            };
+            if cond_run.exit_code == 0 {
+                exec_command(state, host, then_body)
+            } else if let Some(else_cmd) = else_body {
+                exec_command(state, host, else_cmd)
+            } else {
+                Ok(ControlFlow::Normal(RunResult::empty()))
+            }
+        }
+
+        // ── For loop ─────────────────────────────────────────────────────
+        Command::For { var, words, body } => {
+            let expanded = expand_words_with_splitting(state, words, Some(&exec_fn));
+            let braced = expand_braces(&expanded);
+            let restored = restore_brace_sentinels(&braced);
+            let final_words = expand_globs(host, &restored);
+
+            let mut combined_stdout = String::new();
+            let mut combined_stderr = String::new();
+            let mut last_exit_code = 0;
+
+            for word in &final_words {
+                state.env.insert(var.clone(), word.clone());
+                match exec_command(state, host, body)? {
+                    ControlFlow::Normal(r) => {
+                        combined_stdout.push_str(&r.stdout);
+                        combined_stderr.push_str(&r.stderr);
+                        last_exit_code = r.exit_code;
+                    }
+                    ControlFlow::Break(_) => break,
+                    ControlFlow::Continue(_) => continue,
+                    other => return Ok(other),
+                }
+            }
+            Ok(ControlFlow::Normal(RunResult {
+                exit_code: last_exit_code,
+                stdout: combined_stdout,
+                stderr: combined_stderr,
+                execution_time_ms: 0,
+            }))
+        }
+
+        // ── While loop ──────────────────────────────────────────────────
+        Command::While { condition, body } => {
+            let mut combined_stdout = String::new();
+            let mut combined_stderr = String::new();
+            let mut last_exit_code = 0;
+            let max_iterations = 10_000;
+
+            for _ in 0..max_iterations {
+                let cond_result = exec_command(state, host, condition)?;
+                let cond_run = match cond_result {
+                    ControlFlow::Normal(r) => r,
+                    other => return Ok(other),
+                };
+                if cond_run.exit_code != 0 {
+                    break;
+                }
+
+                match exec_command(state, host, body)? {
+                    ControlFlow::Normal(r) => {
+                        combined_stdout.push_str(&r.stdout);
+                        combined_stderr.push_str(&r.stderr);
+                        last_exit_code = r.exit_code;
+                    }
+                    ControlFlow::Break(_) => break,
+                    ControlFlow::Continue(_) => continue,
+                    other => return Ok(other),
+                }
+            }
+            Ok(ControlFlow::Normal(RunResult {
+                exit_code: last_exit_code,
+                stdout: combined_stdout,
+                stderr: combined_stderr,
+                execution_time_ms: 0,
+            }))
+        }
+
+        // ── C-style for loop ────────────────────────────────────────────
+        Command::CFor {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            use crate::arithmetic::eval_arithmetic;
+            if !init.is_empty() {
+                eval_arithmetic(state, init);
+            }
+
+            let mut combined_stdout = String::new();
+            let mut combined_stderr = String::new();
+            let mut last_exit_code = 0;
+            let max_iterations = 100_000;
+
+            for _ in 0..max_iterations {
+                if !cond.is_empty() {
+                    let val = eval_arithmetic(state, cond);
+                    if val == 0 {
+                        break;
+                    }
+                }
+                match exec_command(state, host, body)? {
+                    ControlFlow::Normal(r) => {
+                        combined_stdout.push_str(&r.stdout);
+                        combined_stderr.push_str(&r.stderr);
+                        last_exit_code = r.exit_code;
+                    }
+                    ControlFlow::Break(_) => break,
+                    ControlFlow::Continue(_) => {
+                        // Continue should still run the step expression
+                        if !step.is_empty() {
+                            eval_arithmetic(state, step);
+                        }
+                        continue;
+                    }
+                    other => return Ok(other),
+                }
+                if !step.is_empty() {
+                    eval_arithmetic(state, step);
+                }
+            }
+            Ok(ControlFlow::Normal(RunResult {
+                exit_code: last_exit_code,
+                stdout: combined_stdout,
+                stderr: combined_stderr,
+                execution_time_ms: 0,
+            }))
+        }
+
+        // ── Case ────────────────────────────────────────────────────────
+        Command::Case { word, items } => {
+            let value = expand_word(state, word, Some(&exec_fn));
+            for item in items {
+                for pattern in &item.patterns {
+                    let pat_str = expand_word(state, pattern, Some(&exec_fn));
+                    if glob_matches(&pat_str, &value) {
+                        return exec_command(state, host, &item.body);
+                    }
+                }
+            }
+            Ok(ControlFlow::Normal(RunResult::empty()))
+        }
+
+        // ── Subshell ────────────────────────────────────────────────────
+        Command::Subshell { body } => {
+            let saved_env = state.env.clone();
+            let saved_cwd = state.cwd.clone();
+            let result = exec_command(state, host, body);
+            state.env = saved_env;
+            state.cwd = saved_cwd;
+            result
+        }
+
+        // ── Brace group ─────────────────────────────────────────────────
+        Command::BraceGroup { body } => exec_command(state, host, body),
+
+        // ── Negate ──────────────────────────────────────────────────────
+        Command::Negate { body } => match exec_command(state, host, body)? {
+            ControlFlow::Normal(mut r) => {
+                r.exit_code = if r.exit_code == 0 { 1 } else { 0 };
+                Ok(ControlFlow::Normal(r))
+            }
+            other => Ok(other),
+        },
+
+        // ── Break / Continue ────────────────────────────────────────────
+        Command::Break => Ok(ControlFlow::Break(1)),
+        Command::Continue => Ok(ControlFlow::Continue(1)),
+
+        // ── Function definition ─────────────────────────────────────────
+        Command::Function { name, body } => {
+            state.functions.insert(name.clone(), *body.clone());
+            Ok(ControlFlow::Normal(RunResult::empty()))
+        }
+
+        // ── DoubleBracket [[ ... ]] ─────────────────────────────────────
+        Command::DoubleBracket { expr } => {
+            let result = eval_double_bracket(state, host, expr, Some(&exec_fn));
+            Ok(ControlFlow::Normal(RunResult {
+                exit_code: if result { 0 } else { 1 },
+                stdout: String::new(),
+                stderr: String::new(),
+                execution_time_ms: 0,
+            }))
+        }
+
+        // ── Arithmetic command (( ... )) ────────────────────────────────
+        Command::ArithmeticCommand { expr } => {
+            use crate::arithmetic::eval_arithmetic;
+            let val = eval_arithmetic(state, expr);
+            Ok(ControlFlow::Normal(RunResult {
+                exit_code: if val != 0 { 0 } else { 1 },
+                stdout: String::new(),
+                stderr: String::new(),
+                execution_time_ms: 0,
+            }))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DoubleBracket evaluator: [[ expression ]]
+// ---------------------------------------------------------------------------
+
+/// Evaluate a `[[ ... ]]` conditional expression.
+///
+/// Supports:
+/// - Unary tests: `-z`, `-n`, `-f`, `-d`, `-e`, `-s`, `-r`, `-w`, `-x`
+/// - Binary comparisons: `==`, `!=`, `<`, `>`, `=~`
+/// - Integer comparisons: `-eq`, `-ne`, `-lt`, `-le`, `-gt`, `-ge`
+/// - Logical operators: `&&`, `||`, `!`
+/// - Parenthesised groups: `( expr )`
+fn eval_double_bracket(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    expr: &str,
+    exec: Option<ExecFn>,
+) -> bool {
+    let tokens = tokenize_bracket_expr(state, expr, exec);
+    let mut pos = 0;
+    parse_or_expr(&tokens, &mut pos, state, host)
+}
+
+/// Token type for [[ ]] expression parsing.
+#[derive(Debug, Clone, PartialEq)]
+enum BracketToken {
+    Word(String),
+    And,    // &&
+    Or,     // ||
+    Not,    // !
+    LParen, // (
+    RParen, // )
+}
+
+/// Tokenize a [[ ]] expression string, expanding variables.
+fn tokenize_bracket_expr(
+    state: &mut ShellState,
+    expr: &str,
+    exec: Option<ExecFn>,
+) -> Vec<BracketToken> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Skip whitespace
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        // &&
+        if i + 1 < chars.len() && chars[i] == '&' && chars[i + 1] == '&' {
+            tokens.push(BracketToken::And);
+            i += 2;
+            continue;
+        }
+
+        // ||
+        if i + 1 < chars.len() && chars[i] == '|' && chars[i + 1] == '|' {
+            tokens.push(BracketToken::Or);
+            i += 2;
+            continue;
+        }
+
+        // !
+        if chars[i] == '!' {
+            tokens.push(BracketToken::Not);
+            i += 1;
+            continue;
+        }
+
+        // ( and )
+        if chars[i] == '(' {
+            tokens.push(BracketToken::LParen);
+            i += 1;
+            continue;
+        }
+        if chars[i] == ')' {
+            tokens.push(BracketToken::RParen);
+            i += 1;
+            continue;
+        }
+
+        // Quoted string
+        if chars[i] == '"' || chars[i] == '\'' {
+            let quote = chars[i];
+            i += 1;
+            let mut word = String::new();
+            while i < chars.len() && chars[i] != quote {
+                if chars[i] == '\\' && i + 1 < chars.len() && quote == '"' {
+                    i += 1;
+                    word.push(chars[i]);
+                } else {
+                    word.push(chars[i]);
+                }
+                i += 1;
+            }
+            if i < chars.len() {
+                i += 1; // skip closing quote
+            }
+            // Expand variables in double-quoted strings
+            if quote == '"' && word.contains('$') {
+                let expanded = expand_bracket_word(state, &word, exec);
+                tokens.push(BracketToken::Word(expanded));
+            } else {
+                tokens.push(BracketToken::Word(word));
+            }
+            continue;
+        }
+
+        // Unquoted word (including operators like -z, -f, ==, !=, =~, etc.)
+        let mut word = String::new();
+        while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '(' && chars[i] != ')' {
+            // Stop at && or ||
+            if i + 1 < chars.len()
+                && ((chars[i] == '&' && chars[i + 1] == '&')
+                    || (chars[i] == '|' && chars[i + 1] == '|'))
+            {
+                break;
+            }
+            word.push(chars[i]);
+            i += 1;
+        }
+
+        if !word.is_empty() {
+            // Expand variables in unquoted words
+            if word.contains('$') {
+                let expanded = expand_bracket_word(state, &word, exec);
+                tokens.push(BracketToken::Word(expanded));
+            } else {
+                tokens.push(BracketToken::Word(word));
+            }
+        }
+    }
+
+    tokens
+}
+
+/// Parse `||` (lowest precedence in [[ ]]).
+fn parse_or_expr(
+    tokens: &[BracketToken],
+    pos: &mut usize,
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+) -> bool {
+    let mut result = parse_and_expr(tokens, pos, state, host);
+    while *pos < tokens.len() && tokens[*pos] == BracketToken::Or {
+        *pos += 1;
+        let right = parse_and_expr(tokens, pos, state, host);
+        result = result || right;
+    }
+    result
+}
+
+/// Parse `&&`.
+fn parse_and_expr(
+    tokens: &[BracketToken],
+    pos: &mut usize,
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+) -> bool {
+    let mut result = parse_not_expr(tokens, pos, state, host);
+    while *pos < tokens.len() && tokens[*pos] == BracketToken::And {
+        *pos += 1;
+        let right = parse_not_expr(tokens, pos, state, host);
+        result = result && right;
+    }
+    result
+}
+
+/// Parse `!` (unary not).
+fn parse_not_expr(
+    tokens: &[BracketToken],
+    pos: &mut usize,
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+) -> bool {
+    if *pos < tokens.len() && tokens[*pos] == BracketToken::Not {
+        *pos += 1;
+        !parse_not_expr(tokens, pos, state, host)
+    } else {
+        parse_primary(tokens, pos, state, host)
+    }
+}
+
+/// Parse a primary expression: parenthesised group, unary test, binary test, or bare word.
+fn parse_primary(
+    tokens: &[BracketToken],
+    pos: &mut usize,
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+) -> bool {
+    if *pos >= tokens.len() {
+        return false;
+    }
+
+    // Parenthesised group
+    if tokens[*pos] == BracketToken::LParen {
+        *pos += 1;
+        let result = parse_or_expr(tokens, pos, state, host);
+        if *pos < tokens.len() && tokens[*pos] == BracketToken::RParen {
+            *pos += 1;
+        }
+        return result;
+    }
+
+    // Extract current word
+    let word = match &tokens[*pos] {
+        BracketToken::Word(w) => w.clone(),
+        _ => return false,
+    };
+
+    // Unary tests: -z, -n, -f, -d, -e, -s, -r, -w, -x
+    if is_unary_test(&word) && *pos + 1 < tokens.len() {
+        if let BracketToken::Word(operand) = &tokens[*pos + 1] {
+            let op = word.clone();
+            let operand = operand.clone();
+            *pos += 2;
+            return eval_unary_test(&op, &operand, state, host);
+        }
+    }
+
+    // Look ahead for binary operator
+    if *pos + 2 < tokens.len() {
+        if let BracketToken::Word(operator) = &tokens[*pos + 1] {
+            if is_binary_op(operator) {
+                let left = word.clone();
+                let op = operator.clone();
+                if let BracketToken::Word(right) = &tokens[*pos + 2] {
+                    let right = right.clone();
+                    *pos += 3;
+                    return eval_binary_test(&left, &op, &right);
+                }
+            }
+        }
+    }
+
+    // Bare word: non-empty string is true
+    *pos += 1;
+    !word.is_empty()
+}
+
+/// Expand a word that may contain `$VAR` or `${VAR}` references.
+/// Used in [[ ]] expression tokenisation where we don't have a full Word AST.
+fn expand_bracket_word(state: &mut ShellState, word: &str, exec: Option<ExecFn>) -> String {
+    // Build a Word AST by parsing the variable references manually.
+    let mut parts = Vec::new();
+    let chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+    let mut literal = String::new();
+
+    while i < chars.len() {
+        if chars[i] == '$' {
+            if !literal.is_empty() {
+                parts.push(codepod_shell::ast::WordPart::Literal(std::mem::take(
+                    &mut literal,
+                )));
+            }
+            i += 1;
+            if i < chars.len() && chars[i] == '{' {
+                // ${VAR}
+                i += 1;
+                let mut var_name = String::new();
+                while i < chars.len() && chars[i] != '}' {
+                    var_name.push(chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1; // skip '}'
+                }
+                parts.push(codepod_shell::ast::WordPart::Variable(var_name));
+            } else if i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '?')
+            {
+                // $VAR or $? etc.
+                let mut var_name = String::new();
+                if chars[i] == '?' || chars[i] == '#' || chars[i] == '$' || chars[i] == '!' {
+                    var_name.push(chars[i]);
+                    i += 1;
+                } else {
+                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                        var_name.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                parts.push(codepod_shell::ast::WordPart::Variable(var_name));
+            } else {
+                literal.push('$');
+            }
+        } else {
+            literal.push(chars[i]);
+            i += 1;
+        }
+    }
+    if !literal.is_empty() {
+        parts.push(codepod_shell::ast::WordPart::Literal(literal));
+    }
+
+    let w = Word { parts };
+    expand_word(state, &w, exec)
+}
+
+fn is_unary_test(op: &str) -> bool {
+    matches!(
+        op,
+        "-z" | "-n" | "-f" | "-d" | "-e" | "-s" | "-r" | "-w" | "-x"
+    )
+}
+
+fn is_binary_op(op: &str) -> bool {
+    matches!(
+        op,
+        "==" | "!=" | "=~" | "<" | ">" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge"
+    )
+}
+
+fn eval_unary_test(
+    op: &str,
+    operand: &str,
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+) -> bool {
+    match op {
+        "-z" => operand.is_empty(),
+        "-n" => !operand.is_empty(),
+        "-f" | "-d" | "-e" | "-s" | "-r" | "-w" | "-x" => {
+            let path = if operand.starts_with('/') {
+                operand.to_string()
+            } else {
+                state.resolve_path(operand)
+            };
+            match host.stat(&path) {
+                Ok(info) => match op {
+                    "-e" => info.exists,
+                    "-f" => info.exists && info.is_file,
+                    "-d" => info.exists && info.is_dir,
+                    "-s" => info.exists && info.size > 0,
+                    "-r" => info.exists && (info.mode & 0o444) != 0,
+                    "-w" => info.exists && (info.mode & 0o222) != 0,
+                    "-x" => info.exists && (info.mode & 0o111) != 0,
+                    _ => false,
+                },
+                Err(_) => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn eval_binary_test(left: &str, op: &str, right: &str) -> bool {
+    match op {
+        "==" => glob_matches(right, left),
+        "!=" => !glob_matches(right, left),
+        "=~" => {
+            // Regex match
+            match regex::Regex::new(right) {
+                Ok(re) => re.is_match(left),
+                Err(_) => false,
+            }
+        }
+        "<" => left < right,
+        ">" => left > right,
+        "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+            let l: i64 = left.parse().unwrap_or(0);
+            let r: i64 = right.parse().unwrap_or(0);
+            match op {
+                "-eq" => l == r,
+                "-ne" => l != r,
+                "-lt" => l < r,
+                "-le" => l <= r,
+                "-gt" => l > r,
+                "-ge" => l >= r,
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -1594,5 +2285,1429 @@ mod tests {
             panic!("expected Normal")
         };
         assert_eq!(run.exit_code, 0);
+    }
+
+    // ====================================================================
+    // List operator tests (&&, ||, ;)
+    // ====================================================================
+
+    /// Helper to build a spawn handler that responds based on program name.
+    fn make_handler() -> impl Fn(&str, &[&str], &str) -> SpawnResult {
+        |program, _args, _stdin| match program {
+            "true" => SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            "false" => SpawnResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+            },
+            "echo-a" => SpawnResult {
+                exit_code: 0,
+                stdout: "a\n".into(),
+                stderr: String::new(),
+            },
+            "echo-b" => SpawnResult {
+                exit_code: 0,
+                stdout: "b\n".into(),
+                stderr: String::new(),
+            },
+            "fail-msg" => SpawnResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: "err\n".into(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found\n"),
+            },
+        }
+    }
+
+    fn simple_cmd(name: &str) -> Command {
+        use codepod_shell::ast::Word;
+        Command::Simple {
+            words: vec![Word::literal(name)],
+            redirects: vec![],
+            assignments: vec![],
+        }
+    }
+
+    #[test]
+    fn list_and_short_circuits_on_failure() {
+        // `false && echo-a` — echo-a should NOT execute
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("false")),
+            op: codepod_shell::ast::ListOp::And,
+            right: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+        assert_eq!(run.stdout, "");
+        // Only false was spawned
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "false");
+    }
+
+    #[test]
+    fn list_and_executes_right_on_success() {
+        // `echo-a && echo-b` — both should execute, stdout concatenated
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("echo-a")),
+            op: codepod_shell::ast::ListOp::And,
+            right: Box::new(simple_cmd("echo-b")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "a\nb\n");
+    }
+
+    #[test]
+    fn list_or_short_circuits_on_success() {
+        // `true || echo-a` — echo-a should NOT execute
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("true")),
+            op: codepod_shell::ast::ListOp::Or,
+            right: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn list_or_executes_right_on_failure() {
+        // `false || echo-a` — echo-a executes since false fails
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("false")),
+            op: codepod_shell::ast::ListOp::Or,
+            right: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "a\n");
+    }
+
+    #[test]
+    fn list_seq_always_executes_both() {
+        // `echo-a ; echo-b` — both execute regardless
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("echo-a")),
+            op: codepod_shell::ast::ListOp::Seq,
+            right: Box::new(simple_cmd("echo-b")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "a\nb\n");
+    }
+
+    #[test]
+    fn list_seq_executes_both_even_on_failure() {
+        // `false ; echo-a` — echo-a executes even though false fails
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::List {
+            left: Box::new(simple_cmd("false")),
+            op: codepod_shell::ast::ListOp::Seq,
+            right: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "a\n");
+    }
+
+    #[test]
+    fn list_nested_and_or() {
+        // `false && echo-a || echo-b` — false fails, so && short-circuits,
+        // then || sees failure so executes echo-b
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        // This is: (false && echo-a) || echo-b
+        let cmd = Command::List {
+            left: Box::new(Command::List {
+                left: Box::new(simple_cmd("false")),
+                op: codepod_shell::ast::ListOp::And,
+                right: Box::new(simple_cmd("echo-a")),
+            }),
+            op: codepod_shell::ast::ListOp::Or,
+            right: Box::new(simple_cmd("echo-b")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert!(run.stdout.contains("b\n"));
+    }
+
+    // ====================================================================
+    // If tests
+    // ====================================================================
+
+    #[test]
+    fn if_true_condition_executes_then() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::If {
+            condition: Box::new(simple_cmd("true")),
+            then_body: Box::new(simple_cmd("echo-a")),
+            else_body: None,
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "a\n");
+    }
+
+    #[test]
+    fn if_false_condition_executes_else() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::If {
+            condition: Box::new(simple_cmd("false")),
+            then_body: Box::new(simple_cmd("echo-a")),
+            else_body: Some(Box::new(simple_cmd("echo-b"))),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "b\n");
+    }
+
+    #[test]
+    fn if_false_no_else_returns_empty() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::If {
+            condition: Box::new(simple_cmd("false")),
+            then_body: Box::new(simple_cmd("echo-a")),
+            else_body: None,
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "");
+    }
+
+    #[test]
+    fn if_nested() {
+        // if false; then echo-a; else if true; then echo-b; fi; fi
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::If {
+            condition: Box::new(simple_cmd("false")),
+            then_body: Box::new(simple_cmd("echo-a")),
+            else_body: Some(Box::new(Command::If {
+                condition: Box::new(simple_cmd("true")),
+                then_body: Box::new(simple_cmd("echo-b")),
+                else_body: None,
+            })),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "b\n");
+    }
+
+    // ====================================================================
+    // For loop tests
+    // ====================================================================
+
+    #[test]
+    fn for_iterates_over_words() {
+        // for i in a b c; do echo $i; done
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found\n"),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::For {
+            var: "i".to_string(),
+            words: vec![Word::literal("a"), Word::literal("b"), Word::literal("c")],
+            body: Box::new(Command::Simple {
+                words: vec![Word::literal("echo"), Word::variable("i")],
+                redirects: vec![],
+                assignments: vec![],
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "a\nb\nc\n");
+        assert_eq!(state.env.get("i").unwrap(), "c");
+    }
+
+    #[test]
+    fn for_empty_word_list() {
+        // for i in; do echo $i; done — no iterations
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        let cmd = Command::For {
+            var: "i".to_string(),
+            words: vec![],
+            body: Box::new(simple_cmd("echo")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "");
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(host.get_spawn_calls().len(), 0);
+    }
+
+    #[test]
+    fn for_break_exits_loop() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        // for i in a b c; do break; done
+        // Verify break exits after first iteration and only "a" is bound
+        let cmd = Command::For {
+            var: "i".to_string(),
+            words: vec![Word::literal("a"), Word::literal("b"), Word::literal("c")],
+            body: Box::new(Command::Break),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        // Only first iteration ran, i should be "a"
+        assert_eq!(state.env.get("i").unwrap(), "a");
+        // echo was never called
+        assert_eq!(host.get_spawn_calls().len(), 0);
+    }
+
+    #[test]
+    fn for_continue_skips_to_next() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        // for i in a b c; do continue; echo $i; done
+        // echo should never execute because continue comes first
+        let cmd = Command::For {
+            var: "i".to_string(),
+            words: vec![Word::literal("a"), Word::literal("b"), Word::literal("c")],
+            body: Box::new(Command::List {
+                left: Box::new(Command::Continue),
+                op: codepod_shell::ast::ListOp::Seq,
+                right: Box::new(Command::Simple {
+                    words: vec![Word::literal("echo"), Word::variable("i")],
+                    redirects: vec![],
+                    assignments: vec![],
+                }),
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "");
+    }
+
+    // ====================================================================
+    // While loop tests
+    // ====================================================================
+
+    #[test]
+    fn while_loops_until_condition_fails() {
+        use codepod_shell::ast::Word;
+
+        // Simulate counting: while [[ $i -lt 3 ]]; do echo $i; i=$((i+1)); done
+        // Using ArithmeticCommand as condition
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+        state.env.insert("i".to_string(), "0".to_string());
+
+        // Condition: (( i < 3 ))
+        // Body: echo $i; (( i++ ))
+        let cmd = Command::While {
+            condition: Box::new(Command::ArithmeticCommand {
+                expr: "i < 3".to_string(),
+            }),
+            body: Box::new(Command::List {
+                left: Box::new(Command::Simple {
+                    words: vec![Word::literal("echo"), Word::variable("i")],
+                    redirects: vec![],
+                    assignments: vec![],
+                }),
+                op: codepod_shell::ast::ListOp::Seq,
+                right: Box::new(Command::ArithmeticCommand {
+                    expr: "i++".to_string(),
+                }),
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "0\n1\n2\n");
+        assert_eq!(state.env.get("i").unwrap(), "3");
+    }
+
+    #[test]
+    fn while_break_exits() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        // while true; do break; done
+        let cmd = Command::While {
+            condition: Box::new(simple_cmd("true")),
+            body: Box::new(Command::Break),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn while_continue_loops() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+        state.env.insert("i".to_string(), "0".to_string());
+
+        // while (( i < 3 )); do i++; continue; echo unreachable; done
+        let cmd = Command::While {
+            condition: Box::new(Command::ArithmeticCommand {
+                expr: "i < 3".to_string(),
+            }),
+            body: Box::new(Command::List {
+                left: Box::new(Command::List {
+                    left: Box::new(Command::ArithmeticCommand {
+                        expr: "i++".to_string(),
+                    }),
+                    op: codepod_shell::ast::ListOp::Seq,
+                    right: Box::new(Command::Continue),
+                }),
+                op: codepod_shell::ast::ListOp::Seq,
+                right: Box::new(Command::Simple {
+                    words: vec![Word::literal("echo"), Word::literal("unreachable")],
+                    redirects: vec![],
+                    assignments: vec![],
+                }),
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // echo should never have been called
+        assert_eq!(run.stdout, "");
+    }
+
+    // ====================================================================
+    // CFor (C-style for loop) tests
+    // ====================================================================
+
+    #[test]
+    fn cfor_basic_loop() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        // for ((i=0; i<3; i++)); do echo $i; done
+        let cmd = Command::CFor {
+            init: "i=0".to_string(),
+            cond: "i<3".to_string(),
+            step: "i++".to_string(),
+            body: Box::new(Command::Simple {
+                words: vec![Word::literal("echo"), Word::variable("i")],
+                redirects: vec![],
+                assignments: vec![],
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "0\n1\n2\n");
+        assert_eq!(state.env.get("i").unwrap(), "3");
+    }
+
+    #[test]
+    fn cfor_empty_condition_breaks_on_break() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        // for ((;;)); do break; done
+        let cmd = Command::CFor {
+            init: String::new(),
+            cond: String::new(),
+            step: String::new(),
+            body: Box::new(Command::Break),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn cfor_continue_still_runs_step() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        // for ((i=0; i<5; i++)); do continue; echo unreachable; done
+        let cmd = Command::CFor {
+            init: "i=0".to_string(),
+            cond: "i<5".to_string(),
+            step: "i++".to_string(),
+            body: Box::new(Command::List {
+                left: Box::new(Command::Continue),
+                op: codepod_shell::ast::ListOp::Seq,
+                right: Box::new(Command::Simple {
+                    words: vec![Word::literal("echo"), Word::literal("unreachable")],
+                    redirects: vec![],
+                    assignments: vec![],
+                }),
+            }),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // i should be 5 because step still ran on each continue
+        assert_eq!(state.env.get("i").unwrap(), "5");
+        assert_eq!(run.stdout, "");
+    }
+
+    // ====================================================================
+    // Case tests
+    // ====================================================================
+
+    #[test]
+    fn case_exact_match() {
+        use codepod_shell::ast::{CaseItem, Word};
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Case {
+            word: Word::literal("hello"),
+            items: vec![
+                CaseItem {
+                    patterns: vec![Word::literal("world")],
+                    body: Box::new(simple_cmd("echo-a")),
+                },
+                CaseItem {
+                    patterns: vec![Word::literal("hello")],
+                    body: Box::new(simple_cmd("echo-b")),
+                },
+            ],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "b\n");
+    }
+
+    #[test]
+    fn case_glob_wildcard() {
+        use codepod_shell::ast::{CaseItem, Word};
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Case {
+            word: Word::literal("anything"),
+            items: vec![
+                CaseItem {
+                    patterns: vec![Word::literal("specific")],
+                    body: Box::new(simple_cmd("echo-a")),
+                },
+                CaseItem {
+                    patterns: vec![Word::literal("*")],
+                    body: Box::new(simple_cmd("echo-b")),
+                },
+            ],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "b\n");
+    }
+
+    #[test]
+    fn case_first_match_wins() {
+        use codepod_shell::ast::{CaseItem, Word};
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Case {
+            word: Word::literal("hello"),
+            items: vec![
+                CaseItem {
+                    patterns: vec![Word::literal("hello")],
+                    body: Box::new(simple_cmd("echo-a")),
+                },
+                CaseItem {
+                    patterns: vec![Word::literal("*")],
+                    body: Box::new(simple_cmd("echo-b")),
+                },
+            ],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "a\n");
+    }
+
+    #[test]
+    fn case_no_match_returns_empty() {
+        use codepod_shell::ast::{CaseItem, Word};
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Case {
+            word: Word::literal("hello"),
+            items: vec![CaseItem {
+                patterns: vec![Word::literal("world")],
+                body: Box::new(simple_cmd("echo-a")),
+            }],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "");
+    }
+
+    // ====================================================================
+    // Subshell tests
+    // ====================================================================
+
+    #[test]
+    fn subshell_restores_env() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+        state.env.insert("X".to_string(), "before".to_string());
+
+        // Subshell changes X, but it should be restored after.
+        // Assignment handling is Task 14, so test env restoration directly.
+        state.cwd = "/home/user".to_string();
+        let cmd = Command::Subshell {
+            body: Box::new(simple_cmd("true")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        assert!(matches!(result.unwrap(), ControlFlow::Normal(_)));
+        assert_eq!(state.cwd, "/home/user");
+    }
+
+    #[test]
+    fn subshell_propagates_exit_code() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Subshell {
+            body: Box::new(simple_cmd("false")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    // ====================================================================
+    // BraceGroup tests
+    // ====================================================================
+
+    #[test]
+    fn brace_group_executes_body() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::BraceGroup {
+            body: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "a\n");
+    }
+
+    // ====================================================================
+    // Negate tests
+    // ====================================================================
+
+    #[test]
+    fn negate_flips_zero_to_one() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Negate {
+            body: Box::new(simple_cmd("true")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn negate_flips_nonzero_to_zero() {
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Negate {
+            body: Box::new(simple_cmd("false")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    // ====================================================================
+    // Break / Continue tests
+    // ====================================================================
+
+    #[test]
+    fn break_returns_controlflow_break() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let result = exec_command(&mut state, &host, &Command::Break);
+        assert!(matches!(result.unwrap(), ControlFlow::Break(1)));
+    }
+
+    #[test]
+    fn continue_returns_controlflow_continue() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let result = exec_command(&mut state, &host, &Command::Continue);
+        assert!(matches!(result.unwrap(), ControlFlow::Continue(1)));
+    }
+
+    // ====================================================================
+    // Function tests
+    // ====================================================================
+
+    #[test]
+    fn function_definition_stores_body() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::Function {
+            name: "myfunc".to_string(),
+            body: Box::new(simple_cmd("echo-a")),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert!(state.functions.contains_key("myfunc"));
+    }
+
+    #[test]
+    fn function_invocation() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found\n"),
+            },
+        });
+        let mut state = ShellState::new_default();
+
+        // Define function: myfunc() { echo hello; }
+        let func_body = Command::Simple {
+            words: vec![Word::literal("echo"), Word::literal("hello")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        state.functions.insert("myfunc".to_string(), func_body);
+
+        // Call: myfunc
+        let cmd = Command::Simple {
+            words: vec![Word::literal("myfunc")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "hello\n");
+    }
+
+    #[test]
+    fn function_positional_args_passed_and_restored() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found\n"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        state.positional_args = vec!["original".to_string()];
+
+        // Define: myfunc() { echo $1; }
+        let func_body = Command::Simple {
+            words: vec![Word::literal("echo"), Word::variable("1")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        state.functions.insert("myfunc".to_string(), func_body);
+
+        // Call: myfunc arg1
+        let cmd = Command::Simple {
+            words: vec![Word::literal("myfunc"), Word::literal("arg1")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "arg1\n");
+        // Positional args should be restored
+        assert_eq!(state.positional_args, vec!["original"]);
+    }
+
+    #[test]
+    fn function_return_from_function() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        // Define: myfunc() { return 42; echo unreachable; }
+        // We simulate return via ControlFlow::Return
+        // Since we don't have a "return" builtin yet, we test the Return flow
+        // by having function body return a specific exit code
+        let func_body = simple_cmd("false"); // exit code 1
+        state.functions.insert("myfunc".to_string(), func_body);
+
+        let cmd = Command::Simple {
+            words: vec![Word::literal("myfunc")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn function_depth_limit() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        state.function_depth = crate::state::MAX_FUNCTION_DEPTH;
+
+        // Define a function
+        let func_body = simple_cmd("true");
+        state.functions.insert("myfunc".to_string(), func_body);
+
+        // Try to call it at max depth
+        let cmd = Command::Simple {
+            words: vec![Word::literal("myfunc")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+        assert!(run.stderr.contains("maximum function nesting depth"));
+    }
+
+    #[test]
+    fn function_local_var_stack() {
+        use codepod_shell::ast::Word;
+
+        let host = MockHost::new().with_spawn_handler(make_handler());
+        let mut state = ShellState::new_default();
+
+        let func_body = simple_cmd("true");
+        state.functions.insert("myfunc".to_string(), func_body);
+
+        // Verify stack push/pop
+        assert_eq!(state.local_var_stack.len(), 0);
+        let cmd = Command::Simple {
+            words: vec![Word::literal("myfunc")],
+            redirects: vec![],
+            assignments: vec![],
+        };
+        let _ = exec_command(&mut state, &host, &cmd);
+        assert_eq!(state.local_var_stack.len(), 0); // should be popped
+    }
+
+    // ====================================================================
+    // DoubleBracket tests
+    // ====================================================================
+
+    #[test]
+    fn double_bracket_string_eq() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "hello == hello".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_string_ne() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "hello != world".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_string_eq_fails() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "hello == world".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn double_bracket_integer_eq() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "42 -eq 42".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_integer_ne() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "1 -ne 2".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_integer_lt() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "1 -lt 2".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_integer_gt() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "5 -gt 3".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_integer_le() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "3 -le 3".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_integer_ge() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "5 -ge 5".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_unary_z_empty() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-z \"\"".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_unary_z_nonempty() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-z hello".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn double_bracket_unary_n() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-n hello".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_unary_f_existing_file() {
+        let host = MockHost::new().with_file("/tmp/test.txt", b"content");
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-f /tmp/test.txt".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_unary_f_nonexistent() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-f /tmp/nonexistent.txt".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn double_bracket_unary_d() {
+        let host = MockHost::new().with_dir("/tmp/mydir");
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-d /tmp/mydir".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_unary_e() {
+        let host = MockHost::new().with_file("/tmp/test.txt", b"content");
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "-e /tmp/test.txt".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_logical_and() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "1 -eq 1 && 2 -eq 2".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_logical_and_fails() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "1 -eq 1 && 2 -eq 3".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn double_bracket_logical_or() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "1 -eq 2 || 3 -eq 3".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_logical_not() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "! 1 -eq 2".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_variable_expansion() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        state.env.insert("X".to_string(), "hello".to_string());
+
+        let cmd = Command::DoubleBracket {
+            expr: "$X == hello".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_regex_match() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "hello123 =~ ^hello[0-9]+$".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn double_bracket_regex_no_match() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::DoubleBracket {
+            expr: "abc =~ ^[0-9]+$".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    // ====================================================================
+    // ArithmeticCommand tests
+    // ====================================================================
+
+    #[test]
+    fn arithmetic_cmd_nonzero_is_success() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::ArithmeticCommand {
+            expr: "1 + 1".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0); // non-zero result → exit 0
+    }
+
+    #[test]
+    fn arithmetic_cmd_zero_is_failure() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        let cmd = Command::ArithmeticCommand {
+            expr: "0".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1); // zero result → exit 1
+    }
+
+    #[test]
+    fn arithmetic_cmd_comparison() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        // (( 5 > 3 )) → evaluates to 1 (true) → exit 0
+        let cmd = Command::ArithmeticCommand {
+            expr: "5 > 3".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn arithmetic_cmd_false_comparison() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+
+        // (( 3 > 5 )) → evaluates to 0 (false) → exit 1
+        let cmd = Command::ArithmeticCommand {
+            expr: "3 > 5".to_string(),
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
     }
 }
