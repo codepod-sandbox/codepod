@@ -7,11 +7,22 @@ use crate::state::{ShellFlag, ShellState};
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Callback type for executing a command string and returning its stdout.
+///
+/// Used by command substitution (`$(...)`) to recursively execute inner
+/// commands.  The callback receives the current `ShellState` and the raw
+/// command string, and returns the captured stdout.
+pub type ExecFn<'a> = &'a dyn Fn(&mut ShellState, &str) -> String;
+
 /// Expand all parts of a `Word` into a single string.
-pub fn expand_word(state: &mut ShellState, word: &Word) -> String {
+///
+/// `exec` is an optional callback used to evaluate `$(...)` command
+/// substitutions.  Pass `None` when no executor is available (e.g. in
+/// unit tests that don't need command substitution).
+pub fn expand_word(state: &mut ShellState, word: &Word, exec: Option<ExecFn>) -> String {
     word.parts
         .iter()
-        .map(|part| expand_word_part(state, part))
+        .map(|part| expand_word_part(state, part, exec))
         .collect()
 }
 
@@ -32,10 +43,16 @@ pub fn word_needs_splitting(word: &Word) -> bool {
 }
 
 /// Expand a list of words, applying word splitting to unquoted substitutions.
-pub fn expand_words_with_splitting(state: &mut ShellState, words: &[Word]) -> Vec<String> {
+///
+/// `exec` is an optional callback for command substitution — see [`expand_word`].
+pub fn expand_words_with_splitting(
+    state: &mut ShellState,
+    words: &[Word],
+    exec: Option<ExecFn>,
+) -> Vec<String> {
     let mut result = Vec::new();
     for w in words {
-        let expanded = expand_word(state, w);
+        let expanded = expand_word(state, w, exec);
         if word_needs_splitting(w) {
             let split: Vec<&str> = expanded.split_whitespace().collect();
             for s in split {
@@ -262,7 +279,9 @@ pub fn expand_globs(host: &dyn HostInterface, words: &[String]) -> Vec<String> {
 ///
 /// Takes `&mut ShellState` because the `:=` operator can mutate the
 /// environment.
-pub fn expand_word_part(state: &mut ShellState, part: &WordPart) -> String {
+///
+/// `exec` is an optional callback for command substitution — see [`expand_word`].
+pub fn expand_word_part(state: &mut ShellState, part: &WordPart, exec: Option<ExecFn>) -> String {
     match part {
         WordPart::Literal(s) => expand_literal(s, state),
 
@@ -274,9 +293,19 @@ pub fn expand_word_part(state: &mut ShellState, part: &WordPart) -> String {
 
         WordPart::Variable(name) => expand_variable(state, name),
 
-        WordPart::CommandSub(_) => {
-            // Task 9 will implement command substitution.
-            String::new()
+        WordPart::CommandSub(cmd_str) => {
+            if state.substitution_depth >= crate::state::MAX_SUBSTITUTION_DEPTH {
+                return String::new(); // prevent infinite recursion
+            }
+            if let Some(exec_fn) = exec {
+                state.substitution_depth += 1;
+                let result = exec_fn(state, cmd_str);
+                state.substitution_depth -= 1;
+                // Strip trailing newline (standard shell behavior)
+                result.trim_end_matches('\n').to_string()
+            } else {
+                String::new() // no executor available
+            }
         }
 
         WordPart::ProcessSub(_) => {
@@ -925,21 +954,21 @@ mod tests {
     fn simple_variable_lookup() {
         let mut state = test_state();
         let part = WordPart::Variable("FOO".into());
-        assert_eq!(expand_word_part(&mut state, &part), "hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello");
     }
 
     #[test]
     fn variable_lookup_missing() {
         let mut state = test_state();
         let part = WordPart::Variable("NONEXISTENT".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
     fn variable_lookup_empty() {
         let mut state = test_state();
         let part = WordPart::Variable("EMPTY".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     // ---- Special variables ----
@@ -948,35 +977,35 @@ mod tests {
     fn special_var_exit_code() {
         let mut state = test_state();
         let part = WordPart::Variable("?".into());
-        assert_eq!(expand_word_part(&mut state, &part), "42");
+        assert_eq!(expand_word_part(&mut state, &part, None), "42");
     }
 
     #[test]
     fn special_var_arg_count() {
         let mut state = test_state();
         let part = WordPart::Variable("#".into());
-        assert_eq!(expand_word_part(&mut state, &part), "3");
+        assert_eq!(expand_word_part(&mut state, &part, None), "3");
     }
 
     #[test]
     fn special_var_all_args_at() {
         let mut state = test_state();
         let part = WordPart::Variable("@".into());
-        assert_eq!(expand_word_part(&mut state, &part), "arg1 arg2 arg3");
+        assert_eq!(expand_word_part(&mut state, &part, None), "arg1 arg2 arg3");
     }
 
     #[test]
     fn special_var_all_args_star() {
         let mut state = test_state();
         let part = WordPart::Variable("*".into());
-        assert_eq!(expand_word_part(&mut state, &part), "arg1 arg2 arg3");
+        assert_eq!(expand_word_part(&mut state, &part, None), "arg1 arg2 arg3");
     }
 
     #[test]
     fn special_var_random() {
         let mut state = test_state();
         let part = WordPart::Variable("RANDOM".into());
-        let val: u32 = expand_word_part(&mut state, &part).parse().unwrap();
+        let val: u32 = expand_word_part(&mut state, &part, None).parse().unwrap();
         assert!(val < 32768);
     }
 
@@ -984,28 +1013,28 @@ mod tests {
     fn positional_param_1() {
         let mut state = test_state();
         let part = WordPart::Variable("1".into());
-        assert_eq!(expand_word_part(&mut state, &part), "arg1");
+        assert_eq!(expand_word_part(&mut state, &part, None), "arg1");
     }
 
     #[test]
     fn positional_param_3() {
         let mut state = test_state();
         let part = WordPart::Variable("3".into());
-        assert_eq!(expand_word_part(&mut state, &part), "arg3");
+        assert_eq!(expand_word_part(&mut state, &part, None), "arg3");
     }
 
     #[test]
     fn positional_param_out_of_range() {
         let mut state = test_state();
         let part = WordPart::Variable("9".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
     fn positional_param_zero() {
         let mut state = test_state();
         let part = WordPart::Variable("0".into());
-        assert_eq!(expand_word_part(&mut state, &part), "codepod-shell");
+        assert_eq!(expand_word_part(&mut state, &part, None), "codepod-shell");
     }
 
     // ---- Parameter expansion: default value (:-, :=, :+, :?) ----
@@ -1018,7 +1047,7 @@ mod tests {
             op: ":-".into(),
             default: "fallback".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello");
     }
 
     #[test]
@@ -1029,7 +1058,7 @@ mod tests {
             op: ":-".into(),
             default: "fallback".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "fallback");
+        assert_eq!(expand_word_part(&mut state, &part, None), "fallback");
     }
 
     #[test]
@@ -1040,7 +1069,7 @@ mod tests {
             op: ":-".into(),
             default: "fallback".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "fallback");
+        assert_eq!(expand_word_part(&mut state, &part, None), "fallback");
     }
 
     #[test]
@@ -1051,7 +1080,7 @@ mod tests {
             op: ":=".into(),
             default: "assigned".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "assigned");
+        assert_eq!(expand_word_part(&mut state, &part, None), "assigned");
         // Verify the variable was actually set
         assert_eq!(state.env.get("NEWVAR").unwrap(), "assigned");
     }
@@ -1064,7 +1093,7 @@ mod tests {
             op: ":=".into(),
             default: "other".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello");
         // Original value preserved
         assert_eq!(state.env.get("FOO").unwrap(), "hello");
     }
@@ -1077,7 +1106,7 @@ mod tests {
             op: ":+".into(),
             default: "alternate".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "alternate");
+        assert_eq!(expand_word_part(&mut state, &part, None), "alternate");
     }
 
     #[test]
@@ -1088,7 +1117,7 @@ mod tests {
             op: ":+".into(),
             default: "alternate".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
@@ -1099,7 +1128,7 @@ mod tests {
             op: ":?".into(),
             default: "errmsg".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello");
     }
 
     #[test]
@@ -1110,7 +1139,7 @@ mod tests {
             op: ":?".into(),
             default: "custom error".into(),
         };
-        let result = expand_word_part(&mut state, &part);
+        let result = expand_word_part(&mut state, &part, None);
         assert!(result.contains("NOVAR"));
         assert!(result.contains("custom error"));
     }
@@ -1125,7 +1154,7 @@ mod tests {
             op: "#".into(),
             default: "FOO".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "5"); // "hello".len()
+        assert_eq!(expand_word_part(&mut state, &part, None), "5"); // "hello".len()
     }
 
     #[test]
@@ -1136,7 +1165,7 @@ mod tests {
             op: "#".into(),
             default: "NOVAR".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "0");
+        assert_eq!(expand_word_part(&mut state, &part, None), "0");
     }
 
     // ---- Prefix removal (#, ##) ----
@@ -1150,7 +1179,7 @@ mod tests {
             op: "#".into(),
             default: "/*/".into(),
         };
-        let result = expand_word_part(&mut state, &part);
+        let result = expand_word_part(&mut state, &part, None);
         // /usr/local/bin:/usr/bin:/bin with shortest prefix /*/  → match /usr/
         assert_eq!(result, "local/bin:/usr/bin:/bin");
     }
@@ -1164,7 +1193,7 @@ mod tests {
             op: "##".into(),
             default: "/*/".into(),
         };
-        let result = expand_word_part(&mut state, &part);
+        let result = expand_word_part(&mut state, &part, None);
         // Longest prefix matching /*/ from /usr/local/bin:/usr/bin:/bin
         // is /usr/local/bin:/usr/bin:/
         assert_eq!(result, "bin");
@@ -1181,7 +1210,7 @@ mod tests {
             op: "%".into(),
             default: ":*".into(),
         };
-        let result = expand_word_part(&mut state, &part);
+        let result = expand_word_part(&mut state, &part, None);
         assert_eq!(result, "/usr/local/bin:/usr/bin");
     }
 
@@ -1194,7 +1223,7 @@ mod tests {
             op: "%%".into(),
             default: ":*".into(),
         };
-        let result = expand_word_part(&mut state, &part);
+        let result = expand_word_part(&mut state, &part, None);
         assert_eq!(result, "/usr/local/bin");
     }
 
@@ -1209,7 +1238,7 @@ mod tests {
             op: "/".into(),
             default: "l/L".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "heLlo");
+        assert_eq!(expand_word_part(&mut state, &part, None), "heLlo");
     }
 
     #[test]
@@ -1221,7 +1250,7 @@ mod tests {
             op: "//".into(),
             default: "l/L".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "heLLo");
+        assert_eq!(expand_word_part(&mut state, &part, None), "heLLo");
     }
 
     #[test]
@@ -1233,7 +1262,7 @@ mod tests {
             op: "//".into(),
             default: "l/".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "heo");
+        assert_eq!(expand_word_part(&mut state, &part, None), "heo");
     }
 
     // ---- Case conversion (^^, ,,, ^, ,) ----
@@ -1246,7 +1275,7 @@ mod tests {
             op: "^^".into(),
             default: "".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "HELLO");
+        assert_eq!(expand_word_part(&mut state, &part, None), "HELLO");
     }
 
     #[test]
@@ -1257,7 +1286,7 @@ mod tests {
             op: ",,".into(),
             default: "".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "hello world");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello world");
     }
 
     #[test]
@@ -1268,7 +1297,7 @@ mod tests {
             op: "^".into(),
             default: "".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "Hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "Hello");
     }
 
     #[test]
@@ -1279,7 +1308,7 @@ mod tests {
             op: ",".into(),
             default: "".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "hello, World!");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello, World!");
     }
 
     // ---- Substring (:offset:length) ----
@@ -1293,7 +1322,7 @@ mod tests {
             op: ":".into(),
             default: "2".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "llo");
+        assert_eq!(expand_word_part(&mut state, &part, None), "llo");
     }
 
     #[test]
@@ -1305,7 +1334,7 @@ mod tests {
             op: ":".into(),
             default: "1:3".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "ell");
+        assert_eq!(expand_word_part(&mut state, &part, None), "ell");
     }
 
     #[test]
@@ -1319,7 +1348,7 @@ mod tests {
             op: ":".into(),
             default: "-2".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "lo");
+        assert_eq!(expand_word_part(&mut state, &part, None), "lo");
     }
 
     #[test]
@@ -1332,7 +1361,7 @@ mod tests {
             op: ":".into(),
             default: "1:-1".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "ell");
+        assert_eq!(expand_word_part(&mut state, &part, None), "ell");
     }
 
     // ---- Array access ----
@@ -1344,7 +1373,7 @@ mod tests {
             .arrays
             .insert("arr".into(), vec!["a".into(), "b".into(), "c".into()]);
         let part = WordPart::Variable("arr[1]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "b");
+        assert_eq!(expand_word_part(&mut state, &part, None), "b");
     }
 
     #[test]
@@ -1354,7 +1383,7 @@ mod tests {
             .arrays
             .insert("arr".into(), vec!["a".into(), "b".into(), "c".into()]);
         let part = WordPart::Variable("arr[@]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "a b c");
+        assert_eq!(expand_word_part(&mut state, &part, None), "a b c");
     }
 
     #[test]
@@ -1364,7 +1393,7 @@ mod tests {
             .arrays
             .insert("arr".into(), vec!["x".into(), "y".into()]);
         let part = WordPart::Variable("arr[*]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "x y");
+        assert_eq!(expand_word_part(&mut state, &part, None), "x y");
     }
 
     #[test]
@@ -1374,7 +1403,7 @@ mod tests {
             .arrays
             .insert("arr".into(), vec!["a".into(), "b".into(), "c".into()]);
         let part = WordPart::Variable("arr[-1]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "c");
+        assert_eq!(expand_word_part(&mut state, &part, None), "c");
     }
 
     #[test]
@@ -1388,7 +1417,7 @@ mod tests {
             op: "#".into(),
             default: "arr[@]".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "3");
+        assert_eq!(expand_word_part(&mut state, &part, None), "3");
     }
 
     #[test]
@@ -1404,7 +1433,7 @@ mod tests {
             op: ":".into(),
             default: "1:3".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "b c d");
+        assert_eq!(expand_word_part(&mut state, &part, None), "b c d");
     }
 
     #[test]
@@ -1416,7 +1445,7 @@ mod tests {
         );
         // arr[@]:2:2 encoded in Variable name (parser format for $arr[@]:offset:length)
         let part = WordPart::Variable("arr[@]:2:2".into());
-        assert_eq!(expand_word_part(&mut state, &part), "c d");
+        assert_eq!(expand_word_part(&mut state, &part, None), "c d");
     }
 
     #[test]
@@ -1428,7 +1457,7 @@ mod tests {
         state.assoc_arrays.insert("map".into(), assoc);
 
         let part = WordPart::Variable("map[key1]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "val1");
+        assert_eq!(expand_word_part(&mut state, &part, None), "val1");
     }
 
     #[test]
@@ -1439,7 +1468,7 @@ mod tests {
         state.assoc_arrays.insert("map".into(), assoc);
 
         let part = WordPart::Variable("map[missing]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     // ---- Tilde expansion ----
@@ -1448,14 +1477,17 @@ mod tests {
     fn tilde_alone() {
         let mut state = test_state();
         let part = WordPart::Literal("~".into());
-        assert_eq!(expand_word_part(&mut state, &part), "/home/user");
+        assert_eq!(expand_word_part(&mut state, &part, None), "/home/user");
     }
 
     #[test]
     fn tilde_slash() {
         let mut state = test_state();
         let part = WordPart::Literal("~/documents".into());
-        assert_eq!(expand_word_part(&mut state, &part), "/home/user/documents");
+        assert_eq!(
+            expand_word_part(&mut state, &part, None),
+            "/home/user/documents"
+        );
     }
 
     #[test]
@@ -1463,14 +1495,17 @@ mod tests {
         let mut state = test_state();
         state.env.insert("HOME".into(), "/custom/home".into());
         let part = WordPart::Literal("~/bin".into());
-        assert_eq!(expand_word_part(&mut state, &part), "/custom/home/bin");
+        assert_eq!(
+            expand_word_part(&mut state, &part, None),
+            "/custom/home/bin"
+        );
     }
 
     #[test]
     fn no_tilde_in_middle() {
         let mut state = test_state();
         let part = WordPart::Literal("foo~bar".into());
-        assert_eq!(expand_word_part(&mut state, &part), "foo~bar");
+        assert_eq!(expand_word_part(&mut state, &part, None), "foo~bar");
     }
 
     // ---- Word splitting ----
@@ -1482,7 +1517,7 @@ mod tests {
         let words = vec![Word {
             parts: vec![WordPart::Variable("WORDS".into())],
         }];
-        let result = expand_words_with_splitting(&mut state, &words);
+        let result = expand_words_with_splitting(&mut state, &words, None);
         assert_eq!(result, vec!["one", "two", "three"]);
     }
 
@@ -1497,7 +1532,7 @@ mod tests {
                 WordPart::Variable("WORDS".into()),
             ],
         }];
-        let result = expand_words_with_splitting(&mut state, &words);
+        let result = expand_words_with_splitting(&mut state, &words, None);
         assert_eq!(result, vec!["one  two   three"]);
     }
 
@@ -1512,7 +1547,7 @@ mod tests {
                 parts: vec![WordPart::Literal("world".into())],
             },
         ];
-        let result = expand_words_with_splitting(&mut state, &words);
+        let result = expand_words_with_splitting(&mut state, &words, None);
         assert_eq!(result, vec!["hello", "world"]);
     }
 
@@ -1528,7 +1563,7 @@ mod tests {
                 WordPart::Literal("_suffix".into()),
             ],
         };
-        assert_eq!(expand_word(&mut state, &word), "prefix_hello_suffix");
+        assert_eq!(expand_word(&mut state, &word, None), "prefix_hello_suffix");
     }
 
     // ---- Nounset (set -u) ----
@@ -1539,7 +1574,7 @@ mod tests {
         state.flags.insert(ShellFlag::Nounset);
         let part = WordPart::Variable("UNBOUND".into());
         // Currently returns empty; future: should propagate error
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
@@ -1547,7 +1582,7 @@ mod tests {
         let mut state = test_state();
         state.flags.insert(ShellFlag::Nounset);
         let part = WordPart::Variable("FOO".into());
-        assert_eq!(expand_word_part(&mut state, &part), "hello");
+        assert_eq!(expand_word_part(&mut state, &part, None), "hello");
     }
 
     // ---- Quoted literal brace protection ----
@@ -1556,30 +1591,33 @@ mod tests {
     fn quoted_literal_brace_protection() {
         let mut state = test_state();
         let part = WordPart::QuotedLiteral("a{b}c".into());
-        assert_eq!(expand_word_part(&mut state, &part), "a\u{E000}b\u{E001}c");
+        assert_eq!(
+            expand_word_part(&mut state, &part, None),
+            "a\u{E000}b\u{E001}c"
+        );
     }
 
-    // ---- CommandSub / ArithmeticExpansion / ProcessSub stubs ----
+    // ---- CommandSub / ArithmeticExpansion / ProcessSub ----
 
     #[test]
-    fn command_sub_returns_empty() {
+    fn command_sub_without_exec_returns_empty() {
         let mut state = test_state();
         let part = WordPart::CommandSub("echo hi".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
     fn arithmetic_expansion_evaluates() {
         let mut state = test_state();
         let part = WordPart::ArithmeticExpansion("1+1".into());
-        assert_eq!(expand_word_part(&mut state, &part), "2");
+        assert_eq!(expand_word_part(&mut state, &part, None), "2");
     }
 
     #[test]
     fn process_sub_returns_empty() {
         let mut state = test_state();
         let part = WordPart::ProcessSub("echo hi".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     // ---- Glob matching (internal) ----
@@ -1626,7 +1664,7 @@ mod tests {
             op: "#".into(),
             default: "*".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     #[test]
@@ -1637,7 +1675,7 @@ mod tests {
             op: "%".into(),
             default: "*".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part, None), "");
     }
 
     // ---- Replace with glob pattern ----
@@ -1652,7 +1690,7 @@ mod tests {
             op: "/".into(),
             default: "*.jpg/.png".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), ".png");
+        assert_eq!(expand_word_part(&mut state, &part, None), ".png");
     }
 
     // ---- Assoc array all values ----
@@ -1665,7 +1703,7 @@ mod tests {
         state.assoc_arrays.insert("m".into(), assoc);
 
         let part = WordPart::Variable("m[@]".into());
-        assert_eq!(expand_word_part(&mut state, &part), "1");
+        assert_eq!(expand_word_part(&mut state, &part, None), "1");
     }
 
     // ---- Assoc array length ----
@@ -1683,7 +1721,7 @@ mod tests {
             op: "#".into(),
             default: "m[@]".into(),
         };
-        assert_eq!(expand_word_part(&mut state, &part), "2");
+        assert_eq!(expand_word_part(&mut state, &part, None), "2");
     }
 
     // ---- word_needs_splitting logic ----
@@ -1817,7 +1855,7 @@ mod tests {
         let word = Word {
             parts: vec![WordPart::QuotedLiteral("{a,b}".into())],
         };
-        let expanded = expand_word(&mut state, &word);
+        let expanded = expand_word(&mut state, &word, None);
         // Should contain sentinel chars, not literal braces
         assert_eq!(expanded, "\u{E000}a,b\u{E001}");
 
