@@ -11,6 +11,17 @@ pub struct SpawnResult {
     pub stderr: String,
 }
 
+/// JSON-encoded spawn request sent to the host via `host_spawn`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct SpawnRequest<'a> {
+    program: &'a str,
+    args: &'a [&'a str],
+    env: &'a [(&'a str, &'a str)],
+    cwd: &'a str,
+    stdin: &'a str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatInfo {
     pub exists: bool,
@@ -176,27 +187,55 @@ extern "C" {
     /// Read symbolic link target.
     pub fn host_readlink(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32)
         -> i32;
+
+    /// Read the next command from the host session loop.
+    pub fn host_read_command(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Write a JSON-encoded RunResult back to the host.
+    pub fn host_write_result(data_ptr: *const u8, data_len: u32);
+}
+
+// ---------------------------------------------------------------------------
+// Error-code helper
+// ---------------------------------------------------------------------------
+
+/// Convert a negative host return code to a typed `HostError`.
+///
+/// Convention: -1 = NotFound, -2 = PermissionDenied, -3 = IoError.
+#[cfg(target_arch = "wasm32")]
+fn rc_to_error(rc: i32, context: &str) -> HostError {
+    match rc {
+        -1 => HostError::NotFound(context.into()),
+        -2 => HostError::PermissionDenied(context.into()),
+        -3 => HostError::IoError(context.into()),
+        other => HostError::Other(format!("{context}: host error code {other}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helper: call a host function that writes into an output buffer
 // ---------------------------------------------------------------------------
 
+/// Default starting capacity for output buffers.
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_OUTBUF_CAP: usize = 4096;
+
 /// Call a host FFI function that follows the pattern:
 ///   fn(args..., out_ptr, out_cap) -> i32
 /// where a negative return is an error code and a positive return is the
 /// number of bytes written.  Returns the output as a `String`.
+///
+/// `context` is used to produce meaningful error messages (typically the
+/// path or operation name).
 #[cfg(target_arch = "wasm32")]
-pub fn call_with_outbuf<F>(initial_cap: usize, f: F) -> Result<String, HostError>
+fn call_with_outbuf<F>(context: &str, f: F) -> Result<String, HostError>
 where
     F: Fn(*mut u8, u32) -> i32,
 {
-    let mut buf: Vec<u8> = vec![0u8; initial_cap];
+    let mut buf: Vec<u8> = vec![0u8; DEFAULT_OUTBUF_CAP];
     let n = f(buf.as_mut_ptr(), buf.len() as u32);
     if n < 0 {
-        return Err(HostError::Other(format!(
-            "host call returned error code {n}"
-        )));
+        return Err(rc_to_error(n, context));
     }
     let n = n as usize;
     if n > buf.len() {
@@ -204,13 +243,202 @@ where
         buf.resize(n, 0);
         let n2 = f(buf.as_mut_ptr(), buf.len() as u32);
         if n2 < 0 {
-            return Err(HostError::Other(format!(
-                "host call returned error code {n2} on retry"
-            )));
+            return Err(rc_to_error(n2, context));
         }
         buf.truncate(n2 as usize);
     } else {
         buf.truncate(n);
     }
     String::from_utf8(buf).map_err(|e| HostError::Other(format!("invalid UTF-8 from host: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// WasmHost — production HostInterface bridge (wasm32 only)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+pub struct WasmHost;
+
+#[cfg(target_arch = "wasm32")]
+impl HostInterface for WasmHost {
+    fn spawn(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin: &str,
+    ) -> Result<SpawnResult, HostError> {
+        let req = SpawnRequest {
+            program,
+            args,
+            env,
+            cwd,
+            stdin,
+        };
+        let req_json = serde_json::to_vec(&req)
+            .map_err(|e| HostError::Other(format!("spawn: failed to serialize request: {e}")))?;
+        let output = call_with_outbuf("spawn", |out_ptr, out_cap| unsafe {
+            host_spawn(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
+        })?;
+        serde_json::from_str(&output)
+            .map_err(|e| HostError::Other(format!("spawn: failed to deserialize response: {e}")))
+    }
+
+    fn has_tool(&self, name: &str) -> bool {
+        unsafe { host_has_tool(name.as_ptr(), name.len() as u32) != 0 }
+    }
+
+    fn check_cancel(&self) -> CancelStatus {
+        match unsafe { host_check_cancel() } {
+            1 => CancelStatus::Cancelled,
+            2 => CancelStatus::TimedOut,
+            _ => CancelStatus::Running,
+        }
+    }
+
+    fn time_ms(&self) -> u64 {
+        unsafe { host_time_ms() }
+    }
+
+    fn stat(&self, path: &str) -> Result<StatInfo, HostError> {
+        let output = call_with_outbuf(path, |out_ptr, out_cap| unsafe {
+            host_stat(path.as_ptr(), path.len() as u32, out_ptr, out_cap)
+        })?;
+        serde_json::from_str(&output).map_err(|e| HostError::IoError(format!("stat {path}: {e}")))
+    }
+
+    fn read_file(&self, path: &str) -> Result<String, HostError> {
+        call_with_outbuf(path, |out_ptr, out_cap| unsafe {
+            host_read_file(path.as_ptr(), path.len() as u32, out_ptr, out_cap)
+        })
+    }
+
+    fn write_file(&self, path: &str, data: &str, mode: WriteMode) -> Result<(), HostError> {
+        let mode_u32 = match mode {
+            WriteMode::Truncate => 0,
+            WriteMode::Append => 1,
+        };
+        let rc = unsafe {
+            host_write_file(
+                path.as_ptr(),
+                path.len() as u32,
+                data.as_ptr(),
+                data.len() as u32,
+                mode_u32,
+            )
+        };
+        if rc < 0 {
+            Err(rc_to_error(rc, path))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn readdir(&self, path: &str) -> Result<Vec<String>, HostError> {
+        let output = call_with_outbuf(path, |out_ptr, out_cap| unsafe {
+            host_readdir(path.as_ptr(), path.len() as u32, out_ptr, out_cap)
+        })?;
+        serde_json::from_str(&output)
+            .map_err(|e| HostError::IoError(format!("readdir {path}: {e}")))
+    }
+
+    fn mkdir(&self, path: &str) -> Result<(), HostError> {
+        let rc = unsafe { host_mkdir(path.as_ptr(), path.len() as u32) };
+        if rc < 0 {
+            Err(rc_to_error(rc, path))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn remove(&self, path: &str, recursive: bool) -> Result<(), HostError> {
+        let rc = unsafe {
+            host_remove(
+                path.as_ptr(),
+                path.len() as u32,
+                if recursive { 1 } else { 0 },
+            )
+        };
+        if rc < 0 {
+            Err(rc_to_error(rc, path))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn chmod(&self, path: &str, mode: u32) -> Result<(), HostError> {
+        let rc = unsafe { host_chmod(path.as_ptr(), path.len() as u32, mode) };
+        if rc < 0 {
+            Err(rc_to_error(rc, path))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn glob(&self, pattern: &str) -> Result<Vec<String>, HostError> {
+        let output = call_with_outbuf(pattern, |out_ptr, out_cap| unsafe {
+            host_glob(pattern.as_ptr(), pattern.len() as u32, out_ptr, out_cap)
+        })?;
+        serde_json::from_str(&output)
+            .map_err(|e| HostError::IoError(format!("glob {pattern}: {e}")))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), HostError> {
+        let rc = unsafe {
+            host_rename(
+                from.as_ptr(),
+                from.len() as u32,
+                to.as_ptr(),
+                to.len() as u32,
+            )
+        };
+        if rc < 0 {
+            Err(rc_to_error(rc, from))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn symlink(&self, target: &str, link_path: &str) -> Result<(), HostError> {
+        let rc = unsafe {
+            host_symlink(
+                target.as_ptr(),
+                target.len() as u32,
+                link_path.as_ptr(),
+                link_path.len() as u32,
+            )
+        };
+        if rc < 0 {
+            Err(rc_to_error(rc, link_path))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn readlink(&self, path: &str) -> Result<String, HostError> {
+        call_with_outbuf(path, |out_ptr, out_cap| unsafe {
+            host_readlink(path.as_ptr(), path.len() as u32, out_ptr, out_cap)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session functions (wasm32 only) — not on the trait
+// ---------------------------------------------------------------------------
+
+/// Read the next command string from the host session loop.
+#[cfg(target_arch = "wasm32")]
+pub fn read_command() -> String {
+    call_with_outbuf("read_command", |ptr, cap| unsafe {
+        host_read_command(ptr, cap)
+    })
+    .unwrap_or_default()
+}
+
+/// Write a `RunResult` back to the host as JSON.
+#[cfg(target_arch = "wasm32")]
+pub fn write_result(result: &crate::control::RunResult) {
+    let json = serde_json::to_vec(result).unwrap();
+    unsafe { host_write_result(json.as_ptr(), json.len() as u32) };
 }
