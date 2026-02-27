@@ -98,7 +98,7 @@ export class ShellRunner extends ShellBuiltins {
   /** Trap handlers (e.g. EXIT trap). */
   protected trapHandlers: Map<string, string> = new Map();
   /** Array storage for bash-style arrays. */
-  private arrays: Map<string, string[]> = new Map();
+  protected arrays: Map<string, string[]> = new Map();
   /** Whether we're in a conditional context (if condition, || / && chains). */
   private inConditionalContext = false;
   /** Pipe stdin data threaded through compound commands (while, for, if, subshell). */
