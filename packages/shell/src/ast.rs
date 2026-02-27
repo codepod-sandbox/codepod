@@ -88,6 +88,13 @@ pub enum Command {
         words: Vec<Word>,
         body: Box<Command>,
     },
+    /// C-style for loop: for ((init; cond; step)) do ... done
+    CFor {
+        init: String,
+        cond: String,
+        step: String,
+        body: Box<Command>,
+    },
     /// While loop.
     While {
         condition: Box<Command>,
@@ -95,6 +102,8 @@ pub enum Command {
     },
     /// Subshell: ( commands ).
     Subshell { body: Box<Command> },
+    /// Brace group: { commands; }.
+    BraceGroup { body: Box<Command> },
     /// Break out of a loop.
     Break,
     /// Continue to next loop iteration.

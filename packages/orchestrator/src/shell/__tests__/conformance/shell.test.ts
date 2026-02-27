@@ -467,10 +467,20 @@ describe('shell conformance', () => {
 
     it('herestring with variable expansion', async () => {
       const r = await runner.run('X=world; cat <<< "hello $X"');
-      // Note: variable expansion in herestrings depends on shell handling
-      // At minimum, the herestring value should be passed through
       expect(r.exitCode).toBe(0);
-      expect(r.stdout.length).toBeGreaterThan(0);
+      expect(r.stdout).toBe('hello world\n');
+    });
+
+    it('herestring with ${VAR} expansion', async () => {
+      const r = await runner.run('NAME=codepod; cat <<< "project: ${NAME}"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('project: codepod\n');
+    });
+
+    it('herestring with command substitution', async () => {
+      const r = await runner.run('cat <<< "count: $(echo 42)"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('count: 42\n');
     });
 
     it('herestring piped through tr', async () => {
@@ -559,7 +569,7 @@ describe('shell conformance', () => {
     });
 
     // Brace group in pipeline (e.g. echo | { read; echo; }) not yet supported.
-    it.skip('read from echo pipe assigns to variable', async () => {
+    it('read from echo pipe assigns to variable', async () => {
       const result = await runner.run('echo "bob" | { read NAME; echo "got $NAME"; }');
       expect(result.stdout).toBe('got bob\n');
     });
@@ -621,6 +631,26 @@ describe('shell conformance', () => {
     it('pipe into while read -r preserves backslashes', async () => {
       const r = await runner.run(`printf "%s\\n" "a\\\\b" | while read -r line; do echo "$line"; done`);
       expect(r.stdout).toBe('a\\b\n');
+    });
+
+    it('read -n reads N characters', async () => {
+      const r = await runner.run(`read -n 5 x <<< "hello world"; echo "$x"`);
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('read -d uses custom delimiter', async () => {
+      const r = await runner.run(`read -d , first <<< "a,b,c"; echo "$first"`);
+      expect(r.stdout).toBe('a\n');
+    });
+
+    it('read -a populates array', async () => {
+      const r = await runner.run(`read -a words <<< "one two three"; echo "\${words[0]} \${words[2]}"`);
+      expect(r.stdout).toBe('one three\n');
+    });
+
+    it('read -p is silently ignored', async () => {
+      const r = await runner.run(`read -p "prompt: " val <<< "42"; echo "$val"`);
+      expect(r.stdout).toBe('42\n');
     });
   });
 
@@ -741,6 +771,155 @@ describe('shell conformance', () => {
     it('$SHELL is set', async () => {
       const r = await runner.run(`echo $SHELL`);
       expect(r.stdout).toBe('/bin/sh\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // C-style for loops
+  // ---------------------------------------------------------------------------
+  describe('c-style for loop', () => {
+    it('basic counting', async () => {
+      const r = await runner.run(`for ((i=0; i<5; i++)); do echo $i; done`);
+      expect(r.stdout).toBe('0\n1\n2\n3\n4\n');
+    });
+
+    it('decrement', async () => {
+      const r = await runner.run(`for ((i=3; i>0; i--)); do echo $i; done`);
+      expect(r.stdout).toBe('3\n2\n1\n');
+    });
+
+    it('step by 2', async () => {
+      const r = await runner.run(`for ((i=0; i<10; i+=2)); do echo $i; done`);
+      expect(r.stdout).toBe('0\n2\n4\n6\n8\n');
+    });
+
+    it('break inside c-for', async () => {
+      const r = await runner.run(`for ((i=0; i<100; i++)); do
+        if [ "$i" = "3" ]; then break; fi
+        echo $i
+      done`);
+      expect(r.stdout).toBe('0\n1\n2\n');
+    });
+
+    it('continue inside c-for', async () => {
+      const r = await runner.run(`for ((i=0; i<5; i++)); do
+        if [ "$i" = "2" ]; then continue; fi
+        echo $i
+      done`);
+      expect(r.stdout).toBe('0\n1\n3\n4\n');
+    });
+
+    it('variable persists after loop', async () => {
+      const r = await runner.run(`for ((i=0; i<3; i++)); do true; done; echo $i`);
+      expect(r.stdout).toBe('3\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Brace groups
+  // ---------------------------------------------------------------------------
+  describe('brace groups', () => {
+    it('simple brace group', async () => {
+      const r = await runner.run(`{ echo hello; echo world; }`);
+      expect(r.stdout).toBe('hello\nworld\n');
+    });
+
+    it('brace group in pipeline', async () => {
+      const r = await runner.run(`echo "line1" | { cat; }`);
+      expect(r.stdout).toBe('line1\n');
+    });
+
+    it('brace group with read from pipe', async () => {
+      const r = await runner.run(`echo "bob" | { read NAME; echo "got $NAME"; }`);
+      expect(r.stdout).toBe('got bob\n');
+    });
+
+    it('brace group preserves variable scope', async () => {
+      const r = await runner.run(`X=before; { X=inside; }; echo $X`);
+      expect(r.stdout).toBe('inside\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Until loops
+  // ---------------------------------------------------------------------------
+  describe('until loops', () => {
+    it('basic until loop', async () => {
+      const r = await runner.run(`i=0; until [ "$i" = "3" ]; do echo $i; i=$((i+1)); done`);
+      expect(r.stdout).toBe('0\n1\n2\n');
+    });
+
+    it('until with break', async () => {
+      const r = await runner.run(`i=0; until false; do
+        if [ "$i" = "2" ]; then break; fi
+        echo $i; i=$((i+1))
+      done`);
+      expect(r.stdout).toBe('0\n1\n');
+    });
+
+    it('until condition starts true exits immediately', async () => {
+      const r = await runner.run(`until true; do echo "nope"; done; echo "done"`);
+      expect(r.stdout).toBe('done\n');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Recursive glob **
+  // ---------------------------------------------------------------------------
+  describe('recursive glob', () => {
+    it('** matches files recursively', async () => {
+      vfs.mkdir('/home/user/proj');
+      vfs.mkdir('/home/user/proj/src');
+      vfs.mkdir('/home/user/proj/src/sub');
+      vfs.writeFile('/home/user/proj/a.py', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/proj/src/b.py', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/proj/src/sub/c.py', new TextEncoder().encode(''));
+      vfs.writeFile('/home/user/proj/src/sub/d.txt', new TextEncoder().encode(''));
+
+      const r = await runner.run(`cd /home/user/proj && echo **/*.py`);
+      const files = r.stdout.trim().split(' ').sort();
+      expect(files).toContain('a.py');
+      expect(files).toContain('src/b.py');
+      expect(files).toContain('src/sub/c.py');
+      expect(files).not.toContain('src/sub/d.txt');
+    });
+
+    it('** with absolute path', async () => {
+      vfs.mkdir('/tmp/rglob');
+      vfs.mkdir('/tmp/rglob/d1');
+      vfs.writeFile('/tmp/rglob/x.txt', new TextEncoder().encode(''));
+      vfs.writeFile('/tmp/rglob/d1/y.txt', new TextEncoder().encode(''));
+
+      const r = await runner.run(`echo /tmp/rglob/**/*.txt`);
+      const files = r.stdout.trim().split(' ').sort();
+      expect(files).toContain('/tmp/rglob/d1/y.txt');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Negative substring indices
+  // ---------------------------------------------------------------------------
+  describe('negative substring indices', () => {
+    it('${var: -N} extracts last N characters', async () => {
+      const r = await runner.run(`x=hello; echo "\${x: -2}"`);
+      expect(r.stdout).toBe('lo\n');
+    });
+
+    it('${var: -N:M} extracts M chars from -N', async () => {
+      const r = await runner.run(`x=hello; echo "\${x: -3:2}"`);
+      expect(r.stdout).toBe('ll\n');
+    });
+
+    it('${var:0: -1} trims last character', async () => {
+      const r = await runner.run(`x=hello; echo "\${x:0: -1}"`);
+      // Should be "hell" — negative length means end position from end
+      // Actually in bash ${x:0:-1} means "from 0, stop 1 from end" = "hell"
+      expect(r.stdout).toBe('hell\n');
+    });
+
+    it('${var:-default} still works (not confused with substring)', async () => {
+      const r = await runner.run(`echo "\${unset:-fallback}"`);
+      expect(r.stdout).toBe('fallback\n');
     });
   });
 });

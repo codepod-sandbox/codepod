@@ -695,6 +695,35 @@ describe('ShellRunner', () => {
       const result = await runner.run('set -e; set +e; false; echo still-here');
       expect(result.stdout).toContain('still-here');
     });
+
+    it('set -o pipefail reports failure from earlier pipeline stage', async () => {
+      const result = await runner.run('set -o pipefail; false | echo-args ok');
+      expect(result.stdout).toContain('ok');
+      expect(result.exitCode).not.toBe(0);
+    });
+
+    it('without pipefail, pipeline uses last command exit code', async () => {
+      const result = await runner.run('false | echo-args ok');
+      expect(result.stdout).toContain('ok');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('set -o pipefail with all-success pipeline exits 0', async () => {
+      const result = await runner.run('set -o pipefail; echo-args hello | cat-stdin');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello');
+    });
+
+    it('set +o pipefail disables pipefail', async () => {
+      const result = await runner.run('set -o pipefail; set +o pipefail; false | echo-args ok');
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('set -euo pipefail combined flags', async () => {
+      const result = await runner.run('set -euo pipefail; echo-args hello | cat-stdin');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello');
+    });
   });
 
   describe('brace expansion', () => {

@@ -489,11 +489,21 @@ export class ShellRunner extends ShellBuiltins {
     if ('While' in cmd) {
       return this.execWhile(cmd.While);
     }
+    if ('CFor' in cmd) {
+      return this.execCFor(
+        (cmd as { CFor: { init: string; cond: string; step: string; body: Command } }).CFor,
+      );
+    }
     if ('Subshell' in cmd) {
       const savedEnv = new Map(this.env);
       const result = await this.execCommand(cmd.Subshell.body);
       this.env = savedEnv;
       return result;
+    }
+    if ('BraceGroup' in cmd) {
+      return this.execCommand(
+        (cmd as { BraceGroup: { body: Command } }).BraceGroup.body,
+      );
     }
     // Break/Continue already handled as string type above
     if ('Negate' in cmd) {
@@ -570,7 +580,8 @@ export class ShellRunner extends ShellBuiltins {
       } else if (typeof rt === 'object' && 'HeredocStrip' in rt) {
         stdinData = new TextEncoder().encode(rt.HeredocStrip);
       } else if (typeof rt === 'object' && 'HereString' in rt) {
-        stdinData = new TextEncoder().encode(rt.HereString + '\n');
+        const expanded = await this.expandAssignmentValue(rt.HereString);
+        stdinData = new TextEncoder().encode(expanded + '\n');
       }
     }
     // Fall back to pipe stdin from enclosing pipeline (for compound commands)
@@ -634,11 +645,28 @@ export class ShellRunner extends ShellBuiltins {
         }
         this.env.set('#', String(positionals.length));
       } else {
-        for (const arg of args) {
-          if (arg.startsWith('-')) {
-            for (const ch of arg.slice(1)) this.shellFlags.add(ch);
+        for (let si = 0; si < args.length; si++) {
+          const arg = args[si];
+          if (arg === '-o' && si + 1 < args.length) {
+            this.shellFlags.add('o:' + args[++si]);
+          } else if (arg === '+o' && si + 1 < args.length) {
+            this.shellFlags.delete('o:' + args[++si]);
+          } else if (arg.startsWith('-')) {
+            for (const ch of arg.slice(1)) {
+              if (ch === 'o' && si + 1 < args.length) {
+                this.shellFlags.add('o:' + args[++si]);
+                break;
+              }
+              this.shellFlags.add(ch);
+            }
           } else if (arg.startsWith('+')) {
-            for (const ch of arg.slice(1)) this.shellFlags.delete(ch);
+            for (const ch of arg.slice(1)) {
+              if (ch === 'o' && si + 1 < args.length) {
+                this.shellFlags.delete('o:' + args[++si]);
+                break;
+              }
+              this.shellFlags.delete(ch);
+            }
           }
         }
       }
@@ -839,6 +867,8 @@ export class ShellRunner extends ShellBuiltins {
     let stdinData: Uint8Array | undefined;
     let lastResult: RunResult = { ...EMPTY_RESULT };
     const encoder = new TextEncoder();
+    const pipefail = this.shellFlags.has('o:pipefail');
+    let pipefailCode = 0;
 
     for (let i = 0; i < pipeline.commands.length; i++) {
       const cmd = pipeline.commands[i];
@@ -890,7 +920,17 @@ export class ShellRunner extends ShellBuiltins {
         }
       }
 
+      // Track non-zero exit codes for pipefail
+      if (pipefail && lastResult.exitCode !== 0) {
+        pipefailCode = lastResult.exitCode;
+      }
+
       stdinData = encoder.encode(lastResult.stdout);
+    }
+
+    // With pipefail, use the last non-zero exit code from any stage
+    if (pipefail && pipefailCode !== 0 && lastResult.exitCode === 0) {
+      lastResult = { ...lastResult, exitCode: pipefailCode };
     }
 
     return lastResult;
@@ -1038,6 +1078,59 @@ export class ShellRunner extends ShellBuiltins {
         if (e instanceof BreakSignal) break;
         if (e instanceof ContinueSignal) continue;
         throw e;
+      }
+    }
+
+    return {
+      exitCode: lastExitCode,
+      stdout: combinedStdout,
+      stderr: combinedStderr,
+      executionTimeMs: totalTime,
+    };
+  }
+
+  private async execCFor(cfor: {
+    init: string;
+    cond: string;
+    step: string;
+    body: Command;
+  }): Promise<RunResult> {
+    // Evaluate init expression
+    if (cfor.init) {
+      this.evalArithmetic(cfor.init);
+    }
+
+    let combinedStdout = '';
+    let combinedStderr = '';
+    let lastExitCode = 0;
+    let totalTime = 0;
+    const MAX_ITERATIONS = 100_000;
+
+    for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+      // Evaluate condition — empty condition means infinite loop (like C)
+      if (cfor.cond) {
+        const condVal = this.evalArithmetic(cfor.cond);
+        if (condVal === 0) break; // 0 = false in C arithmetic
+      }
+
+      try {
+        const result = await this.execCommand(cfor.body);
+        combinedStdout += result.stdout;
+        combinedStderr += result.stderr;
+        lastExitCode = result.exitCode;
+        totalTime += result.executionTimeMs;
+      } catch (e) {
+        if (e instanceof BreakSignal) break;
+        if (e instanceof ContinueSignal) {
+          // fall through to step
+        } else {
+          throw e;
+        }
+      }
+
+      // Evaluate step expression
+      if (cfor.step) {
+        this.evalArithmetic(cfor.step);
       }
     }
 
@@ -1272,9 +1365,16 @@ export class ShellRunner extends ShellBuiltins {
         case ':': {
           const s = val ?? '';
           const parts = operand.split(':');
-          const offset = parseInt(parts[0], 10) || 0;
+          let offset = parseInt(parts[0], 10) || 0;
+          // Negative offset: count from end of string
+          if (offset < 0) offset = Math.max(0, s.length + offset);
           if (parts.length > 1) {
             const length = parseInt(parts[1], 10);
+            if (length < 0) {
+              // Negative length: end position counted from end
+              const endPos = Math.max(0, s.length + length);
+              return s.slice(offset, endPos);
+            }
             return s.slice(offset, offset + length);
           }
           return s.slice(offset);
@@ -1808,10 +1908,15 @@ export class ShellRunner extends ShellBuiltins {
 
   /**
    * Match a glob pattern against VFS entries.
-   * Supports * (any sequence) and ? (any single char).
+   * Supports * (any sequence), ? (any single char), and ** (recursive).
    * Pattern may be absolute (/tmp/*.txt) or relative (*.txt).
    */
   private globMatch(pattern: string): string[] {
+    // If pattern contains **, use recursive matching
+    if (pattern.includes('**')) {
+      return this.globMatchRecursive(pattern);
+    }
+
     // Split into directory part and filename pattern
     const lastSlash = pattern.lastIndexOf('/');
     let dirPath: string;
@@ -1821,18 +1926,11 @@ export class ShellRunner extends ShellBuiltins {
       dirPath = pattern.slice(0, lastSlash) || '/';
       filePattern = pattern.slice(lastSlash + 1);
     } else {
-      // Relative: use PWD
       dirPath = this.env.get('PWD') || '/';
       filePattern = pattern;
     }
 
-    // Convert glob pattern to regex
-    const regexStr = '^' + filePattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // escape regex specials
-      .replace(/\*/g, '.*')                     // * → .*
-      .replace(/\?/g, '.')                      // ? → .
-      + '$';
-    const regex = new RegExp(regexStr);
+    const regex = this.fileGlobToRegex(filePattern);
 
     try {
       const entries = this.vfs.readdir(dirPath);
@@ -1850,6 +1948,100 @@ export class ShellRunner extends ShellBuiltins {
     } catch {
       return [];
     }
+  }
+
+  /** Convert a simple file glob (no path separators) to a RegExp. */
+  private fileGlobToRegex(pat: string): RegExp {
+    const regexStr = '^' + pat
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '.*')
+      .replace(/\?/g, '.')
+      + '$';
+    return new RegExp(regexStr);
+  }
+
+  /**
+   * Recursive glob matching for patterns containing **.
+   * ** matches zero or more directory levels.
+   */
+  private globMatchRecursive(pattern: string): string[] {
+    const pwd = this.env.get('PWD') || '/';
+    const isAbsolute = pattern.startsWith('/');
+
+    // Determine the fixed prefix before the first glob segment
+    const segments = pattern.split('/').filter(s => s !== '');
+    let fixedPrefixSegments: string[] = [];
+    let globSegments: string[] = [];
+    let hitGlob = false;
+    for (const seg of segments) {
+      if (!hitGlob && !seg.includes('*') && !seg.includes('?')) {
+        fixedPrefixSegments.push(seg);
+      } else {
+        hitGlob = true;
+        globSegments.push(seg);
+      }
+    }
+
+    const baseDir = isAbsolute
+      ? (fixedPrefixSegments.length > 0 ? '/' + fixedPrefixSegments.join('/') : '/')
+      : (fixedPrefixSegments.length > 0
+        ? pwd + '/' + fixedPrefixSegments.join('/')
+        : pwd);
+
+    // Collect all files recursively
+    const walkDir = (dir: string): string[] => {
+      const results: string[] = [];
+      try {
+        const entries = this.vfs.readdir(dir);
+        for (const entry of entries) {
+          const fullPath = dir === '/' ? `/${entry.name}` : `${dir}/${entry.name}`;
+          results.push(fullPath);
+          if (entry.type === 'dir') {
+            results.push(...walkDir(fullPath));
+          }
+        }
+      } catch { /* ignore */ }
+      return results;
+    };
+
+    // Build regex from glob segments only
+    const regexParts: string[] = [];
+    for (const seg of globSegments) {
+      if (seg === '**') {
+        regexParts.push('(?:.+/)?'); // zero or more directory levels
+      } else {
+        const part = seg
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '[^/]*')
+          .replace(/\?/g, '[^/]');
+        regexParts.push(part + '/');
+      }
+    }
+    let regexStr = regexParts.join('');
+    if (regexStr.endsWith('/')) regexStr = regexStr.slice(0, -1);
+    regexStr = '^' + regexStr + '$';
+    const regex = new RegExp(regexStr);
+
+    const allFiles = walkDir(baseDir);
+    const matches: string[] = [];
+    const prefix = baseDir === '/' ? '/' : baseDir + '/';
+    for (const filePath of allFiles) {
+      // Strip the base directory prefix to get the part matched by glob segments
+      if (!filePath.startsWith(prefix)) continue;
+      const relative = filePath.slice(prefix.length);
+      if (regex.test(relative)) {
+        if (isAbsolute) {
+          matches.push(filePath);
+        } else {
+          // Reconstruct relative path from PWD
+          const fromPwd = filePath.startsWith(pwd + '/')
+            ? filePath.slice(pwd.length + 1)
+            : filePath;
+          matches.push(fromPwd);
+        }
+      }
+    }
+    return matches;
   }
 
   private async execCase(caseCmd: { word: Word; items: CaseItem[] }): Promise<RunResult> {
@@ -1878,6 +2070,51 @@ export class ShellRunner extends ShellBuiltins {
 
   /** Evaluate a shell arithmetic expression. */
   private evalArithmetic(expr: string): number {
+    // Handle comma expressions: eval each part, return last
+    if (expr.includes(',')) {
+      const parts = expr.split(',');
+      let result = 0;
+      for (const part of parts) {
+        result = this.evalArithmetic(part.trim());
+      }
+      return result;
+    }
+
+    // Handle post-increment/decrement: VAR++, VAR--
+    const postMatch = expr.match(/^\s*([a-zA-Z_]\w*)\s*(\+\+|--)\s*$/);
+    if (postMatch) {
+      const cur = parseInt(this.env.get(postMatch[1]) ?? '0', 10) || 0;
+      this.env.set(postMatch[1], String(postMatch[2] === '++' ? cur + 1 : cur - 1));
+      return cur; // post: return old value
+    }
+
+    // Handle pre-increment/decrement: ++VAR, --VAR
+    const preMatch = expr.match(/^\s*(\+\+|--)([a-zA-Z_]\w*)\s*$/);
+    if (preMatch) {
+      const cur = parseInt(this.env.get(preMatch[2]) ?? '0', 10) || 0;
+      const newVal = preMatch[1] === '++' ? cur + 1 : cur - 1;
+      this.env.set(preMatch[2], String(newVal));
+      return newVal; // pre: return new value
+    }
+
+    // Handle compound assignment: VAR+=expr, VAR-=expr, VAR*=expr, VAR/=expr, VAR%=expr
+    const compoundMatch = expr.match(/^\s*([a-zA-Z_]\w*)\s*([+\-*/%])=\s*(.+)$/);
+    if (compoundMatch) {
+      const cur = parseInt(this.env.get(compoundMatch[1]) ?? '0', 10) || 0;
+      const rhs = this.evalArithmetic(compoundMatch[3]);
+      let result: number;
+      switch (compoundMatch[2]) {
+        case '+': result = cur + rhs; break;
+        case '-': result = cur - rhs; break;
+        case '*': result = cur * rhs; break;
+        case '/': result = rhs !== 0 ? Math.trunc(cur / rhs) : 0; break;
+        case '%': result = rhs !== 0 ? cur % rhs : 0; break;
+        default: result = rhs;
+      }
+      this.env.set(compoundMatch[1], String(result));
+      return result;
+    }
+
     // Handle simple assignment: VAR=expr (before variable expansion)
     const assignMatch = expr.match(/^\s*([a-zA-Z_]\w*)\s*=\s*(.+)$/);
     if (assignMatch) {

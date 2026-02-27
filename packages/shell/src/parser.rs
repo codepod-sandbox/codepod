@@ -87,6 +87,8 @@ impl Parser {
                     | Token::Continue
                     | Token::Bang
                     | Token::Case
+                    | Token::LBrace
+                    | Token::Until
             ),
         }
     }
@@ -186,8 +188,19 @@ impl Parser {
             Some(Token::If) => self.parse_if(),
             Some(Token::For) => self.parse_for(),
             Some(Token::While) => self.parse_while(),
+            Some(Token::Until) => self.parse_until(),
             Some(Token::Case) => self.parse_case(),
             Some(Token::LParen) => self.parse_subshell(),
+            Some(Token::LBrace) => {
+                self.advance(); // consume {
+                self.skip_separators();
+                let body = self.parse_list();
+                self.skip_separators();
+                self.expect(&Token::RBrace);
+                Command::BraceGroup {
+                    body: Box::new(body),
+                }
+            }
             Some(Token::Break) => {
                 self.advance();
                 Command::Break
@@ -354,8 +367,15 @@ impl Parser {
     }
 
     /// for_clause = FOR word IN word* SEMI? DO list DONE
+    ///           | FOR (( init ; cond ; step )) SEMI? DO list DONE
     fn parse_for(&mut self) -> Command {
         self.expect(&Token::For);
+
+        // Check for C-style: for (( ... ))
+        if matches!(self.peek(), Some(Token::DoubleParen(_))) {
+            return self.parse_c_for();
+        }
+
         let var = match self.advance() {
             Token::Word(w) => w,
             other => panic!("expected variable name after 'for', got {:?}", other),
@@ -411,6 +431,33 @@ impl Parser {
         }
     }
 
+    /// c_for = FOR DoubleParen SEMI? DO list DONE
+    fn parse_c_for(&mut self) -> Command {
+        let content = match self.advance() {
+            Token::DoubleParen(s) => s,
+            other => panic!("expected ((...)) after 'for', got {:?}", other),
+        };
+
+        // Split on ';' to get init, cond, step
+        let parts: Vec<&str> = content.splitn(3, ';').collect();
+        let init = parts.first().map(|s| s.trim()).unwrap_or("").to_string();
+        let cond = parts.get(1).map(|s| s.trim()).unwrap_or("").to_string();
+        let step = parts.get(2).map(|s| s.trim()).unwrap_or("").to_string();
+
+        self.skip_separators();
+        self.expect(&Token::Do);
+        let body = self.parse_list();
+        self.skip_separators();
+        self.expect(&Token::Done);
+
+        Command::CFor {
+            init,
+            cond,
+            step,
+            body: Box::new(body),
+        }
+    }
+
     /// while_clause = WHILE list SEMI? DO list DONE
     fn parse_while(&mut self) -> Command {
         self.expect(&Token::While);
@@ -423,6 +470,25 @@ impl Parser {
 
         Command::While {
             condition: Box::new(condition),
+            body: Box::new(body),
+        }
+    }
+
+    /// until_clause = UNTIL list SEMI? DO list DONE
+    /// Desugars to: while ! condition; do body; done
+    fn parse_until(&mut self) -> Command {
+        self.expect(&Token::Until);
+        let condition = self.parse_list();
+        self.skip_separators();
+        self.expect(&Token::Do);
+        let body = self.parse_list();
+        self.skip_separators();
+        self.expect(&Token::Done);
+
+        Command::While {
+            condition: Box::new(Command::Negate {
+                body: Box::new(condition),
+            }),
             body: Box::new(body),
         }
     }

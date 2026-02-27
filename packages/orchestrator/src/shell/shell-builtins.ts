@@ -339,35 +339,65 @@ export abstract class ShellBuiltins {
   /** Builtin: read — read a line from stdin and assign to variables. */
   protected builtinRead(args: string[], stdinData: Uint8Array | undefined): RunResult {
     let raw = false;
+    let delimiter = '\n';
+    let nchars = -1; // -1 means unlimited
+    let arrayVar: string | undefined;
     const varNames: string[] = [];
-    for (const a of args) {
+
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
       if (a === '-r') { raw = true; continue; }
+      if (a === '-d' && i + 1 < args.length) { delimiter = args[++i]; continue; }
+      if (a === '-n' && i + 1 < args.length) { nchars = parseInt(args[++i], 10) || 0; continue; }
+      if (a === '-p' && i + 1 < args.length) { i++; continue; } // skip prompt (no terminal)
+      if (a === '-a' && i + 1 < args.length) { arrayVar = args[++i]; continue; }
+      if (a === '-s') continue; // silent — no terminal, skip
       varNames.push(a);
     }
-    if (varNames.length === 0) varNames.push('REPLY');
+    if (!arrayVar && varNames.length === 0) varNames.push('REPLY');
 
-    // Get first line from stdin
     const input = stdinData ? new TextDecoder().decode(stdinData) : '';
-    const nlIndex = input.indexOf('\n');
-    const firstLine = nlIndex !== -1 ? input.slice(0, nlIndex) : input;
-    if (!stdinData?.length || (firstLine === '' && input === '')) {
+    if (!stdinData?.length || input === '') {
       return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
     }
-    const line = raw ? firstLine : firstLine.replace(/\\(.)/g, '$1');
-    const parts = line.split(/[ \t]+/);
-    for (let i = 0; i < varNames.length; i++) {
-      if (i === varNames.length - 1) {
-        // Last variable gets the remainder
-        this.env.set(varNames[i], parts.slice(i).join(' '));
+
+    // Determine how much input to consume
+    let consumed: string;
+    let consumedLen: number; // bytes past the delimiter
+    if (nchars >= 0) {
+      consumed = input.slice(0, nchars);
+      consumedLen = consumed.length;
+    } else {
+      const delimIdx = input.indexOf(delimiter);
+      if (delimIdx !== -1) {
+        consumed = input.slice(0, delimIdx);
+        consumedLen = delimIdx + delimiter.length;
       } else {
-        this.env.set(varNames[i], parts[i] ?? '');
+        consumed = input;
+        consumedLen = input.length;
       }
     }
 
-    // Advance pipeStdin past the consumed line so the next `read` in a
-    // while loop gets the next line instead of re-reading the same one.
+    const line = raw ? consumed : consumed.replace(/\\(.)/g, '$1');
+
+    if (arrayVar) {
+      // -a: split into array
+      const elements = line.length > 0 ? line.split(/[ \t]+/) : [];
+      this.arrays.set(arrayVar, elements);
+    } else {
+      const parts = line.split(/[ \t]+/);
+      for (let i = 0; i < varNames.length; i++) {
+        if (i === varNames.length - 1) {
+          this.env.set(varNames[i], parts.slice(i).join(' '));
+        } else {
+          this.env.set(varNames[i], parts[i] ?? '');
+        }
+      }
+    }
+
+    // Advance pipeStdin past the consumed content
     if (this.pipeStdin && stdinData === this.pipeStdin) {
-      const remaining = nlIndex !== -1 ? input.slice(nlIndex + 1) : '';
+      const remaining = input.slice(consumedLen);
       this.pipeStdin = remaining.length > 0
         ? new TextEncoder().encode(remaining)
         : undefined;

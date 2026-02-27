@@ -42,6 +42,7 @@ pub enum Token {
     Do,
     Done,
     While,
+    Until,
     Break,
     Continue,
     Case,
@@ -54,6 +55,8 @@ pub enum Token {
     LBrace,
     /// `}`
     RBrace,
+    /// `(( ... ))` — arithmetic/C-for expression (raw content between the parens).
+    DoubleParen(String),
 }
 
 /// The kind of I/O redirection.

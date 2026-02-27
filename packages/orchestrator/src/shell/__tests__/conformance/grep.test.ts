@@ -378,4 +378,140 @@ describe('grep conformance', () => {
       expect(r.stdout).toContain('readme.txt');
     });
   });
+
+  // ---- Word match (-w) ----
+  describe('word match (-w)', () => {
+    it('-w matches whole words only', async () => {
+      vfs.writeFile('/home/user/words.txt', new TextEncoder().encode(
+        'test\ntesting\ncontest\ntest case\n'
+      ));
+      const r = await runner.run('grep -w "test" /home/user/words.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('test');
+      expect(r.stdout).toContain('test case');
+      expect(r.stdout).not.toContain('testing');
+      expect(r.stdout).not.toContain('contest');
+    });
+
+    it('-wi case insensitive word match', async () => {
+      const r = await runner.run('echo "Test testing TEST" | grep -ow -i "test"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('Test\nTEST\n');
+    });
+
+    it('-w with no word boundary match exits 1', async () => {
+      const r = await runner.run('echo "testing" | grep -w "test"');
+      expect(r.exitCode).toBe(1);
+    });
+  });
+
+  // ---- Quiet mode (-q) ----
+  describe('quiet mode (-q)', () => {
+    it('-q produces no output on match', async () => {
+      const r = await runner.run('grep -q "hello" /home/user/test.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('');
+    });
+
+    it('-q exits 1 on no match', async () => {
+      const r = await runner.run('grep -q "nonexistent" /home/user/test.txt');
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toBe('');
+    });
+
+    it('-q in conditional', async () => {
+      const r = await runner.run('if grep -q "hello" /home/user/test.txt; then echo found; else echo missing; fi');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('found');
+    });
+  });
+
+  // ---- Fixed string (-F) ----
+  describe('fixed string (-F)', () => {
+    it('-F matches literal string', async () => {
+      vfs.writeFile('/home/user/special.txt', new TextEncoder().encode(
+        'price: $10.00\nfoo.bar\nfoo+bar\n'
+      ));
+      const r = await runner.run('grep -F "foo.bar" /home/user/special.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('foo.bar');
+    });
+
+    it('-F does not interpret regex metacharacters', async () => {
+      vfs.writeFile('/home/user/meta.txt', new TextEncoder().encode(
+        'a+b\na.b\na*b\n'
+      ));
+      const r = await runner.run('grep -F "a+b" /home/user/meta.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('a+b');
+    });
+
+    it('-Fi case insensitive fixed string', async () => {
+      const r = await runner.run('echo "Hello.World" | grep -Fi "hello.world"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('Hello.World');
+    });
+  });
+
+  // ---- Suppress errors (-s) ----
+  describe('suppress errors (-s)', () => {
+    it('-s suppresses file not found errors', async () => {
+      const r = await runner.run('grep -s "hello" /home/user/nonexistent.txt');
+      expect(r.exitCode).not.toBe(0);
+      expect(r.stderr).toBe('');
+    });
+  });
+
+  // ---- Context lines (-A, -B, -C) ----
+  describe('context lines', () => {
+    beforeEach(() => {
+      vfs.writeFile('/home/user/ctx.txt', new TextEncoder().encode(
+        'line1\nline2\nMATCH\nline4\nline5\nline6\nMATCH2\nline8\n'
+      ));
+    });
+
+    it('-A N prints N lines after match', async () => {
+      const r = await runner.run('grep -A 1 "MATCH" /home/user/ctx.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('MATCH');
+      expect(r.stdout).toContain('line4');
+    });
+
+    it('-B N prints N lines before match', async () => {
+      const r = await runner.run('grep -B 1 "MATCH2" /home/user/ctx.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('line6');
+      expect(r.stdout).toContain('MATCH2');
+    });
+
+    it('-C N prints N lines before and after', async () => {
+      vfs.writeFile('/home/user/ctx2.txt', new TextEncoder().encode(
+        'a\nb\nc\nTARGET\nd\ne\nf\n'
+      ));
+      const r = await runner.run('grep -C 1 "TARGET" /home/user/ctx2.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('c');
+      expect(r.stdout).toContain('TARGET');
+      expect(r.stdout).toContain('d');
+    });
+
+    it('-A with line numbers uses - separator for context', async () => {
+      const r = await runner.run('grep -nA 1 "MATCH2" /home/user/ctx.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('7:MATCH2');
+      expect(r.stdout).toContain('8-line8');
+    });
+
+    it('-B with line numbers uses - separator for context', async () => {
+      const r = await runner.run('grep -nB 1 "MATCH2" /home/user/ctx.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('6-line6');
+      expect(r.stdout).toContain('7:MATCH2');
+    });
+
+    it('context with no match exits 1', async () => {
+      const r = await runner.run('grep -A 2 "NOPE" /home/user/ctx.txt');
+      expect(r.exitCode).toBe(1);
+    });
+  });
 });

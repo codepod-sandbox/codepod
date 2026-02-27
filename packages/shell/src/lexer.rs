@@ -44,6 +44,32 @@ pub fn lex(input: &str) -> Vec<Token> {
 
         // Parentheses
         if chars[pos] == '(' {
+            // (( ... )) — arithmetic / C-style for expression
+            if pos + 1 < len && chars[pos + 1] == '(' {
+                pos += 2; // skip "(("
+                let mut depth = 1;
+                let mut content = String::new();
+                while pos < len && depth > 0 {
+                    if pos + 1 < len && chars[pos] == ')' && chars[pos + 1] == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            pos += 2; // skip "))"
+                            break;
+                        }
+                    }
+                    if pos + 1 < len && chars[pos] == '(' && chars[pos + 1] == '(' {
+                        depth += 1;
+                        content.push('(');
+                        content.push('(');
+                        pos += 2;
+                        continue;
+                    }
+                    content.push(chars[pos]);
+                    pos += 1;
+                }
+                tokens.push(Token::DoubleParen(content.trim().to_string()));
+                continue;
+            }
             tokens.push(Token::LParen);
             pos += 1;
             continue;
@@ -808,6 +834,7 @@ fn classify_word(word: String) -> Token {
         "do" => Token::Do,
         "done" => Token::Done,
         "while" => Token::While,
+        "until" => Token::Until,
         "break" => Token::Break,
         "continue" => Token::Continue,
         "case" => Token::Case,
@@ -843,21 +870,33 @@ fn parse_braced_var(content: &str) -> WordPart {
         }
     }
 
-    // Substring: ${var:N} or ${var:N:M} — colon followed by digit or negative
+    // Substring: ${var:N} or ${var:N:M} — colon followed by digit
+    // Negative offset requires a space: ${var: -N} (to distinguish from ${var:-default})
     // Must check before :- :+ := :? operators
     if let Some(colon_pos) = content.find(':') {
         let var_name = &content[..colon_pos];
         let after = &content[colon_pos + 1..];
         if !var_name.is_empty() && is_valid_var_name(var_name) && !after.is_empty() {
             let first_char = after.as_bytes()[0];
-            // Digit means substring; '-' followed by digit means negative offset
-            if first_char.is_ascii_digit()
-                || (first_char == b'-' && after.len() > 1 && after.as_bytes()[1].is_ascii_digit())
-            {
+            if first_char.is_ascii_digit() {
+                // Positive offset: ${var:2} or ${var:2:3}
                 return WordPart::ParamExpansion {
                     var: var_name.to_string(),
                     op: ":".to_string(),
                     default: after.to_string(),
+                };
+            }
+            // Negative offset with space: ${var: -2} or ${var: -2:3}
+            let trimmed = after.trim_start();
+            if after.starts_with(' ')
+                && trimmed.starts_with('-')
+                && trimmed.len() > 1
+                && trimmed.as_bytes()[1].is_ascii_digit()
+            {
+                return WordPart::ParamExpansion {
+                    var: var_name.to_string(),
+                    op: ":".to_string(),
+                    default: trimmed.to_string(),
                 };
             }
         }

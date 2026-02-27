@@ -16,6 +16,12 @@ struct Options {
     recursive: bool,
     extended: bool,
     only_matching: bool,
+    word_match: bool,
+    quiet: bool,
+    fixed_string: bool,
+    suppress_errors: bool,
+    after_context: usize,
+    before_context: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -73,14 +79,27 @@ fn grep_reader<R: io::Read>(
     let buf = BufReader::new(reader);
     let mut match_count: usize = 0;
     let mut found = false;
+    let has_context = opts.before_context > 0 || opts.after_context > 0;
 
-    for (i, line_result) in buf.lines().enumerate() {
-        let line = line_result?;
-        let is_match = re.is_match(&line);
+    // For -B context: ring buffer of previous lines
+    let mut before_buf: Vec<(usize, String)> = Vec::new();
+    // Track how many after-context lines remain to print
+    let mut after_remaining: usize = 0;
+    // Track last printed line number to insert "--" separators
+    let mut last_printed_line: Option<usize> = None;
+
+    let lines: Vec<String> = buf.lines().collect::<io::Result<Vec<_>>>()?;
+
+    for (i, line) in lines.iter().enumerate() {
+        let is_match = re.is_match(line);
         let selected = if opts.invert { !is_match } else { is_match };
 
         if selected {
             found = true;
+
+            if opts.quiet {
+                return Ok(true);
+            }
 
             if opts.files_with_matches {
                 println!("{}", filename);
@@ -89,7 +108,7 @@ fn grep_reader<R: io::Read>(
 
             // -o with -v is undefined; ignore -o in that case
             if opts.only_matching && !opts.invert {
-                for m in re.find_iter(&line) {
+                for m in re.find_iter(line) {
                     if opts.count_only {
                         match_count += 1;
                         continue;
@@ -112,6 +131,38 @@ fn grep_reader<R: io::Read>(
                 continue;
             }
 
+            // Print before-context lines
+            if has_context {
+                for (bi, bline) in &before_buf {
+                    // Add group separator if there's a gap
+                    if let Some(lp) = last_printed_line {
+                        if *bi > lp + 1 {
+                            println!("--");
+                        }
+                    }
+                    let mut prefix = String::new();
+                    if show_filename {
+                        prefix.push_str(filename);
+                        prefix.push('-');
+                    }
+                    if opts.line_numbers {
+                        prefix.push_str(&format!("{}-", bi + 1));
+                    }
+                    println!("{}{}", prefix, bline);
+                    last_printed_line = Some(*bi);
+                }
+                before_buf.clear();
+            }
+
+            // Add group separator if there's a gap
+            if has_context {
+                if let Some(lp) = last_printed_line {
+                    if i > lp + 1 {
+                        println!("--");
+                    }
+                }
+            }
+
             let mut prefix = String::new();
             if show_filename {
                 prefix.push_str(filename);
@@ -121,10 +172,38 @@ fn grep_reader<R: io::Read>(
                 prefix.push_str(&format!("{}:", i + 1));
             }
             println!("{}{}", prefix, line);
+            last_printed_line = Some(i);
+            after_remaining = opts.after_context;
+        } else if after_remaining > 0 && !opts.count_only && !opts.quiet && !opts.files_with_matches
+        {
+            // Print after-context line
+            let mut prefix = String::new();
+            if show_filename {
+                prefix.push_str(filename);
+                prefix.push('-');
+            }
+            if opts.line_numbers {
+                prefix.push_str(&format!("{}-", i + 1));
+            }
+            println!("{}{}", prefix, line);
+            last_printed_line = Some(i);
+            after_remaining -= 1;
+        } else {
+            // Buffer for before-context
+            if opts.before_context > 0 {
+                before_buf.push((i, line.clone()));
+                if before_buf.len() > opts.before_context {
+                    before_buf.remove(0);
+                }
+            }
+            after_remaining = 0;
         }
     }
 
     if opts.count_only {
+        if opts.quiet {
+            return Ok(found);
+        }
         if show_filename {
             println!("{}:{}", filename, match_count);
         } else {
@@ -164,7 +243,15 @@ fn grep_path(
         }
         Ok(found)
     } else {
-        let f = File::open(path)?;
+        let f = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                if !opts.suppress_errors {
+                    eprintln!("grep: {}: {}", path.display(), e);
+                }
+                return Err(e);
+            }
+        };
         grep_reader(f, re, opts, &path.display().to_string(), show_filename)
     }
 }
@@ -181,22 +268,61 @@ fn main() {
         recursive: false,
         extended: false,
         only_matching: false,
+        word_match: false,
+        quiet: false,
+        fixed_string: false,
+        suppress_errors: false,
+        after_context: 0,
+        before_context: 0,
     };
     let mut positional: Vec<String> = Vec::new();
     let mut past_flags = false;
 
-    for arg in &args[1..] {
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
         if past_flags {
             positional.push(arg.clone());
+            i += 1;
             continue;
         }
         if arg == "--" {
             past_flags = true;
+            i += 1;
+            continue;
+        }
+        // Long options and options with values
+        if arg == "-A" || arg == "--after-context" {
+            i += 1;
+            if i < args.len() {
+                opts.after_context = args[i].parse().unwrap_or(0);
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "-B" || arg == "--before-context" {
+            i += 1;
+            if i < args.len() {
+                opts.before_context = args[i].parse().unwrap_or(0);
+            }
+            i += 1;
+            continue;
+        }
+        if arg == "-C" || arg == "--context" {
+            i += 1;
+            if i < args.len() {
+                let n = args[i].parse().unwrap_or(0);
+                opts.before_context = n;
+                opts.after_context = n;
+            }
+            i += 1;
             continue;
         }
         if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
-            for ch in arg[1..].chars() {
-                match ch {
+            let chars: Vec<char> = arg[1..].chars().collect();
+            let mut ci = 0;
+            while ci < chars.len() {
+                match chars[ci] {
                     'i' => opts.ignore_case = true,
                     'v' => opts.invert = true,
                     'c' => opts.count_only = true,
@@ -205,15 +331,45 @@ fn main() {
                     'r' | 'R' => opts.recursive = true,
                     'E' => opts.extended = true,
                     'o' => opts.only_matching = true,
+                    'w' => opts.word_match = true,
+                    'q' => opts.quiet = true,
+                    'F' => opts.fixed_string = true,
+                    's' => opts.suppress_errors = true,
+                    'A' | 'B' | 'C' => {
+                        // Value may be remainder of this arg or the next arg
+                        let val_str = if ci + 1 < chars.len() {
+                            chars[ci + 1..].iter().collect::<String>()
+                        } else {
+                            i += 1;
+                            if i < args.len() {
+                                args[i].clone()
+                            } else {
+                                "0".to_string()
+                            }
+                        };
+                        let val: usize = val_str.parse().unwrap_or(0);
+                        match chars[ci] {
+                            'A' => opts.after_context = val,
+                            'B' => opts.before_context = val,
+                            'C' => {
+                                opts.before_context = val;
+                                opts.after_context = val;
+                            }
+                            _ => unreachable!(),
+                        }
+                        break; // consumed rest of this arg
+                    }
                     _ => {
-                        eprintln!("grep: invalid option -- '{}'", ch);
+                        eprintln!("grep: invalid option -- '{}'", chars[ci]);
                         process::exit(2);
                     }
                 }
+                ci += 1;
             }
         } else {
             positional.push(arg.clone());
         }
+        i += 1;
     }
 
     if positional.is_empty() {
@@ -223,11 +379,16 @@ fn main() {
     }
 
     let pattern = &positional[0];
-    let pattern_str = if opts.extended {
+    let mut pattern_str = if opts.fixed_string {
+        regex::escape(pattern)
+    } else if opts.extended {
         pattern.clone()
     } else {
         bre_to_ere(pattern)
     };
+    if opts.word_match {
+        pattern_str = format!(r"\b{}\b", pattern_str);
+    }
     let re = RegexBuilder::new(&pattern_str)
         .case_insensitive(opts.ignore_case)
         .build()
@@ -264,17 +425,19 @@ fn main() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("grep: {}: {}", file, e);
+                    if !opts.suppress_errors {
+                        eprintln!("grep: {}: {}", file, e);
+                    }
                     had_error = true;
                 }
             }
         }
     }
 
-    if had_error {
-        process::exit(2);
-    } else if found_any {
+    if found_any {
         process::exit(0);
+    } else if had_error && !opts.suppress_errors {
+        process::exit(2);
     } else {
         process::exit(1);
     }
