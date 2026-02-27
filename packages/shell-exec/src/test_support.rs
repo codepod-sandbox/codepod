@@ -1,12 +1,16 @@
 #[cfg(test)]
 pub mod mock {
+    use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
 
     use crate::host::{CancelStatus, HostError, HostInterface, SpawnResult, StatInfo, WriteMode};
 
     /// An in-memory mock implementation of `HostInterface` for testing.
+    ///
+    /// Uses `RefCell` for the files map so that `write_file` can mutate state
+    /// through a `&self` reference (as required by the `HostInterface` trait).
     pub struct MockHost {
-        files: HashMap<String, Vec<u8>>,
+        files: RefCell<HashMap<String, Vec<u8>>>,
         dirs: HashSet<String>,
         tools: HashSet<String>,
         spawn_results: HashMap<String, SpawnResult>,
@@ -22,7 +26,7 @@ pub mod mock {
     impl MockHost {
         pub fn new() -> Self {
             Self {
-                files: HashMap::new(),
+                files: RefCell::new(HashMap::new()),
                 dirs: HashSet::new(),
                 tools: HashSet::new(),
                 spawn_results: HashMap::new(),
@@ -43,8 +47,10 @@ pub mod mock {
         }
 
         /// Add a file with the given content.
-        pub fn with_file(mut self, path: &str, content: &[u8]) -> Self {
-            self.files.insert(path.to_string(), content.to_vec());
+        pub fn with_file(self, path: &str, content: &[u8]) -> Self {
+            self.files
+                .borrow_mut()
+                .insert(path.to_string(), content.to_vec());
             self
         }
 
@@ -58,6 +64,14 @@ pub mod mock {
         pub fn with_glob_result(mut self, pattern: &str, matches: Vec<String>) -> Self {
             self.glob_results.insert(pattern.to_string(), matches);
             self
+        }
+
+        /// Read a file's content from the mock filesystem (for test assertions).
+        pub fn get_file(&self, path: &str) -> Option<String> {
+            self.files
+                .borrow()
+                .get(path)
+                .and_then(|data| String::from_utf8(data.clone()).ok())
         }
     }
 
@@ -94,7 +108,8 @@ pub mod mock {
         }
 
         fn stat(&self, path: &str) -> Result<StatInfo, HostError> {
-            if let Some(data) = self.files.get(path) {
+            let files = self.files.borrow();
+            if let Some(data) = files.get(path) {
                 Ok(StatInfo {
                     exists: true,
                     is_file: true,
@@ -128,16 +143,24 @@ pub mod mock {
         }
 
         fn read_file(&self, path: &str) -> Result<String, HostError> {
-            match self.files.get(path) {
+            match self.files.borrow().get(path) {
                 Some(data) => String::from_utf8(data.clone())
                     .map_err(|e| HostError::IoError(format!("invalid UTF-8: {e}"))),
                 None => Err(HostError::NotFound(path.to_string())),
             }
         }
 
-        fn write_file(&self, _path: &str, _data: &str, _mode: WriteMode) -> Result<(), HostError> {
-            // Note: MockHost uses interior mutability only when needed.
-            // For testing write_file we'd need RefCell; stub for now.
+        fn write_file(&self, path: &str, data: &str, mode: WriteMode) -> Result<(), HostError> {
+            let mut files = self.files.borrow_mut();
+            match mode {
+                WriteMode::Truncate => {
+                    files.insert(path.to_string(), data.as_bytes().to_vec());
+                }
+                WriteMode::Append => {
+                    let entry = files.entry(path.to_string()).or_default();
+                    entry.extend_from_slice(data.as_bytes());
+                }
+            }
             Ok(())
         }
 
@@ -147,8 +170,9 @@ pub mod mock {
             } else {
                 format!("{path}/")
             };
+            let files = self.files.borrow();
             let mut entries = HashSet::new();
-            for key in self.files.keys() {
+            for key in files.keys() {
                 if let Some(rest) = key.strip_prefix(&prefix) {
                     if let Some(name) = rest.split('/').next() {
                         if !name.is_empty() {
@@ -172,12 +196,10 @@ pub mod mock {
         }
 
         fn mkdir(&self, _path: &str) -> Result<(), HostError> {
-            // Stub: in a full implementation we'd use RefCell for mutability.
             Ok(())
         }
 
         fn remove(&self, _path: &str, _recursive: bool) -> Result<(), HostError> {
-            // Stub
             Ok(())
         }
 
