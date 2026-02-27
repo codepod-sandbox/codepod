@@ -5,11 +5,8 @@
  * import namespace. Each function reads arguments from WASM linear memory,
  * performs the operation via VFS / ProcessManager, and writes results back.
  *
- * Note: host_spawn is stubbed for now. The real async-to-sync bridging
- * (using SAB + Atomics) will be wired up in Task 5 (ShellInstance).
- *
- * Note: host_read_command / host_write_result are placeholders. ShellInstance
- * (Task 5) will provide the real implementations.
+ * Note: host_spawn supports a syncSpawn callback for synchronous testing.
+ * The real async-to-sync bridging (using SAB + Atomics) will be wired up later.
  */
 
 import type { VfsLike } from '../vfs/vfs-like.js';
@@ -27,6 +24,8 @@ export interface ShellImportsOptions {
   memory: WebAssembly.Memory;
   /** Called when the shell requests a cancellation check. */
   checkCancel?: () => number; // 0 = ok, 1 = timeout, 2 = cancelled
+  /** Synchronous spawn handler. If provided, host_spawn calls this instead of mgr.spawn(). */
+  syncSpawn?: (cmd: string, args: string[], env: Record<string, string>, stdin: Uint8Array, cwd: string) => { exit_code: number; stdout: string; stderr: string };
 }
 
 export function createShellImports(opts: ShellImportsOptions): Record<string, WebAssembly.ImportValue> {
@@ -35,54 +34,45 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
   return {
     // ── Process lifecycle ──
 
+    // Rust signature: host_spawn(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32
+    // The request is a JSON-encoded SpawnRequest with fields: program, args, env, cwd, stdin
     host_spawn(
-      cmdPtr: number, cmdLen: number,
-      argsPtr: number, argsLen: number,
-      _envPtr: number, _envLen: number,
-      _stdinPtr: number, _stdinLen: number,
-      _cwdPtr: number, _cwdLen: number,
+      reqPtr: number, reqLen: number,
       outPtr: number, outCap: number,
     ): number {
-      const cmd = readString(memory, cmdPtr, cmdLen);
-      const argsJson = readString(memory, argsPtr, argsLen);
+      const reqJson = readString(memory, reqPtr, reqLen);
 
-      let args: string[];
-      try {
-        const parsed: unknown = JSON.parse(argsJson);
-        if (Array.isArray(parsed)) {
-          args = parsed as string[];
-        } else if (parsed !== null && typeof parsed === 'object') {
-          const req = parsed as Record<string, unknown>;
-          args = (req.args as string[] | undefined) ?? [];
-        } else {
-          args = [];
+      let req: { program?: string; args?: string[]; env?: [string, string][]; cwd?: string; stdin?: string };
+      try { req = JSON.parse(reqJson); } catch { req = {}; }
+
+      const cmd = req.program ?? '';
+      const args = req.args?.map(String) ?? [];
+      const env: Record<string, string> = {};
+      if (req.env) for (const [k, v] of req.env) env[k] = v;
+      const cwd = req.cwd ?? '/';
+      const stdinStr = req.stdin ?? '';
+      const stdin = new TextEncoder().encode(stdinStr);
+
+      if (opts.syncSpawn) {
+        try {
+          const result = opts.syncSpawn(cmd, args, env, stdin, cwd);
+          return writeJson(memory, outPtr, outCap, result);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return writeJson(memory, outPtr, outCap, {
+            exit_code: 127,
+            stdout: '',
+            stderr: `${cmd}: ${msg}\n`,
+          });
         }
-      } catch {
-        args = [];
       }
 
-      // mgr.spawn() is async. In the full implementation this will use
-      // SAB + Atomics to block the WASM thread until the host resolves.
-      // For v1 testing, return a placeholder result.
-      try {
-        void args; // will be used once async bridging is wired
-        const result = {
-          exit_code: 0,
-          stdout: '',
-          stderr: `${cmd}: spawn not yet wired\n`,
-          execution_time_ms: 0,
-        };
-        return writeJson(memory, outPtr, outCap, result);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        const result = {
-          exit_code: 127,
-          stdout: '',
-          stderr: `${cmd}: ${msg}\n`,
-          execution_time_ms: 0,
-        };
-        return writeJson(memory, outPtr, outCap, result);
-      }
+      // Fallback: return error (async spawn not wired yet)
+      return writeJson(memory, outPtr, outCap, {
+        exit_code: 127,
+        stdout: '',
+        stderr: `${cmd}: async spawn not available\n`,
+      });
     },
 
     host_has_tool(namePtr: number, nameLen: number): number {
@@ -205,7 +195,6 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
 
     host_glob(
       _patternPtr: number, _patternLen: number,
-      _cwdPtr: number, _cwdLen: number,
       outPtr: number, outCap: number,
     ): number {
       // Glob is complex -- stub for now, will implement in Phase 2
