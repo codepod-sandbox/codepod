@@ -77,9 +77,8 @@ pub fn expand_word_part(state: &mut ShellState, part: &WordPart) -> String {
 
         WordPart::ParamExpansion { var, op, default } => expand_param(state, var, op, default),
 
-        WordPart::ArithmeticExpansion(_) => {
-            // Task 7 will implement arithmetic expansion.
-            String::new()
+        WordPart::ArithmeticExpansion(expr) => {
+            crate::arithmetic::eval_arithmetic(state, expr).to_string()
         }
     }
 }
@@ -1361,10 +1360,10 @@ mod tests {
     }
 
     #[test]
-    fn arithmetic_expansion_returns_empty() {
+    fn arithmetic_expansion_evaluates() {
         let mut state = test_state();
         let part = WordPart::ArithmeticExpansion("1+1".into());
-        assert_eq!(expand_word_part(&mut state, &part), "");
+        assert_eq!(expand_word_part(&mut state, &part), "2");
     }
 
     #[test]
