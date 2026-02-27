@@ -4,14 +4,44 @@ use std::env;
 use std::io::{self, Read, Write};
 use std::process;
 
-/// Expand a character set specification, handling ranges like a-z.
+/// Expand a character set specification, handling ranges like a-z and escape sequences.
 fn expand_set(spec: &str) -> Vec<char> {
     let chars: Vec<char> = spec.chars().collect();
     let mut result = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
-        if i + 2 < chars.len() && chars[i + 1] == '-' {
+        // Handle backslash escape sequences
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            let escaped = match chars[i + 1] {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                'a' => '\x07',
+                'b' => '\x08',
+                'f' => '\x0C',
+                'v' => '\x0B',
+                '0' => '\0',
+                '\\' => '\\',
+                // Octal: \NNN
+                c if c.is_ascii_digit() => {
+                    let mut val = 0u32;
+                    let mut j = i + 1;
+                    while j < chars.len() && j < i + 4 && chars[j].is_ascii_digit() {
+                        val = val * 8 + (chars[j] as u32 - '0' as u32);
+                        j += 1;
+                    }
+                    i = j;
+                    if let Some(ch) = char::from_u32(val) {
+                        result.push(ch);
+                    }
+                    continue;
+                }
+                other => other,
+            };
+            result.push(escaped);
+            i += 2;
+        } else if i + 2 < chars.len() && chars[i + 1] == '-' {
             let start = chars[i] as u32;
             let end = chars[i + 2] as u32;
             if start <= end {
