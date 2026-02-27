@@ -88,7 +88,6 @@ pub fn is_builtin(cmd_name: &str) -> bool {
     matches!(
         cmd_name,
         "echo"
-            | "printf"
             | "true"
             | ":"
             | "false"
@@ -724,20 +723,23 @@ fn builtin_declare(state: &mut ShellState, args: &[String]) -> BuiltinResult {
                 let arr = parse_array_literal(value);
                 state.arrays.insert(name.to_string(), arr);
             } else {
+                // Capture previous value BEFORE insert for local frame
+                let prev_value = state.env.get(name).cloned();
                 state.env.insert(name.to_string(), value.to_string());
                 if is_export {
                     // already in env, which is our "exported" set
                 }
+                // Save to local frame if in function
+                if let Some(frame) = state.local_var_stack.last_mut() {
+                    frame.entry(name.to_string()).or_insert(prev_value);
+                }
             }
 
-            // Save to local frame if in function
-            if let Some(frame) = state.local_var_stack.last_mut() {
-                let prev = if is_assoc || is_array {
-                    None
-                } else {
-                    state.env.get(name).cloned()
-                };
-                frame.entry(name.to_string()).or_insert(prev);
+            // Save to local frame for arrays
+            if is_assoc || is_array {
+                if let Some(frame) = state.local_var_stack.last_mut() {
+                    frame.entry(name.to_string()).or_insert(None);
+                }
             }
         } else {
             // declare VAR without value
@@ -989,7 +991,12 @@ fn builtin_read(state: &mut ShellState, args: &[String], stdin_data: &str) -> Bu
 
     // Read input
     let input = if let Some(n) = nchars {
-        &stdin_data[..stdin_data.len().min(n)]
+        let byte_end = stdin_data
+            .char_indices()
+            .nth(n)
+            .map(|(i, _)| i)
+            .unwrap_or(stdin_data.len());
+        &stdin_data[..byte_end]
     } else {
         // Read up to delimiter
         match stdin_data.find(delimiter) {
@@ -1322,22 +1329,29 @@ fn builtin_getopts(state: &mut ShellState, args: &[String]) -> BuiltinResult {
     // Get the option character (skip the leading -)
     let opt_char = current.chars().nth(1).unwrap_or('?');
 
-    if let Some(pos) = optstring.find(opt_char) {
+    if optstring.contains(opt_char) {
         state.env.insert(var_name.clone(), opt_char.to_string());
 
-        // Check if this option takes an argument
+        // Check if this option takes an argument (char after opt_char is ':')
         let needs_arg = optstring
             .chars()
-            .nth(pos + 1)
+            .skip_while(|&c| c != opt_char)
+            .nth(1)
             .map(|c| c == ':')
             .unwrap_or(false);
 
         if needs_arg {
             // Argument is either rest of current word or next word
-            if current.len() > 2 {
+            // Get byte offset past the option char (skip '-' and opt_char)
+            let arg_start = current
+                .char_indices()
+                .nth(2)
+                .map(|(i, _)| i)
+                .unwrap_or(current.len());
+            if arg_start < current.len() {
                 state
                     .env
-                    .insert("OPTARG".to_string(), current[2..].to_string());
+                    .insert("OPTARG".to_string(), current[arg_start..].to_string());
                 state
                     .env
                     .insert("OPTIND".to_string(), (optind + 1).to_string());
@@ -1403,7 +1417,6 @@ fn builtin_mapfile(state: &mut ShellState, args: &[String], stdin_data: &str) ->
 
     let lines: Vec<String> = stdin_data
         .split('\n')
-        .filter(|l| !l.is_empty() || !strip_newline)
         .enumerate()
         .take_while(|(idx, _)| max_lines.is_none_or(|max| *idx < max))
         .map(|(_, line)| {
