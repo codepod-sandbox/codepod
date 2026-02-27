@@ -162,6 +162,235 @@ pub fn exec_command(
             }))
         }
 
+        Command::Pipeline { commands } => {
+            // Single-command pipeline — just delegate.
+            if commands.len() == 1 {
+                return exec_command(state, host, &commands[0]);
+            }
+
+            let pipefail = state.flags.contains(&crate::state::ShellFlag::Pipefail);
+            let mut pipefail_code = 0;
+            let mut last_result = RunResult::empty();
+            let mut stdin_data = String::new();
+
+            for cmd in commands {
+                match cmd {
+                    Command::Simple {
+                        words,
+                        redirects,
+                        assignments: _,
+                    } => {
+                        if words.is_empty() {
+                            last_result = RunResult::empty();
+                            stdin_data = last_result.stdout.clone();
+                            if pipefail && last_result.exit_code != 0 {
+                                pipefail_code = last_result.exit_code;
+                            }
+                            continue;
+                        }
+
+                        let expanded = expand_words_with_splitting(state, words, Some(&exec_fn));
+                        if expanded.is_empty() {
+                            last_result = RunResult::empty();
+                            stdin_data = last_result.stdout.clone();
+                            if pipefail && last_result.exit_code != 0 {
+                                pipefail_code = last_result.exit_code;
+                            }
+                            continue;
+                        }
+
+                        let braced = expand_braces(&expanded);
+                        let restored = restore_brace_sentinels(&braced);
+                        let globbed = expand_globs(host, &restored);
+
+                        if globbed.is_empty() {
+                            last_result = RunResult::empty();
+                            stdin_data = last_result.stdout.clone();
+                            if pipefail && last_result.exit_code != 0 {
+                                pipefail_code = last_result.exit_code;
+                            }
+                            continue;
+                        }
+
+                        let cmd_name = &globbed[0];
+                        let args: Vec<&str> = globbed[1..].iter().map(|s| s.as_str()).collect();
+
+                        // Process input redirects — they override pipeline stdin
+                        let mut effective_stdin = stdin_data.clone();
+                        for redir in redirects {
+                            match &redir.redirect_type {
+                                RedirectType::StdinFrom(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    effective_stdin = host
+                                        .read_file(&resolved)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                }
+                                RedirectType::Heredoc(content) => {
+                                    effective_stdin = content.clone();
+                                }
+                                RedirectType::HeredocStrip(content) => {
+                                    effective_stdin = content.clone();
+                                }
+                                RedirectType::HereString(word) => {
+                                    effective_stdin = format!("{word}\n");
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        let env_pairs: Vec<(&str, &str)> = state
+                            .env
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect();
+
+                        match host.spawn(cmd_name, &args, &env_pairs, &state.cwd, &effective_stdin)
+                        {
+                            Ok(spawn_result) => {
+                                let mut stdout = spawn_result.stdout;
+                                let mut stderr = spawn_result.stderr;
+
+                                // Handle output redirects in pipeline stages
+                                let mut last_stdout_redirect_path: Option<String> = None;
+
+                                for redir in redirects {
+                                    match &redir.redirect_type {
+                                        RedirectType::StdoutOverwrite(path) => {
+                                            let resolved = state.resolve_path(path);
+                                            host.write_file(
+                                                &resolved,
+                                                &stdout,
+                                                WriteMode::Truncate,
+                                            )
+                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                            stdout = String::new();
+                                            last_stdout_redirect_path = Some(resolved);
+                                        }
+                                        RedirectType::StdoutAppend(path) => {
+                                            let resolved = state.resolve_path(path);
+                                            host.write_file(&resolved, &stdout, WriteMode::Append)
+                                                .map_err(|e| {
+                                                    ShellError::HostError(e.to_string())
+                                                })?;
+                                            stdout = String::new();
+                                            last_stdout_redirect_path = Some(resolved);
+                                        }
+                                        RedirectType::StderrOverwrite(path) => {
+                                            let resolved = state.resolve_path(path);
+                                            host.write_file(
+                                                &resolved,
+                                                &stderr,
+                                                WriteMode::Truncate,
+                                            )
+                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                            stderr = String::new();
+                                        }
+                                        RedirectType::StderrAppend(path) => {
+                                            let resolved = state.resolve_path(path);
+                                            host.write_file(&resolved, &stderr, WriteMode::Append)
+                                                .map_err(|e| {
+                                                    ShellError::HostError(e.to_string())
+                                                })?;
+                                            stderr = String::new();
+                                        }
+                                        RedirectType::StderrToStdout => {
+                                            if let Some(ref file_path) = last_stdout_redirect_path {
+                                                if !stderr.is_empty() {
+                                                    host.write_file(
+                                                        file_path,
+                                                        &stderr,
+                                                        WriteMode::Append,
+                                                    )
+                                                    .map_err(|e| {
+                                                        ShellError::HostError(e.to_string())
+                                                    })?;
+                                                }
+                                            } else {
+                                                stdout.push_str(&stderr);
+                                            }
+                                            stderr = String::new();
+                                        }
+                                        RedirectType::BothOverwrite(path) => {
+                                            let resolved = state.resolve_path(path);
+                                            let combined = format!("{stdout}{stderr}");
+                                            host.write_file(
+                                                &resolved,
+                                                &combined,
+                                                WriteMode::Truncate,
+                                            )
+                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                            stdout = String::new();
+                                            stderr = String::new();
+                                        }
+                                        // Input redirects already handled above.
+                                        RedirectType::StdinFrom(_)
+                                        | RedirectType::Heredoc(_)
+                                        | RedirectType::HeredocStrip(_)
+                                        | RedirectType::HereString(_) => {}
+                                    }
+                                }
+
+                                state.last_exit_code = spawn_result.exit_code;
+                                last_result = RunResult {
+                                    exit_code: spawn_result.exit_code,
+                                    stdout,
+                                    stderr,
+                                    execution_time_ms: 0,
+                                };
+                            }
+                            Err(e) => {
+                                state.last_exit_code = 127;
+                                last_result =
+                                    RunResult::error(127, format!("{}: {}\n", cmd_name, e));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Non-simple commands: just execute them.
+                        // Stdin threading for compound commands comes later.
+                        match exec_command(state, host, cmd) {
+                            Ok(ControlFlow::Normal(r)) => {
+                                state.last_exit_code = r.exit_code;
+                                last_result = r;
+                            }
+                            Ok(ControlFlow::Exit(code, stdout, stderr)) => {
+                                last_result = RunResult {
+                                    exit_code: code,
+                                    stdout,
+                                    stderr,
+                                    execution_time_ms: 0,
+                                };
+                                state.last_exit_code = code;
+                            }
+                            Err(e) => {
+                                return Err(e);
+                            }
+                            Ok(flow) => {
+                                // Break, Continue, Return, Cancelled — propagate
+                                return Ok(flow);
+                            }
+                        }
+                    }
+                }
+
+                // Track pipefail
+                if pipefail && last_result.exit_code != 0 {
+                    pipefail_code = last_result.exit_code;
+                }
+
+                // Stdout of this stage becomes stdin of next
+                stdin_data = last_result.stdout.clone();
+            }
+
+            // Apply pipefail: use last non-zero exit code
+            if pipefail && pipefail_code != 0 && last_result.exit_code == 0 {
+                last_result.exit_code = pipefail_code;
+            }
+
+            state.last_exit_code = last_result.exit_code;
+            Ok(ControlFlow::Normal(last_result))
+        }
+
         // All other command variants are stubs for now.
         _ => Ok(ControlFlow::Normal(RunResult::empty())),
     }
@@ -1030,5 +1259,340 @@ mod tests {
         };
         // Last input redirect wins, so cat sees content of b.txt
         assert_eq!(run.stdout, "content b\n");
+    }
+
+    // ---- Pipeline tests ----
+
+    #[test]
+    fn pipeline_two_stage_stdin_threading() {
+        // `echo hello | cat` — cat receives "hello\n" as stdin
+        // Use spawn_handler to make "cat" echo back its stdin.
+        let host = MockHost::new().with_spawn_handler(|program, _args, stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+            },
+            "cat" => SpawnResult {
+                exit_code: 0,
+                stdout: stdin.to_string(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("echo hello | cat");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "hello\n");
+
+        // Verify spawn calls: cat should have received "hello\n" as stdin
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].program, "echo");
+        assert_eq!(calls[0].stdin, ""); // echo gets empty stdin
+        assert_eq!(calls[1].program, "cat");
+        assert_eq!(calls[1].stdin, "hello\n"); // cat gets echo's stdout
+    }
+
+    #[test]
+    fn pipeline_three_stage() {
+        // `echo hello | cat | cat` — chaining works through 3 stages
+        let host = MockHost::new().with_spawn_handler(|program, _args, stdin| match program {
+            "echo" => SpawnResult {
+                exit_code: 0,
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+            },
+            "cat" => SpawnResult {
+                exit_code: 0,
+                stdout: stdin.to_string(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("echo hello | cat | cat");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "hello\n");
+
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].program, "echo");
+        assert_eq!(calls[1].program, "cat");
+        assert_eq!(calls[1].stdin, "hello\n");
+        assert_eq!(calls[2].program, "cat");
+        assert_eq!(calls[2].stdin, "hello\n");
+    }
+
+    #[test]
+    fn pipeline_exit_code_from_last_stage() {
+        // `false | true` — exit code should be 0 (from last command)
+        let host = MockHost::new().with_spawn_handler(|program, _args, _stdin| match program {
+            "false" => SpawnResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            "true" => SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("false | true");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn pipeline_pipefail() {
+        // `false | true` with pipefail — exit code should be 1 (non-zero from first stage)
+        use crate::state::ShellFlag;
+
+        let host = MockHost::new().with_spawn_handler(|program, _args, _stdin| match program {
+            "false" => SpawnResult {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            "true" => SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        state.flags.insert(ShellFlag::Pipefail);
+        let cmd = codepod_shell::parser::parse("false | true");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn pipeline_pipefail_last_non_zero_wins() {
+        // `cmd-exit-2 | cmd-exit-3 | true` with pipefail — should be 3 (last non-zero)
+        use crate::state::ShellFlag;
+
+        let host = MockHost::new().with_spawn_handler(|program, _args, _stdin| match program {
+            "cmd-exit-2" => SpawnResult {
+                exit_code: 2,
+                stdout: "a\n".into(),
+                stderr: String::new(),
+            },
+            "cmd-exit-3" => SpawnResult {
+                exit_code: 3,
+                stdout: "b\n".into(),
+                stderr: String::new(),
+            },
+            "true" => SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        state.flags.insert(ShellFlag::Pipefail);
+        let cmd = codepod_shell::parser::parse("cmd-exit-2 | cmd-exit-3 | true");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 3);
+    }
+
+    #[test]
+    fn pipeline_stderr_does_not_flow_through() {
+        // `cmd-with-stderr | cat` — stderr from first stage should NOT become
+        // stdin of second stage; only stdout flows through the pipe.
+        let host = MockHost::new().with_spawn_handler(|program, _args, stdin| match program {
+            "cmd-with-stderr" => SpawnResult {
+                exit_code: 0,
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+            },
+            "cat" => SpawnResult {
+                exit_code: 0,
+                stdout: stdin.to_string(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("cmd-with-stderr | cat");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // cat only sees stdout, not stderr
+        assert_eq!(run.stdout, "out\n");
+        assert_eq!(run.stderr, "");
+
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[1].stdin, "out\n"); // only stdout, not "out\nerr\n"
+    }
+
+    #[test]
+    fn pipeline_stderr_to_stdout_redirect() {
+        // `cmd 2>&1 | cat` — stderr is merged into stdout and flows through pipe
+        let host = MockHost::new().with_spawn_handler(|program, _args, stdin| match program {
+            "cmd" => SpawnResult {
+                exit_code: 0,
+                stdout: "out\n".into(),
+                stderr: "err\n".into(),
+            },
+            "cat" => SpawnResult {
+                exit_code: 0,
+                stdout: stdin.to_string(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("cmd 2>&1 | cat");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // cat receives merged stdout+stderr
+        assert_eq!(run.stdout, "out\nerr\n");
+
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[1].stdin, "out\nerr\n");
+    }
+
+    #[test]
+    fn pipeline_single_command_delegates() {
+        // A Pipeline with a single command should behave identically to
+        // executing that command directly.
+        use codepod_shell::ast::{Command as AstCommand, Word};
+
+        let host = MockHost::new().with_spawn_result(
+            "echo",
+            SpawnResult {
+                exit_code: 0,
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+            },
+        );
+        let mut state = ShellState::new_default();
+        let cmd = AstCommand::Pipeline {
+            commands: vec![AstCommand::Simple {
+                words: vec![Word::literal("echo"), Word::literal("hello")],
+                redirects: vec![],
+                assignments: vec![],
+            }],
+        };
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout, "hello\n");
+    }
+
+    #[test]
+    fn pipeline_last_exit_code_updates_state() {
+        // Verify that state.last_exit_code reflects the pipeline result
+        let host = MockHost::new().with_spawn_handler(|program, _args, _stdin| match program {
+            "true" => SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            "exit42" => SpawnResult {
+                exit_code: 42,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("true | exit42");
+        let _ = exec_command(&mut state, &host, &cmd);
+        assert_eq!(state.last_exit_code, 42);
+    }
+
+    #[test]
+    fn pipeline_no_pipefail_ignores_early_failures() {
+        // Without pipefail, only the last stage's exit code matters
+        let host = MockHost::new().with_spawn_handler(|program, _args, _stdin| match program {
+            "fail1" => SpawnResult {
+                exit_code: 1,
+                stdout: "data\n".into(),
+                stderr: String::new(),
+            },
+            "fail2" => SpawnResult {
+                exit_code: 2,
+                stdout: "more\n".into(),
+                stderr: String::new(),
+            },
+            "succeed" => SpawnResult {
+                exit_code: 0,
+                stdout: "ok\n".into(),
+                stderr: String::new(),
+            },
+            _ => SpawnResult {
+                exit_code: 127,
+                stdout: String::new(),
+                stderr: format!("{program}: command not found"),
+            },
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("fail1 | fail2 | succeed");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
     }
 }

@@ -5,6 +5,14 @@ pub mod mock {
 
     use crate::host::{CancelStatus, HostError, HostInterface, SpawnResult, StatInfo, WriteMode};
 
+    /// A recorded spawn invocation, for test assertions.
+    #[derive(Debug, Clone)]
+    pub struct SpawnCall {
+        pub program: String,
+        pub args: Vec<String>,
+        pub stdin: String,
+    }
+
     /// An in-memory mock implementation of `HostInterface` for testing.
     ///
     /// Uses `RefCell` for the files map so that `write_file` can mutate state
@@ -15,6 +23,12 @@ pub mod mock {
         tools: HashSet<String>,
         spawn_results: HashMap<String, SpawnResult>,
         glob_results: HashMap<String, Vec<String>>,
+        /// Records every spawn invocation for later assertion.
+        spawn_calls: RefCell<Vec<SpawnCall>>,
+        /// Optional dynamic spawn handler: receives (program, args, stdin) and
+        /// returns a SpawnResult. When set, this takes priority over
+        /// `spawn_results`.
+        spawn_handler: Option<Box<dyn Fn(&str, &[&str], &str) -> SpawnResult>>,
     }
 
     impl Default for MockHost {
@@ -31,6 +45,8 @@ pub mod mock {
                 tools: HashSet::new(),
                 spawn_results: HashMap::new(),
                 glob_results: HashMap::new(),
+                spawn_calls: RefCell::new(Vec::new()),
+                spawn_handler: None,
             }
         }
 
@@ -66,6 +82,16 @@ pub mod mock {
             self
         }
 
+        /// Register a dynamic spawn handler that receives (program, args, stdin)
+        /// and returns a SpawnResult. Takes priority over `spawn_results`.
+        pub fn with_spawn_handler<F>(mut self, handler: F) -> Self
+        where
+            F: Fn(&str, &[&str], &str) -> SpawnResult + 'static,
+        {
+            self.spawn_handler = Some(Box::new(handler));
+            self
+        }
+
         /// Read a file's content from the mock filesystem (for test assertions).
         pub fn get_file(&self, path: &str) -> Option<String> {
             self.files
@@ -73,17 +99,34 @@ pub mod mock {
                 .get(path)
                 .and_then(|data| String::from_utf8(data.clone()).ok())
         }
+
+        /// Retrieve all recorded spawn calls for test assertions.
+        pub fn get_spawn_calls(&self) -> Vec<SpawnCall> {
+            self.spawn_calls.borrow().clone()
+        }
     }
 
     impl HostInterface for MockHost {
         fn spawn(
             &self,
             program: &str,
-            _args: &[&str],
+            args: &[&str],
             _env: &[(&str, &str)],
             _cwd: &str,
-            _stdin: &str,
+            stdin: &str,
         ) -> Result<SpawnResult, HostError> {
+            // Record the call for later assertion.
+            self.spawn_calls.borrow_mut().push(SpawnCall {
+                program: program.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+                stdin: stdin.to_string(),
+            });
+
+            // Dynamic handler takes priority.
+            if let Some(ref handler) = self.spawn_handler {
+                return Ok(handler(program, args, stdin));
+            }
+
             if let Some(result) = self.spawn_results.get(program) {
                 Ok(result.clone())
             } else {
