@@ -1447,4 +1447,82 @@ y"; echo "\${items[@]}"`);
       expect(r.stdout.trim()).toBe('/tmp/bs.sh');
     });
   });
+
+  // ---------- grep -L (files without match) ----------
+  describe('grep -L', () => {
+    it('prints files without match', async () => {
+      const r = await runner.run(`echo "yes" > /tmp/gL1.txt; echo "no" > /tmp/gL2.txt; grep -L yes /tmp/gL1.txt /tmp/gL2.txt`);
+      expect(r.stdout.trim()).toBe('/tmp/gL2.txt');
+    });
+  });
+
+  // ---------- find -print0 ----------
+  describe('find -print0', () => {
+    it('outputs null-separated paths', async () => {
+      const r = await runner.run(`mkdir -p /tmp/fp0; touch /tmp/fp0/a /tmp/fp0/b; find /tmp/fp0 -type f -name "a" -print0`);
+      // Output should contain null byte instead of newline
+      expect(r.stdout).toContain('\0');
+      expect(r.stdout).not.toContain('\n');
+    });
+  });
+
+  // ---------- ls -lh (human readable) ----------
+  describe('ls -lh', () => {
+    it('shows human-readable sizes', async () => {
+      const r = await runner.run(`ls -lh /home/user`);
+      // Should not error; just verify it runs
+      expect(r.exitCode).toBe(0);
+    });
+  });
+
+  // ---------- ls -t (sort by time) ----------
+  describe('ls -t', () => {
+    it('sorts by modification time', async () => {
+      const r = await runner.run(`mkdir -p /tmp/lst; touch /tmp/lst/old; touch /tmp/lst/new; ls -1t /tmp/lst`);
+      // newest first
+      expect(r.stdout.trim().split('\n')[0]).toBe('new');
+    });
+  });
+
+  // ---------- ls -S (sort by size) ----------
+  describe('ls -S', () => {
+    it('sorts by size, largest first', async () => {
+      const r = await runner.run(`mkdir -p /tmp/lsS; echo "a" > /tmp/lsS/small; echo "aaaaaaaaaa" > /tmp/lsS/big; ls -1S /tmp/lsS`);
+      expect(r.stdout.trim().split('\n')[0]).toBe('big');
+    });
+  });
+
+  // ---------- wc -m ----------
+  describe('wc -m', () => {
+    it('counts characters', async () => {
+      const r = await runner.run(`echo "hello" | wc -m`);
+      expect(r.stdout.trim()).toBe('6'); // 5 chars + 1 newline
+    });
+  });
+
+  // ---------- sort -V ----------
+  describe('sort -V', () => {
+    it('sorts version numbers correctly', async () => {
+      const r = await runner.run(`printf "v1.10\\nv1.2\\nv1.1\\n" | sort -V`);
+      expect(r.stdout).toBe('v1.1\nv1.2\nv1.10\n');
+    });
+  });
+
+  // ---------- pushd/popd/dirs ----------
+  describe('pushd/popd/dirs', () => {
+    it('pushd changes directory and prints stack', async () => {
+      const r = await runner.run(`mkdir -p /tmp/pd; pushd /tmp/pd > /dev/null; pwd`);
+      expect(r.stdout.trim()).toBe('/tmp/pd');
+    });
+
+    it('popd returns to previous directory', async () => {
+      const r = await runner.run(`mkdir -p /tmp/pd2; pushd /tmp/pd2 > /dev/null; popd > /dev/null; pwd`);
+      expect(r.stdout.trim()).toBe('/home/user');
+    });
+
+    it('dirs shows directory stack', async () => {
+      const r = await runner.run(`dirs`);
+      expect(r.stdout).toContain('/home/user');
+    });
+  });
 });

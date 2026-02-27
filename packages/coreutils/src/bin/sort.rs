@@ -31,6 +31,51 @@ fn extract_key(line: &str, separator: Option<char>, key_field: Option<usize>) ->
     }
 }
 
+/// Compare two strings using version-number ordering.
+/// Splits each string into non-digit and digit segments, comparing digit segments numerically.
+fn version_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+
+    loop {
+        let ac = ai.peek().copied();
+        let bc = bi.peek().copied();
+
+        match (ac, bc) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(a_ch), Some(b_ch)) => {
+                if a_ch.is_ascii_digit() && b_ch.is_ascii_digit() {
+                    // Compare numeric segments
+                    let mut an = String::new();
+                    while ai.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        an.push(ai.next().unwrap());
+                    }
+                    let mut bn = String::new();
+                    while bi.peek().is_some_and(|c| c.is_ascii_digit()) {
+                        bn.push(bi.next().unwrap());
+                    }
+                    let na: u64 = an.parse().unwrap_or(0);
+                    let nb: u64 = bn.parse().unwrap_or(0);
+                    match na.cmp(&nb) {
+                        std::cmp::Ordering::Equal => continue,
+                        other => return other,
+                    }
+                } else {
+                    // Compare as characters
+                    let a_next = ai.next().unwrap();
+                    let b_next = bi.next().unwrap();
+                    match a_next.cmp(&b_next) {
+                        std::cmp::Ordering::Equal => continue,
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -39,6 +84,7 @@ fn main() {
     let mut unique = false;
     let mut fold_case = false;
     let mut ignore_blanks = false;
+    let mut version_sort = false;
     let mut separator: Option<char> = None;
     let mut key_field: Option<usize> = None;
     let mut files: Vec<String> = Vec::new();
@@ -92,6 +138,7 @@ fn main() {
                     'u' => unique = true,
                     'f' => fold_case = true,
                     'b' => ignore_blanks = true,
+                    'V' => version_sort = true,
                     _ => {
                         eprintln!("sort: invalid option -- '{}'", ch);
                         process::exit(2);
@@ -163,7 +210,9 @@ fn main() {
             ka = &ka_owned;
             kb = &kb_owned;
         }
-        let cmp = if numeric {
+        let cmp = if version_sort {
+            version_compare(ka, kb)
+        } else if numeric {
             let na = parse_numeric_key(ka);
             let nb = parse_numeric_key(kb);
             na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)

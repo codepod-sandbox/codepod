@@ -103,6 +103,8 @@ export class ShellRunner extends ShellBuiltins {
   private startTime = performance.now();
   /** Current line number for $LINENO. */
   private currentLineNo = 1;
+  /** Directory stack for pushd/popd. */
+  private dirStack: string[] = [];
   /** Array storage for bash-style arrays. */
   protected arrays: Map<string, string[]> = new Map();
   /** Associative array storage (declare -A). */
@@ -840,6 +842,32 @@ export class ShellRunner extends ShellBuiltins {
       // Without -v, fall through to external printf tool
     } else if (cmdName === 'mapfile' || cmdName === 'readarray') {
       result = this.builtinMapfile(args, stdinData);
+    } else if (cmdName === 'pushd') {
+      const dir = args[0];
+      if (!dir) {
+        result = { exitCode: 1, stdout: '', stderr: 'pushd: no other directory\n', executionTimeMs: 0 };
+      } else {
+        const cwd = this.env.get('PWD') ?? '/';
+        this.dirStack.push(cwd);
+        const cdResult = this.builtinCd([dir]);
+        const newPwd = this.env.get('PWD') ?? '/';
+        const stack = [newPwd, ...this.dirStack.slice().reverse()].join(' ');
+        result = { exitCode: cdResult.exitCode, stdout: stack + '\n', stderr: cdResult.stderr, executionTimeMs: 0 };
+      }
+    } else if (cmdName === 'popd') {
+      if (this.dirStack.length === 0) {
+        result = { exitCode: 1, stdout: '', stderr: 'popd: directory stack empty\n', executionTimeMs: 0 };
+      } else {
+        const dir = this.dirStack.pop()!;
+        const cdResult = this.builtinCd([dir]);
+        const newPwd = this.env.get('PWD') ?? '/';
+        const stack = [newPwd, ...this.dirStack.slice().reverse()].join(' ');
+        result = { exitCode: cdResult.exitCode, stdout: stack + '\n', stderr: cdResult.stderr, executionTimeMs: 0 };
+      }
+    } else if (cmdName === 'dirs') {
+      const cwd = this.env.get('PWD') ?? '/';
+      const stack = [cwd, ...this.dirStack.slice().reverse()].join(' ');
+      result = { exitCode: 0, stdout: stack + '\n', stderr: '', executionTimeMs: 0 };
     }
 
     if (!result) {

@@ -8,6 +8,10 @@ struct Options {
     all: bool,
     one_per_line: bool,
     recursive: bool,
+    human_readable: bool,
+    sort_by_time: bool,
+    sort_by_size: bool,
+    reverse_sort: bool,
 }
 
 fn parse_args() -> (Options, Vec<String>) {
@@ -16,6 +20,10 @@ fn parse_args() -> (Options, Vec<String>) {
         all: false,
         one_per_line: false,
         recursive: false,
+        human_readable: false,
+        sort_by_time: false,
+        sort_by_size: false,
+        reverse_sort: false,
     };
     let mut paths = Vec::new();
 
@@ -30,6 +38,10 @@ fn parse_args() -> (Options, Vec<String>) {
                     'a' => opts.all = true,
                     '1' => opts.one_per_line = true,
                     'R' => opts.recursive = true,
+                    'h' => opts.human_readable = true,
+                    't' => opts.sort_by_time = true,
+                    'S' => opts.sort_by_size = true,
+                    'r' => opts.reverse_sort = true,
                     _ => {
                         eprintln!("ls: invalid option -- '{}'", ch);
                         process::exit(2);
@@ -50,6 +62,18 @@ fn parse_args() -> (Options, Vec<String>) {
 
 fn format_size(size: u64) -> String {
     format!("{:>8}", size)
+}
+
+fn format_size_human(size: u64) -> String {
+    if size < 1024 {
+        format!("{:>5}", size)
+    } else if size < 1024 * 1024 {
+        format!("{:>4.1}K", size as f64 / 1024.0)
+    } else if size < 1024 * 1024 * 1024 {
+        format!("{:>4.1}M", size as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:>4.1}G", size as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn format_time(modified: std::io::Result<std::time::SystemTime>) -> String {
@@ -231,13 +255,30 @@ fn list_dir(path: &Path, opts: &Options, show_header: bool) -> i32 {
         }
     }
 
-    names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    if opts.sort_by_time {
+        names.sort_by(|a, b| {
+            let ta = a.1.modified().ok();
+            let tb = b.1.modified().ok();
+            tb.cmp(&ta) // newest first
+        });
+    } else if opts.sort_by_size {
+        names.sort_by(|a, b| b.1.len().cmp(&a.1.len())); // largest first
+    } else {
+        names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    }
+    if opts.reverse_sort {
+        names.reverse();
+    }
 
     if opts.long {
         for (name, metadata) in &names {
             let entry_path = path.join(name);
             let perms = permissions_str_for_path(&entry_path, metadata);
-            let size = format_size(metadata.len());
+            let size = if opts.human_readable {
+                format_size_human(metadata.len())
+            } else {
+                format_size(metadata.len())
+            };
             let time = format_time(metadata.modified());
             println!("{} {} {} {}", perms, size, time, name);
         }

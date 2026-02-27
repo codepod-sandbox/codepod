@@ -111,6 +111,7 @@ enum Expr {
     Not(Box<Expr>),
     // Actions
     Print,
+    Print0,
     Exec(Vec<String>),      // command tokens; {} is placeholder, terminated by ;
     ExecBatch(Vec<String>), // command tokens; {} is placeholder, terminated by +
     Delete,
@@ -368,6 +369,11 @@ fn eval_expr(expr: &Expr, path: &Path, printed: &mut bool) -> bool {
             *printed = true;
             true
         }
+        Expr::Print0 => {
+            print!("{}\0", path.display());
+            *printed = true;
+            true
+        }
         Expr::Exec(tokens) => {
             let path_str = path.display().to_string();
             exec_command(tokens, &[path_str], printed)
@@ -401,7 +407,7 @@ fn is_symlink(path: &Path) -> bool {
 /// Check whether the expression tree contains any action (Print, Exec, Delete).
 fn has_action(expr: &Expr) -> bool {
     match expr {
-        Expr::Print | Expr::Exec(_) | Expr::ExecBatch(_) | Expr::Delete => true,
+        Expr::Print | Expr::Print0 | Expr::Exec(_) | Expr::ExecBatch(_) | Expr::Delete => true,
         Expr::And(a, b) | Expr::Or(a, b) => has_action(a) || has_action(b),
         Expr::Not(e) => has_action(e),
         _ => false,
@@ -592,6 +598,7 @@ fn parse_primary(tokens: &[String]) -> (Expr, &[String]) {
         }
         "-empty" => (Expr::Empty, &tokens[1..]),
         "-print" => (Expr::Print, &tokens[1..]),
+        "-print0" => (Expr::Print0, &tokens[1..]),
         "-delete" => (Expr::Delete, &tokens[1..]),
         "-exec" => {
             // Collect tokens until ";" or "+"

@@ -25,6 +25,7 @@ struct Options {
     max_count: usize,
     no_filename: bool,
     with_filename: bool,
+    files_without_match: bool,
     include_globs: Vec<String>,
     exclude_globs: Vec<String>,
 }
@@ -111,6 +112,10 @@ fn grep_reader<R: io::Read>(
             if opts.files_with_matches {
                 println!("{}", filename);
                 return Ok(true);
+            }
+
+            if opts.files_without_match {
+                return Ok(true); // found a match, so don't list this file
             }
 
             // -o with -v is undefined; ignore -o in that case
@@ -244,6 +249,10 @@ fn grep_reader<R: io::Read>(
         }
     }
 
+    if opts.files_without_match && !found {
+        println!("{}", filename);
+    }
+
     Ok(found)
 }
 
@@ -345,6 +354,7 @@ fn main() {
         max_count: 0,
         no_filename: false,
         with_filename: false,
+        files_without_match: false,
         include_globs: Vec::new(),
         exclude_globs: Vec::new(),
     };
@@ -435,6 +445,7 @@ fn main() {
                     'c' => opts.count_only = true,
                     'n' => opts.line_numbers = true,
                     'l' => opts.files_with_matches = true,
+                    'L' => opts.files_without_match = true,
                     'r' | 'R' => opts.recursive = true,
                     'E' => opts.extended = true,
                     'o' => opts.only_matching = true,
@@ -550,7 +561,10 @@ fn main() {
         }
     }
 
-    if found_any {
+    if opts.files_without_match {
+        // With -L, exit 0 if any file had no matches
+        process::exit(if found_any && !had_error { 1 } else { 0 });
+    } else if found_any {
         process::exit(0);
     } else if had_error && !opts.suppress_errors {
         process::exit(2);

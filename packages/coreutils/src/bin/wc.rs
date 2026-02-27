@@ -9,6 +9,7 @@ struct Counts {
     lines: usize,
     words: usize,
     bytes: usize,
+    chars: usize,
     max_line_len: usize,
 }
 
@@ -18,6 +19,7 @@ impl Counts {
             lines: 0,
             words: 0,
             bytes: 0,
+            chars: 0,
             max_line_len: 0,
         }
     }
@@ -26,6 +28,7 @@ impl Counts {
         self.lines += other.lines;
         self.words += other.words;
         self.bytes += other.bytes;
+        self.chars += other.chars;
         if other.max_line_len > self.max_line_len {
             self.max_line_len = other.max_line_len;
         }
@@ -39,6 +42,7 @@ fn count_reader<R: Read>(reader: R) -> io::Result<Counts> {
         let line = line?;
         counts.lines += 1;
         counts.bytes += line.len() + 1; // +1 for the newline
+        counts.chars += line.chars().count() + 1; // +1 for the newline
         counts.words += line.split_whitespace().count();
         if line.len() > counts.max_line_len {
             counts.max_line_len = line.len();
@@ -52,6 +56,7 @@ fn print_counts(
     show_lines: bool,
     show_words: bool,
     show_bytes: bool,
+    show_chars: bool,
     show_max_line_len: bool,
     name: &str,
 ) {
@@ -61,6 +66,9 @@ fn print_counts(
     }
     if show_words {
         parts.push(format!("{:>8}", counts.words));
+    }
+    if show_chars {
+        parts.push(format!("{:>8}", counts.chars));
     }
     if show_bytes {
         parts.push(format!("{:>8}", counts.bytes));
@@ -82,6 +90,7 @@ fn main() {
     let mut show_lines = false;
     let mut show_words = false;
     let mut show_bytes = false;
+    let mut show_chars = false;
     let mut show_max_line_len = false;
     let mut files: Vec<String> = Vec::new();
 
@@ -96,6 +105,7 @@ fn main() {
                     'l' => show_lines = true,
                     'w' => show_words = true,
                     'c' => show_bytes = true,
+                    'm' => show_chars = true,
                     'L' => show_max_line_len = true,
                     _ => {
                         eprintln!("wc: invalid option -- '{}'", ch);
@@ -109,7 +119,7 @@ fn main() {
     }
 
     // If no specific flag is set, show all three (but not -L)
-    if !show_lines && !show_words && !show_bytes && !show_max_line_len {
+    if !show_lines && !show_words && !show_bytes && !show_chars && !show_max_line_len {
         show_lines = true;
         show_words = true;
         show_bytes = true;
@@ -126,6 +136,7 @@ fn main() {
                 show_lines,
                 show_words,
                 show_bytes,
+                show_chars,
                 show_max_line_len,
                 "",
             ),
@@ -145,6 +156,7 @@ fn main() {
                             show_lines,
                             show_words,
                             show_bytes,
+                            show_chars,
                             show_max_line_len,
                             file,
                         );
@@ -167,6 +179,7 @@ fn main() {
                 show_lines,
                 show_words,
                 show_bytes,
+                show_chars,
                 show_max_line_len,
                 "total",
             );
