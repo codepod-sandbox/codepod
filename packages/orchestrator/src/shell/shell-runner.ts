@@ -97,6 +97,8 @@ export class ShellRunner extends ShellBuiltins {
   private shellFlags = new Set<string>();
   /** Trap handlers (e.g. EXIT trap). */
   protected trapHandlers: Map<string, string> = new Map();
+  /** Variables marked as readonly. */
+  private readonlyVars = new Set<string>();
   /** Array storage for bash-style arrays. */
   protected arrays: Map<string, string[]> = new Map();
   /** Associative array storage (declare -A). */
@@ -540,6 +542,10 @@ export class ShellRunner extends ShellBuiltins {
   }): Promise<RunResult> {
     // Process assignments (expand variables and command substitutions in values)
     for (const assignment of simple.assignments) {
+      const baseName = assignment.name.endsWith('+') ? assignment.name.slice(0, -1) : assignment.name.replace(/\[.*\]$/, '');
+      if (this.readonlyVars.has(baseName)) {
+        return { exitCode: 1, stdout: '', stderr: `bash: ${baseName}: readonly variable\n`, executionTimeMs: 0 };
+      }
       const value = await this.expandAssignmentValue(assignment.value);
       // Append assignment: name ends with "+" (e.g. VAR+=value, arr+=(elem))
       if (assignment.name.endsWith('+')) {
@@ -737,6 +743,31 @@ export class ShellRunner extends ShellBuiltins {
         }
         if (eqIdx !== -1) {
           this.env.set(name, arg.slice(eqIdx + 1));
+        }
+      }
+      result = { ...EMPTY_RESULT };
+    } else if (cmdName === 'exec') {
+      // exec with a command: run it and adopt its exit code
+      if (args.length > 0) {
+        // Re-dispatch the command (not as exec — just run it directly)
+        const execWords: Word[] = args.map(a => ({ parts: [{ Literal: a }] }));
+        const execCmd: Command = { Simple: { words: execWords, redirects: simple.redirects, assignments: [] } };
+        result = await this.execCommand(execCmd);
+      } else {
+        // exec with no command but possibly redirects — redirects already applied above
+        result = { ...EMPTY_RESULT };
+      }
+    } else if (cmdName === 'readonly') {
+      // readonly VAR=value or readonly VAR
+      for (const arg of args) {
+        const eqIdx = arg.indexOf('=');
+        if (eqIdx !== -1) {
+          const name = arg.slice(0, eqIdx);
+          const value = arg.slice(eqIdx + 1);
+          this.env.set(name, value);
+          this.readonlyVars.add(name);
+        } else {
+          this.readonlyVars.add(arg);
         }
       }
       result = { ...EMPTY_RESULT };

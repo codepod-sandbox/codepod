@@ -22,6 +22,7 @@ struct Options {
     suppress_errors: bool,
     after_context: usize,
     before_context: usize,
+    max_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,7 @@ fn grep_reader<R: io::Read>(
 ) -> io::Result<bool> {
     let buf = BufReader::new(reader);
     let mut match_count: usize = 0;
+    let mut line_match_count: usize = 0;
     let mut found = false;
     let has_context = opts.before_context > 0 || opts.after_context > 0;
 
@@ -96,6 +98,7 @@ fn grep_reader<R: io::Read>(
 
         if selected {
             found = true;
+            line_match_count += 1;
 
             if opts.quiet {
                 return Ok(true);
@@ -123,11 +126,17 @@ fn grep_reader<R: io::Read>(
                     }
                     println!("{}{}", prefix, m.as_str());
                 }
+                if opts.max_count > 0 && line_match_count >= opts.max_count {
+                    break;
+                }
                 continue;
             }
 
             if opts.count_only {
                 match_count += 1;
+                if opts.max_count > 0 && line_match_count >= opts.max_count {
+                    break;
+                }
                 continue;
             }
 
@@ -174,6 +183,26 @@ fn grep_reader<R: io::Read>(
             println!("{}{}", prefix, line);
             last_printed_line = Some(i);
             after_remaining = opts.after_context;
+            if opts.max_count > 0 && line_match_count >= opts.max_count {
+                // Still need to print after-context lines
+                // But stop matching new lines
+                for (j, aline) in lines.iter().enumerate().skip(i + 1) {
+                    if after_remaining == 0 {
+                        break;
+                    }
+                    let mut apfx = String::new();
+                    if show_filename {
+                        apfx.push_str(filename);
+                        apfx.push('-');
+                    }
+                    if opts.line_numbers {
+                        apfx.push_str(&format!("{}-", j + 1));
+                    }
+                    println!("{}{}", apfx, aline);
+                    after_remaining -= 1;
+                }
+                break;
+            }
         } else if after_remaining > 0 && !opts.count_only && !opts.quiet && !opts.files_with_matches
         {
             // Print after-context line
@@ -274,6 +303,7 @@ fn main() {
         suppress_errors: false,
         after_context: 0,
         before_context: 0,
+        max_count: 0,
     };
     let mut positional: Vec<String> = Vec::new();
     let mut past_flags = false;
@@ -318,6 +348,14 @@ fn main() {
             i += 1;
             continue;
         }
+        if arg == "-m" || arg == "--max-count" {
+            i += 1;
+            if i < args.len() {
+                opts.max_count = args[i].parse().unwrap_or(0);
+            }
+            i += 1;
+            continue;
+        }
         if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") {
             let chars: Vec<char> = arg[1..].chars().collect();
             let mut ci = 0;
@@ -335,7 +373,7 @@ fn main() {
                     'q' => opts.quiet = true,
                     'F' => opts.fixed_string = true,
                     's' => opts.suppress_errors = true,
-                    'A' | 'B' | 'C' => {
+                    'A' | 'B' | 'C' | 'm' => {
                         // Value may be remainder of this arg or the next arg
                         let val_str = if ci + 1 < chars.len() {
                             chars[ci + 1..].iter().collect::<String>()
@@ -355,6 +393,7 @@ fn main() {
                                 opts.before_context = val;
                                 opts.after_context = val;
                             }
+                            'm' => opts.max_count = val,
                             _ => unreachable!(),
                         }
                         break; // consumed rest of this arg

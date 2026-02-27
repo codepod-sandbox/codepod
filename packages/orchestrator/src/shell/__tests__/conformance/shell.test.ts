@@ -1250,4 +1250,90 @@ y"; echo "\${items[@]}"`);
       expect(r.stdout).toBe('x y\n');
     });
   });
+
+  // ---------- sed -i (in-place edit) ----------
+  describe('sed -i', () => {
+    it('edits file in place', async () => {
+      const r = await runner.run(`echo "hello world" > /tmp/si.txt; sed -i 's/world/earth/' /tmp/si.txt; cat /tmp/si.txt`);
+      expect(r.stdout).toBe('hello earth\n');
+    });
+
+    it('-i with multiple files', async () => {
+      const r = await runner.run(`echo "aaa" > /tmp/si1.txt; echo "aaa" > /tmp/si2.txt; sed -i 's/aaa/bbb/' /tmp/si1.txt /tmp/si2.txt; cat /tmp/si1.txt /tmp/si2.txt`);
+      expect(r.stdout).toBe('bbb\nbbb\n');
+    });
+
+    it('-i with delete command', async () => {
+      const r = await runner.run(`printf "line1\\nline2\\nline3\\n" > /tmp/sid.txt; sed -i '2d' /tmp/sid.txt; cat /tmp/sid.txt`);
+      expect(r.stdout).toBe('line1\nline3\n');
+    });
+  });
+
+  // ---------- sed -E (extended regex) ----------
+  describe('sed -E', () => {
+    it('uses ERE without backslash groups', async () => {
+      const r = await runner.run(`echo "abc123def" | sed -E 's/[0-9]+/NUM/'`);
+      expect(r.stdout).toBe('abcNUMdef\n');
+    });
+
+    it('ERE alternation with |', async () => {
+      const r = await runner.run(`echo "cat" | sed -E 's/cat|dog/pet/'`);
+      expect(r.stdout).toBe('pet\n');
+    });
+
+    it('ERE with + quantifier', async () => {
+      const r = await runner.run(`echo "aabbb" | sed -E 's/b+/X/'`);
+      expect(r.stdout).toBe('aaX\n');
+    });
+  });
+
+  // ---------- grep -m (max count) ----------
+  describe('grep -m', () => {
+    it('stops after N matches', async () => {
+      const r = await runner.run(`printf "a\\nb\\na\\nb\\na\\n" | grep -m 2 a`);
+      expect(r.stdout).toBe('a\na\n');
+    });
+
+    it('-m with -c counts up to limit', async () => {
+      const r = await runner.run(`printf "x\\nx\\nx\\nx\\n" | grep -m 2 -c x`);
+      expect(r.stdout).toBe('2\n');
+    });
+
+    it('-m with -n shows line numbers', async () => {
+      const r = await runner.run(`printf "a\\nb\\na\\nb\\n" | grep -m 1 -n a`);
+      expect(r.stdout).toBe('1:a\n');
+    });
+  });
+
+  // ---------- exec builtin ----------
+  describe('exec builtin', () => {
+    it('runs a command', async () => {
+      const r = await runner.run(`exec echo hello`);
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('exec with no command succeeds', async () => {
+      const r = await runner.run(`exec; echo "still here"`);
+      expect(r.stdout).toBe('still here\n');
+    });
+  });
+
+  // ---------- readonly builtin ----------
+  describe('readonly builtin', () => {
+    it('sets and protects a variable', async () => {
+      const r = await runner.run(`readonly X=42; echo $X`);
+      expect(r.stdout).toBe('42\n');
+    });
+
+    it('rejects assignment to readonly var', async () => {
+      const r = await runner.run(`readonly Y=1; Y=2; echo $Y`);
+      expect(r.stderr).toContain('readonly');
+      expect(r.stdout).toBe('1\n');
+    });
+
+    it('marks existing var as readonly', async () => {
+      const r = await runner.run(`Z=hello; readonly Z; Z=world 2>/dev/null; echo $Z`);
+      expect(r.stdout).toBe('hello\n');
+    });
+  });
 });

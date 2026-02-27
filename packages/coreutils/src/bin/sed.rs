@@ -61,13 +61,28 @@ fn bre_to_ere(pattern: &str) -> String {
     result
 }
 
-fn compile_bre(pattern: &str) -> Regex {
-    let ere = bre_to_ere(pattern);
+/// Global ERE mode flag — when true, patterns are already ERE (skip BRE translation).
+static mut ERE_MODE: bool = false;
+
+fn compile_pattern(pattern: &str) -> Regex {
+    let ere = unsafe {
+        if ERE_MODE {
+            pattern.to_string()
+        } else {
+            bre_to_ere(pattern)
+        }
+    };
     Regex::new(&ere).unwrap_or_else(|_| Regex::new(&regex::escape(pattern)).unwrap())
 }
 
-fn compile_bre_case_insensitive(pattern: &str) -> Regex {
-    let ere = bre_to_ere(pattern);
+fn compile_pattern_case_insensitive(pattern: &str) -> Regex {
+    let ere = unsafe {
+        if ERE_MODE {
+            pattern.to_string()
+        } else {
+            bre_to_ere(pattern)
+        }
+    };
     RegexBuilder::new(&ere)
         .case_insensitive(true)
         .build()
@@ -217,9 +232,9 @@ fn parse_substitute(s: &str) -> Option<SedCmd> {
     }
 
     let re = if ignore_case {
-        compile_bre_case_insensitive(&pattern_str)
+        compile_pattern_case_insensitive(&pattern_str)
     } else {
-        compile_bre(&pattern_str)
+        compile_pattern(&pattern_str)
     };
 
     Some(SedCmd::Substitute {
@@ -281,7 +296,7 @@ fn parse_address(s: &str) -> (Address, &str) {
         if let Some(end) = rest.find('/') {
             let pattern = rest[..end].to_string();
             let after = &rest[end + 1..];
-            let re = compile_bre(&pattern);
+            let re = compile_pattern(&pattern);
             let addr = Address::Pattern(re);
             return finish_address(addr, after);
         }
@@ -698,7 +713,7 @@ struct SedState {
     range_active: Vec<bool>,
 }
 
-fn run_sed(input: &mut dyn Read, rules: &[Rule], suppress: bool) {
+fn run_sed(input: &mut dyn Read, rules: &[Rule], suppress: bool, out: &mut dyn Write) {
     let reader = BufReader::new(input);
     let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let total = lines.len();
@@ -739,25 +754,22 @@ fn run_sed(input: &mut dyn Read, rules: &[Rule], suppress: bool) {
         );
 
         if let Some(text) = change_text {
-            // c\ replaces the line entirely; suppress original output
             for t in &insert_text {
-                println!("{}", t);
+                let _ = writeln!(out, "{}", t);
             }
-            println!("{}", text);
+            let _ = writeln!(out, "{}", text);
         } else if !deleted {
             for t in &insert_text {
-                println!("{}", t);
+                let _ = writeln!(out, "{}", t);
             }
-            // Print explicit p copies
             for _ in 0..print_count {
-                println!("{}", current);
+                let _ = writeln!(out, "{}", current);
             }
-            // Print default output (unless suppressed; s///p overrides suppression)
             if !suppress || (sub_print && print_count == 0) {
-                println!("{}", current);
+                let _ = writeln!(out, "{}", current);
             }
             for t in &append_text {
-                println!("{}", t);
+                let _ = writeln!(out, "{}", t);
             }
         }
 
@@ -963,6 +975,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     let mut suppress = false;
+    let mut in_place = false;
     let mut scripts: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
 
@@ -970,6 +983,10 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "-n" => suppress = true,
+            "-i" => in_place = true,
+            "-E" | "-r" => unsafe {
+                ERE_MODE = true;
+            },
             "-e" => {
                 i += 1;
                 if i >= args.len() {
@@ -979,6 +996,33 @@ fn main() {
                 scripts.push(args[i].clone());
             }
             arg => {
+                // Handle combined flags like -ni, -in, -nE, etc.
+                if arg.starts_with('-') && arg.len() > 1 && !arg.contains('=') {
+                    let mut is_flags = true;
+                    for c in arg[1..].chars() {
+                        match c {
+                            'n' | 'i' | 'E' | 'r' => {}
+                            _ => {
+                                is_flags = false;
+                                break;
+                            }
+                        }
+                    }
+                    if is_flags {
+                        for c in arg[1..].chars() {
+                            match c {
+                                'n' => suppress = true,
+                                'i' => in_place = true,
+                                'E' | 'r' => unsafe {
+                                    ERE_MODE = true;
+                                },
+                                _ => {}
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
                 if scripts.is_empty() && !arg.starts_with('-') {
                     scripts.push(arg.to_string());
                 } else {
@@ -1002,11 +1046,32 @@ fn main() {
     if files.is_empty() {
         let stdin = io::stdin();
         let mut lock = stdin.lock();
-        run_sed(&mut lock, &rules, suppress);
+        let mut stdout = io::stdout().lock();
+        run_sed(&mut lock, &rules, suppress, &mut stdout);
+    } else if in_place {
+        for file in &files {
+            // Read entire file
+            let content = match std::fs::read(file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("sed: {}: {}", file, e);
+                    process::exit(1);
+                }
+            };
+            let mut cursor = io::Cursor::new(content);
+            let mut output = Vec::new();
+            run_sed(&mut cursor, &rules, suppress, &mut output);
+            // Write back
+            if let Err(e) = std::fs::write(file, &output) {
+                eprintln!("sed: {}: {}", file, e);
+                process::exit(1);
+            }
+        }
     } else {
+        let mut stdout = io::stdout().lock();
         for file in &files {
             match File::open(file) {
-                Ok(mut f) => run_sed(&mut f, &rules, suppress),
+                Ok(mut f) => run_sed(&mut f, &rules, suppress, &mut stdout),
                 Err(e) => {
                     eprintln!("sed: {}: {}", file, e);
                     process::exit(1);
