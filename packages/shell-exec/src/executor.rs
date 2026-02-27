@@ -9,6 +9,345 @@ use crate::expand::{
 use crate::host::{HostInterface, WriteMode};
 use crate::state::ShellState;
 
+// ---------------------------------------------------------------------------
+// Path resolution and command dispatch constants/helpers
+// ---------------------------------------------------------------------------
+
+/// Commands that default to "." (current directory) when no positional
+/// (non-flag) arguments are given.
+const IMPLICIT_CWD_COMMANDS: &[&str] = &["ls", "find"];
+
+/// Commands whose args should NOT be resolved to absolute paths.
+const PASSTHROUGH_ARGS: &[&str] = &[
+    "echo", "printf", "basename", "dirname", "env", "true", "false", "find",
+];
+
+/// Commands where the first positional (non-flag) argument is a regex/pattern
+/// and should not be path-resolved. Other args resolve normally.
+const PATTERN_COMMANDS: &[&str] = &["grep", "sed", "awk", "rg"];
+
+/// Commands that create files/dirs — always resolve relative args.
+const CREATION_COMMANDS: &[&str] = &["mkdir", "touch", "cp", "mv", "tee"];
+
+/// Python interpreter names (for shebang dispatch).
+const PYTHON_INTERPRETERS: &[&str] = &["python", "python3"];
+
+/// Returns true if the command defaults to "." and no non-flag args were given.
+fn needs_default_dir(cmd: &str, args: &[&str]) -> bool {
+    IMPLICIT_CWD_COMMANDS.contains(&cmd) && args.iter().all(|a| a.starts_with('-'))
+}
+
+/// Resolve a single argument to an absolute path if it looks like a relative
+/// file path. Flags (starting with `-`) and absolute paths (starting with `/`)
+/// pass through. Commands in PASSTHROUGH_ARGS never resolve their args.
+///
+/// Uses `host.stat()` to disambiguate: only resolves if the resolved path
+/// exists in VFS. Also resolves args that look like filenames (have a file
+/// extension, no glob chars, don't start with `.`).
+fn resolve_arg_if_path(
+    state: &ShellState,
+    host: &dyn HostInterface,
+    cmd_name: &str,
+    arg: &str,
+) -> String {
+    if PASSTHROUGH_ARGS.contains(&cmd_name) {
+        return arg.to_string();
+    }
+    if arg.starts_with('-') || arg.starts_with('/') {
+        return arg.to_string();
+    }
+    // Creation commands always resolve relative args
+    if CREATION_COMMANDS.contains(&cmd_name) {
+        return state.resolve_path(arg);
+    }
+    // For other commands, only resolve if the resolved path exists in VFS
+    let resolved = state.resolve_path(arg);
+    if let Ok(info) = host.stat(&resolved) {
+        if info.exists {
+            return resolved;
+        }
+    }
+    // Arg looks like a filename (e.g. "archive.tar") — resolve it so
+    // tools can create new files relative to CWD. Must end with a file
+    // extension, not contain glob/pattern chars, and not start with "."
+    // (which would match jq expressions like ".name").
+    if looks_like_filename(arg) {
+        return resolved;
+    }
+    arg.to_string()
+}
+
+/// Returns true if `arg` looks like a filename: ends with `.ext`, contains
+/// no glob/pattern characters, and does not start with `.`.
+fn looks_like_filename(arg: &str) -> bool {
+    if arg.starts_with('.') {
+        return false;
+    }
+    if arg.contains('*')
+        || arg.contains('?')
+        || arg.contains('{')
+        || arg.contains('}')
+        || arg.contains('/')
+    {
+        return false;
+    }
+    // Check for file extension: .\w+$
+    if let Some(dot_pos) = arg.rfind('.') {
+        let ext = &arg[dot_pos + 1..];
+        !ext.is_empty() && ext.chars().all(|c| c.is_alphanumeric() || c == '_')
+    } else {
+        false
+    }
+}
+
+/// Resolve command args. For PATTERN_COMMANDS, skip resolving the first
+/// positional (non-flag) arg (the regex/pattern).
+fn resolve_command_args(
+    state: &ShellState,
+    host: &dyn HostInterface,
+    cmd_name: &str,
+    args: &[&str],
+) -> Vec<String> {
+    if !PATTERN_COMMANDS.contains(&cmd_name) {
+        return args
+            .iter()
+            .map(|a| resolve_arg_if_path(state, host, cmd_name, a))
+            .collect();
+    }
+    // Find the first positional arg (not a flag) — that's the pattern.
+    let pat_idx = args.iter().position(|a| !a.starts_with('-'));
+    args.iter()
+        .enumerate()
+        .map(|(i, a)| {
+            if Some(i) == pat_idx {
+                a.to_string()
+            } else {
+                resolve_arg_if_path(state, host, cmd_name, a)
+            }
+        })
+        .collect()
+}
+
+/// Parse a shebang line and return the interpreter name.
+///
+/// Examples:
+///   `#!/usr/bin/env python3` -> Some("python3")
+///   `#!/usr/bin/python3`     -> Some("python3")
+///   `#!/bin/sh`              -> Some("sh")
+///   `#!/bin/bash`            -> Some("bash")
+///   (no shebang)             -> None
+fn parse_shebang(first_line: &str) -> Option<String> {
+    if !first_line.starts_with("#!") {
+        return None;
+    }
+    let rest = first_line[2..].trim();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+
+    // #!/usr/bin/env <interpreter> — use the second word
+    if parts.len() >= 2 && parts[0].ends_with("/env") {
+        return Some(parts[1].to_string());
+    }
+
+    // #!/path/to/interpreter — use the basename
+    if !parts.is_empty() {
+        let prog = parts[0];
+        if let Some(slash) = prog.rfind('/') {
+            return Some(prog[slash + 1..].to_string());
+        }
+        return Some(prog.to_string());
+    }
+
+    None
+}
+
+/// Returns true if the interpreter name is a Python interpreter.
+fn is_python_interpreter(name: &str) -> bool {
+    if PYTHON_INTERPRETERS.contains(&name) {
+        return true;
+    }
+    // Match python3.X patterns (python3.10, python3.11, etc.)
+    if let Some(rest) = name.strip_prefix("python3.") {
+        return rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Normalize an absolute path by resolving `.` and `..` segments.
+/// E.g. "/home/user/./script.sh" -> "/home/user/script.sh",
+///      "/home/user/../other/file" -> "/home/other/file".
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {} // skip empty segments and "."
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
+/// Execute a file by path (e.g. `./script.sh`, `/tmp/run.py`).
+/// Reads the file, checks for a shebang line, and dispatches to
+/// the appropriate interpreter.
+fn exec_path(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    cmd_path: &str,
+    args: &[&str],
+    stdin_data: &str,
+) -> Result<ControlFlow, ShellError> {
+    let resolved = normalize_path(&state.resolve_path(cmd_path));
+
+    // Read the file
+    let text = host
+        .read_file(&resolved)
+        .map_err(|_| ShellError::HostError(format!("no such file or directory: {cmd_path}")))?;
+
+    let first_line = text.lines().next().unwrap_or("");
+    let interpreter = parse_shebang(first_line);
+
+    // Dispatch based on interpreter
+    if let Some(ref interp) = interpreter {
+        if is_python_interpreter(interp) {
+            // Python script: spawn python with the resolved script path + args
+            let mut python_args: Vec<&str> = vec![resolved.as_str()];
+            python_args.extend(args);
+            let env_pairs: Vec<(&str, &str)> = state
+                .env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let spawn_result = host
+                .spawn("python3", &python_args, &env_pairs, &state.cwd, stdin_data)
+                .map_err(|e| ShellError::HostError(e.to_string()))?;
+            state.last_exit_code = spawn_result.exit_code;
+            return Ok(ControlFlow::Normal(RunResult {
+                exit_code: spawn_result.exit_code,
+                stdout: spawn_result.stdout,
+                stderr: spawn_result.stderr,
+                execution_time_ms: 0,
+            }));
+        }
+    }
+
+    // Default: run as shell script (covers #!/bin/sh, #!/bin/bash, and no shebang)
+    exec_shell_script(state, host, &text, args)
+}
+
+/// Execute a string as a shell script. Strips shebang if present,
+/// sets positional parameters, and runs via the parser.
+fn exec_shell_script(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    script_text: &str,
+    args: &[&str],
+) -> Result<ControlFlow, ShellError> {
+    // Strip shebang line if present
+    let script = if script_text.starts_with("#!") {
+        match script_text.find('\n') {
+            Some(nl) => &script_text[nl + 1..],
+            None => "",
+        }
+    } else {
+        script_text
+    };
+
+    // Set positional parameters
+    let saved_positionals = state.positional_args.clone();
+    state.positional_args = args.iter().map(|s| s.to_string()).collect();
+
+    // Run the entire script as a single parsed command
+    let parsed = codepod_shell::parser::parse(script);
+    let result = exec_command(state, host, &parsed);
+
+    // Restore positional parameters
+    state.positional_args = saved_positionals;
+
+    result
+}
+
+/// Handle `sh`/`bash` command dispatch.
+/// - `sh -c 'cmd'` -> parse and execute cmd string
+/// - `sh script.sh` -> read and execute script via exec_path
+/// - bare `sh`/`bash` -> succeed silently
+fn exec_shell_command(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    args: &[&str],
+    stdin_data: &str,
+) -> Result<ControlFlow, ShellError> {
+    // sh -c 'command string'
+    if args.len() >= 2 && args[0] == "-c" {
+        let cmd_str = args[1];
+        let parsed = codepod_shell::parser::parse(cmd_str);
+        return exec_command(state, host, &parsed);
+    }
+    // sh script.sh — read and execute as shell script
+    if !args.is_empty() && !args[0].starts_with('-') {
+        return exec_path(state, host, args[0], &args[1..], stdin_data);
+    }
+    // Bare sh/bash with no args — not interactive, just succeed
+    Ok(ControlFlow::Normal(RunResult::empty()))
+}
+
+/// Apply path resolution and command dispatch for external commands.
+/// Returns Some(result) if the command was handled (shebang, sh/bash dispatch),
+/// or None if the caller should proceed with normal spawn.
+fn dispatch_external_command(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    cmd_name: &str,
+    args: &[&str],
+    stdin_data: &str,
+) -> Result<Option<(String, Vec<String>)>, ControlFlow> {
+    // 1. Shebang check — if cmd_name contains '/'
+    if cmd_name.contains('/') {
+        match exec_path(state, host, cmd_name, args, stdin_data) {
+            Ok(flow) => return Err(flow),
+            Err(e) => {
+                return Err(ControlFlow::Normal(RunResult::error(
+                    127,
+                    format!("{}\n", e),
+                )));
+            }
+        }
+    }
+
+    // 2. Shell command dispatch — if cmd_name is `sh` or `bash`
+    if cmd_name == "sh" || cmd_name == "bash" {
+        match exec_shell_command(state, host, args, stdin_data) {
+            Ok(flow) => return Err(flow),
+            Err(e) => {
+                return Err(ControlFlow::Normal(RunResult::error(1, format!("{}\n", e))));
+            }
+        }
+    }
+
+    // 3. Python command dispatch
+    if cmd_name == "python" || cmd_name == "python3" || is_python_interpreter(cmd_name) {
+        // Just let it go through to host.spawn with resolved args
+    }
+
+    // 4. needs_default_dir check — append cwd if needed
+    let mut final_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    if needs_default_dir(cmd_name, args) {
+        final_args.push(state.cwd.clone());
+    }
+
+    // 5. resolve_command_args — resolve args using resolve_arg_if_path
+    let args_refs: Vec<&str> = final_args.iter().map(|s| s.as_str()).collect();
+    let resolved_args = resolve_command_args(state, host, cmd_name, &args_refs);
+
+    Ok(Some((cmd_name.to_string(), resolved_args)))
+}
+
 /// Execute a parsed `Command` AST node.
 pub fn exec_command(
     state: &mut ShellState,
@@ -212,6 +551,88 @@ pub fn exec_command(
                 }));
             }
 
+            // ── Path resolution and command dispatch ─────────────────────
+            let (spawn_program, spawn_args) =
+                match dispatch_external_command(state, host, cmd_name, &args, &stdin_data) {
+                    Ok(Some((prog, resolved))) => (prog, resolved),
+                    Ok(None) => (
+                        cmd_name.to_string(),
+                        args.iter().map(|s| s.to_string()).collect(),
+                    ),
+                    Err(flow) => {
+                        // Command was handled by dispatch (shebang, sh/bash)
+                        let run = match flow {
+                            ControlFlow::Normal(r) => r,
+                            other => return Ok(other),
+                        };
+                        state.last_exit_code = run.exit_code;
+                        let mut stdout = run.stdout;
+                        let mut stderr = run.stderr;
+
+                        // Process output redirects for dispatched commands too
+                        let mut last_stdout_redirect_path: Option<String> = None;
+                        for redir in redirects {
+                            match &redir.redirect_type {
+                                RedirectType::StdoutOverwrite(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    host.write_file(&resolved, &stdout, WriteMode::Truncate)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                    stdout = String::new();
+                                    last_stdout_redirect_path = Some(resolved);
+                                }
+                                RedirectType::StdoutAppend(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    host.write_file(&resolved, &stdout, WriteMode::Append)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                    stdout = String::new();
+                                    last_stdout_redirect_path = Some(resolved);
+                                }
+                                RedirectType::StderrOverwrite(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    host.write_file(&resolved, &stderr, WriteMode::Truncate)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                    stderr = String::new();
+                                }
+                                RedirectType::StderrAppend(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    host.write_file(&resolved, &stderr, WriteMode::Append)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                    stderr = String::new();
+                                }
+                                RedirectType::StderrToStdout => {
+                                    if let Some(ref file_path) = last_stdout_redirect_path {
+                                        if !stderr.is_empty() {
+                                            host.write_file(file_path, &stderr, WriteMode::Append)
+                                                .map_err(|e| {
+                                                    ShellError::HostError(e.to_string())
+                                                })?;
+                                        }
+                                    } else {
+                                        stdout.push_str(&stderr);
+                                    }
+                                    stderr = String::new();
+                                }
+                                RedirectType::BothOverwrite(path) => {
+                                    let resolved = state.resolve_path(path);
+                                    let combined = format!("{stdout}{stderr}");
+                                    host.write_file(&resolved, &combined, WriteMode::Truncate)
+                                        .map_err(|e| ShellError::HostError(e.to_string()))?;
+                                    stdout = String::new();
+                                    stderr = String::new();
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        return Ok(ControlFlow::Normal(RunResult {
+                            exit_code: run.exit_code,
+                            stdout,
+                            stderr,
+                            execution_time_ms: 0,
+                        }));
+                    }
+                };
+
             // Convert env HashMap to the slice format expected by spawn.
             let env_pairs: Vec<(&str, &str)> = state
                 .env
@@ -219,8 +640,15 @@ pub fn exec_command(
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
 
+            let spawn_args_refs: Vec<&str> = spawn_args.iter().map(|s| s.as_str()).collect();
             let spawn_result = host
-                .spawn(cmd_name, &args, &env_pairs, &state.cwd, &stdin_data)
+                .spawn(
+                    &spawn_program,
+                    &spawn_args_refs,
+                    &env_pairs,
+                    &state.cwd,
+                    &stdin_data,
+                )
                 .map_err(|e| ShellError::HostError(e.to_string()))?;
 
             state.last_exit_code = spawn_result.exit_code;
@@ -519,112 +947,175 @@ pub fn exec_command(
                             continue;
                         }
 
-                        let env_pairs: Vec<(&str, &str)> = state
-                            .env
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.as_str()))
-                            .collect();
+                        // ── Path resolution and command dispatch (pipeline) ──
+                        let dispatch_result = dispatch_external_command(
+                            state,
+                            host,
+                            cmd_name,
+                            &args,
+                            &effective_stdin,
+                        );
 
-                        match host.spawn(cmd_name, &args, &env_pairs, &state.cwd, &effective_stdin)
-                        {
-                            Ok(spawn_result) => {
-                                let mut stdout = spawn_result.stdout;
-                                let mut stderr = spawn_result.stderr;
+                        match dispatch_result {
+                            Err(flow) => {
+                                // Command was handled by dispatch (shebang, sh/bash)
+                                match flow {
+                                    ControlFlow::Normal(r) => {
+                                        state.last_exit_code = r.exit_code;
+                                        last_result = r;
+                                    }
+                                    ControlFlow::Exit(code, stdout, stderr) => {
+                                        return Ok(ControlFlow::Exit(code, stdout, stderr));
+                                    }
+                                    other => return Ok(other),
+                                }
+                                if pipefail && last_result.exit_code != 0 {
+                                    pipefail_code = last_result.exit_code;
+                                }
+                                stdin_data = last_result.stdout.clone();
+                                continue;
+                            }
+                            Ok(dispatch_info) => {
+                                let (prog, resolved_args) = match dispatch_info {
+                                    Some((p, a)) => (p, a),
+                                    None => (
+                                        cmd_name.to_string(),
+                                        args.iter().map(|s| s.to_string()).collect(),
+                                    ),
+                                };
 
-                                // Handle output redirects in pipeline stages
-                                let mut last_stdout_redirect_path: Option<String> = None;
+                                let env_pairs: Vec<(&str, &str)> = state
+                                    .env
+                                    .iter()
+                                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                                    .collect();
 
-                                for redir in redirects {
-                                    match &redir.redirect_type {
-                                        RedirectType::StdoutOverwrite(path) => {
-                                            let resolved = state.resolve_path(path);
-                                            host.write_file(
-                                                &resolved,
-                                                &stdout,
-                                                WriteMode::Truncate,
-                                            )
-                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
-                                            stdout = String::new();
-                                            last_stdout_redirect_path = Some(resolved);
-                                        }
-                                        RedirectType::StdoutAppend(path) => {
-                                            let resolved = state.resolve_path(path);
-                                            host.write_file(&resolved, &stdout, WriteMode::Append)
-                                                .map_err(|e| {
-                                                    ShellError::HostError(e.to_string())
-                                                })?;
-                                            stdout = String::new();
-                                            last_stdout_redirect_path = Some(resolved);
-                                        }
-                                        RedirectType::StderrOverwrite(path) => {
-                                            let resolved = state.resolve_path(path);
-                                            host.write_file(
-                                                &resolved,
-                                                &stderr,
-                                                WriteMode::Truncate,
-                                            )
-                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
-                                            stderr = String::new();
-                                        }
-                                        RedirectType::StderrAppend(path) => {
-                                            let resolved = state.resolve_path(path);
-                                            host.write_file(&resolved, &stderr, WriteMode::Append)
-                                                .map_err(|e| {
-                                                    ShellError::HostError(e.to_string())
-                                                })?;
-                                            stderr = String::new();
-                                        }
-                                        RedirectType::StderrToStdout => {
-                                            if let Some(ref file_path) = last_stdout_redirect_path {
-                                                if !stderr.is_empty() {
+                                let spawn_args_refs: Vec<&str> =
+                                    resolved_args.iter().map(|s| s.as_str()).collect();
+
+                                match host.spawn(
+                                    &prog,
+                                    &spawn_args_refs,
+                                    &env_pairs,
+                                    &state.cwd,
+                                    &effective_stdin,
+                                ) {
+                                    Ok(spawn_result) => {
+                                        let mut stdout = spawn_result.stdout;
+                                        let mut stderr = spawn_result.stderr;
+
+                                        // Handle output redirects in pipeline stages
+                                        let mut last_stdout_redirect_path: Option<String> = None;
+
+                                        for redir in redirects {
+                                            match &redir.redirect_type {
+                                                RedirectType::StdoutOverwrite(path) => {
+                                                    let resolved = state.resolve_path(path);
                                                     host.write_file(
-                                                        file_path,
+                                                        &resolved,
+                                                        &stdout,
+                                                        WriteMode::Truncate,
+                                                    )
+                                                    .map_err(|e| {
+                                                        ShellError::HostError(e.to_string())
+                                                    })?;
+                                                    stdout = String::new();
+                                                    last_stdout_redirect_path = Some(resolved);
+                                                }
+                                                RedirectType::StdoutAppend(path) => {
+                                                    let resolved = state.resolve_path(path);
+                                                    host.write_file(
+                                                        &resolved,
+                                                        &stdout,
+                                                        WriteMode::Append,
+                                                    )
+                                                    .map_err(|e| {
+                                                        ShellError::HostError(e.to_string())
+                                                    })?;
+                                                    stdout = String::new();
+                                                    last_stdout_redirect_path = Some(resolved);
+                                                }
+                                                RedirectType::StderrOverwrite(path) => {
+                                                    let resolved = state.resolve_path(path);
+                                                    host.write_file(
+                                                        &resolved,
+                                                        &stderr,
+                                                        WriteMode::Truncate,
+                                                    )
+                                                    .map_err(|e| {
+                                                        ShellError::HostError(e.to_string())
+                                                    })?;
+                                                    stderr = String::new();
+                                                }
+                                                RedirectType::StderrAppend(path) => {
+                                                    let resolved = state.resolve_path(path);
+                                                    host.write_file(
+                                                        &resolved,
                                                         &stderr,
                                                         WriteMode::Append,
                                                     )
                                                     .map_err(|e| {
                                                         ShellError::HostError(e.to_string())
                                                     })?;
+                                                    stderr = String::new();
                                                 }
-                                            } else {
-                                                stdout.push_str(&stderr);
+                                                RedirectType::StderrToStdout => {
+                                                    if let Some(ref file_path) =
+                                                        last_stdout_redirect_path
+                                                    {
+                                                        if !stderr.is_empty() {
+                                                            host.write_file(
+                                                                file_path,
+                                                                &stderr,
+                                                                WriteMode::Append,
+                                                            )
+                                                            .map_err(|e| {
+                                                                ShellError::HostError(e.to_string())
+                                                            })?;
+                                                        }
+                                                    } else {
+                                                        stdout.push_str(&stderr);
+                                                    }
+                                                    stderr = String::new();
+                                                }
+                                                RedirectType::BothOverwrite(path) => {
+                                                    let resolved = state.resolve_path(path);
+                                                    let combined = format!("{stdout}{stderr}");
+                                                    host.write_file(
+                                                        &resolved,
+                                                        &combined,
+                                                        WriteMode::Truncate,
+                                                    )
+                                                    .map_err(|e| {
+                                                        ShellError::HostError(e.to_string())
+                                                    })?;
+                                                    stdout = String::new();
+                                                    stderr = String::new();
+                                                }
+                                                // Input redirects already handled above.
+                                                RedirectType::StdinFrom(_)
+                                                | RedirectType::Heredoc(_)
+                                                | RedirectType::HeredocStrip(_)
+                                                | RedirectType::HereString(_) => {}
                                             }
-                                            stderr = String::new();
                                         }
-                                        RedirectType::BothOverwrite(path) => {
-                                            let resolved = state.resolve_path(path);
-                                            let combined = format!("{stdout}{stderr}");
-                                            host.write_file(
-                                                &resolved,
-                                                &combined,
-                                                WriteMode::Truncate,
-                                            )
-                                            .map_err(|e| ShellError::HostError(e.to_string()))?;
-                                            stdout = String::new();
-                                            stderr = String::new();
-                                        }
-                                        // Input redirects already handled above.
-                                        RedirectType::StdinFrom(_)
-                                        | RedirectType::Heredoc(_)
-                                        | RedirectType::HeredocStrip(_)
-                                        | RedirectType::HereString(_) => {}
+
+                                        state.last_exit_code = spawn_result.exit_code;
+                                        last_result = RunResult {
+                                            exit_code: spawn_result.exit_code,
+                                            stdout,
+                                            stderr,
+                                            execution_time_ms: 0,
+                                        };
+                                    }
+                                    Err(e) => {
+                                        state.last_exit_code = 127;
+                                        last_result =
+                                            RunResult::error(127, format!("{}: {}\n", cmd_name, e));
                                     }
                                 }
-
-                                state.last_exit_code = spawn_result.exit_code;
-                                last_result = RunResult {
-                                    exit_code: spawn_result.exit_code,
-                                    stdout,
-                                    stderr,
-                                    execution_time_ms: 0,
-                                };
-                            }
-                            Err(e) => {
-                                state.last_exit_code = 127;
-                                last_result =
-                                    RunResult::error(127, format!("{}: {}\n", cmd_name, e));
-                            }
-                        }
+                            } // close Ok(dispatch_info)
+                        } // close match dispatch_result
                     }
                     _ => {
                         // Non-simple commands: just execute them.
@@ -4354,5 +4845,803 @@ mod tests {
         let result = exec_command(&mut state, &host, &cmd);
         assert!(result.is_ok());
         assert_eq!(state.env.get("GREETING"), Some(&"hello".to_string()));
+    }
+
+    // ========================================================================
+    // Task 15: Path resolution and command dispatch tests
+    // ========================================================================
+
+    // ---- needs_default_dir ----
+
+    #[test]
+    fn needs_default_dir_ls_no_args() {
+        assert!(needs_default_dir("ls", &[]));
+    }
+
+    #[test]
+    fn needs_default_dir_ls_with_flags_only() {
+        assert!(needs_default_dir("ls", &["-la", "-R"]));
+    }
+
+    #[test]
+    fn needs_default_dir_ls_with_path_arg() {
+        assert!(!needs_default_dir("ls", &["-l", "/tmp"]));
+    }
+
+    #[test]
+    fn needs_default_dir_find_no_args() {
+        assert!(needs_default_dir("find", &[]));
+    }
+
+    #[test]
+    fn needs_default_dir_other_command() {
+        assert!(!needs_default_dir("grep", &[]));
+        assert!(!needs_default_dir("cat", &[]));
+    }
+
+    // ---- looks_like_filename ----
+
+    #[test]
+    fn looks_like_filename_with_extension() {
+        assert!(looks_like_filename("archive.tar"));
+        assert!(looks_like_filename("foo.txt"));
+        assert!(looks_like_filename("image.png"));
+    }
+
+    #[test]
+    fn looks_like_filename_no_extension() {
+        assert!(!looks_like_filename("somedir"));
+        assert!(!looks_like_filename("command"));
+    }
+
+    #[test]
+    fn looks_like_filename_starts_with_dot() {
+        assert!(!looks_like_filename(".name"));
+        assert!(!looks_like_filename(".hidden"));
+    }
+
+    #[test]
+    fn looks_like_filename_with_glob_chars() {
+        assert!(!looks_like_filename("*.txt"));
+        assert!(!looks_like_filename("file?.txt"));
+        assert!(!looks_like_filename("dir/file.txt"));
+        assert!(!looks_like_filename("{a,b}.txt"));
+    }
+
+    // ---- parse_shebang ----
+
+    #[test]
+    fn parse_shebang_env_python3() {
+        assert_eq!(
+            parse_shebang("#!/usr/bin/env python3"),
+            Some("python3".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_shebang_direct_python3() {
+        assert_eq!(
+            parse_shebang("#!/usr/bin/python3"),
+            Some("python3".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_shebang_sh() {
+        assert_eq!(parse_shebang("#!/bin/sh"), Some("sh".to_string()));
+    }
+
+    #[test]
+    fn parse_shebang_bash() {
+        assert_eq!(parse_shebang("#!/bin/bash"), Some("bash".to_string()));
+    }
+
+    #[test]
+    fn parse_shebang_no_shebang() {
+        assert_eq!(parse_shebang("echo hello"), None);
+        assert_eq!(parse_shebang(""), None);
+    }
+
+    #[test]
+    fn parse_shebang_env_with_spaces() {
+        assert_eq!(
+            parse_shebang("#!/usr/bin/env   python3"),
+            Some("python3".to_string())
+        );
+    }
+
+    // ---- is_python_interpreter ----
+
+    #[test]
+    fn is_python_interpreter_standard() {
+        assert!(is_python_interpreter("python"));
+        assert!(is_python_interpreter("python3"));
+    }
+
+    #[test]
+    fn is_python_interpreter_versioned() {
+        assert!(is_python_interpreter("python3.10"));
+        assert!(is_python_interpreter("python3.11"));
+        assert!(is_python_interpreter("python3.9"));
+    }
+
+    #[test]
+    fn is_python_interpreter_not_python() {
+        assert!(!is_python_interpreter("sh"));
+        assert!(!is_python_interpreter("bash"));
+        assert!(!is_python_interpreter("node"));
+    }
+
+    // ---- resolve_arg_if_path ----
+
+    #[test]
+    fn resolve_arg_passthrough_command() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        // echo args should never be resolved
+        assert_eq!(resolve_arg_if_path(&state, &host, "echo", "hello"), "hello");
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "printf", "world"),
+            "world"
+        );
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "find", "pattern"),
+            "pattern"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_flags_passthrough() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        assert_eq!(resolve_arg_if_path(&state, &host, "cat", "-n"), "-n");
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "grep", "--color"),
+            "--color"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_absolute_path_passthrough() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "cat", "/tmp/file.txt"),
+            "/tmp/file.txt"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_creation_command_always_resolves() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        // mkdir always resolves relative args
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "mkdir", "newdir"),
+            "/home/user/newdir"
+        );
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "touch", "newfile.txt"),
+            "/home/user/newfile.txt"
+        );
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "cp", "src"),
+            "/home/user/src"
+        );
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "mv", "old"),
+            "/home/user/old"
+        );
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "tee", "output.log"),
+            "/home/user/output.log"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_existing_file_resolves() {
+        let state = ShellState::new_default();
+        let host = MockHost::new().with_file("/home/user/data.csv", b"col1,col2\n");
+        // cat with a relative path that exists -> resolved
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "cat", "data.csv"),
+            "/home/user/data.csv"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_nonexistent_filename_resolves() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        // "archive.tar" looks like a filename (has extension, no glob chars)
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "tar", "archive.tar"),
+            "/home/user/archive.tar"
+        );
+    }
+
+    #[test]
+    fn resolve_arg_nonexistent_no_extension_passthrough() {
+        let state = ShellState::new_default();
+        let host = MockHost::new();
+        // "somedir" doesn't look like a filename, not a creation command
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "cat", "somedir"),
+            "somedir"
+        );
+    }
+
+    // ---- resolve_command_args ----
+
+    #[test]
+    fn resolve_command_args_normal_command() {
+        let state = ShellState::new_default();
+        let host = MockHost::new().with_file("/home/user/file.txt", b"content");
+        let args = vec!["file.txt", "-n"];
+        let resolved = resolve_command_args(&state, &host, "cat", &args);
+        assert_eq!(resolved[0], "/home/user/file.txt");
+        assert_eq!(resolved[1], "-n");
+    }
+
+    #[test]
+    fn resolve_command_args_pattern_command_skips_first_positional() {
+        let state = ShellState::new_default();
+        let host = MockHost::new().with_file("/home/user/file.txt", b"content");
+        // grep: first positional is the pattern, should NOT be resolved
+        let args = vec!["pattern", "file.txt"];
+        let resolved = resolve_command_args(&state, &host, "grep", &args);
+        assert_eq!(resolved[0], "pattern"); // pattern NOT resolved
+        assert_eq!(resolved[1], "/home/user/file.txt"); // file IS resolved
+    }
+
+    #[test]
+    fn resolve_command_args_pattern_command_with_flags() {
+        let state = ShellState::new_default();
+        let host = MockHost::new().with_file("/home/user/file.txt", b"content");
+        // grep -r pattern file.txt
+        let args = vec!["-r", "pattern", "file.txt"];
+        let resolved = resolve_command_args(&state, &host, "grep", &args);
+        assert_eq!(resolved[0], "-r"); // flag passthrough
+        assert_eq!(resolved[1], "pattern"); // first positional = pattern, not resolved
+        assert_eq!(resolved[2], "/home/user/file.txt"); // second positional resolved
+    }
+
+    #[test]
+    fn resolve_command_args_sed_pattern() {
+        let state = ShellState::new_default();
+        let host = MockHost::new().with_file("/home/user/file.txt", b"content");
+        // sed 's/foo/bar/' file.txt
+        let args = vec!["s/foo/bar/", "file.txt"];
+        let resolved = resolve_command_args(&state, &host, "sed", &args);
+        assert_eq!(resolved[0], "s/foo/bar/"); // pattern not resolved
+        assert_eq!(resolved[1], "/home/user/file.txt"); // file resolved
+    }
+
+    // ---- implicit cwd commands (integration) ----
+
+    #[test]
+    fn ls_with_no_args_appends_cwd() {
+        let host = MockHost::new().with_spawn_handler(|program, args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: format!("program={} args={:?}\n", program, args),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("ls -la");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(_run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // ls with only flags should have cwd appended
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "ls");
+        // Should contain the cwd as last arg
+        assert!(calls[0].args.contains(&"/home/user".to_string()));
+    }
+
+    #[test]
+    fn ls_with_dir_arg_no_cwd_appended() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("ls /tmp");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        // Should not append cwd when a non-flag arg is given
+        assert!(!calls[0].args.contains(&"/home/user".to_string()));
+    }
+
+    // ---- shebang-based execution ----
+
+    #[test]
+    fn exec_path_python_script() {
+        let host = MockHost::new()
+            .with_file(
+                "/home/user/script.py",
+                b"#!/usr/bin/env python3\nprint('hello')\n",
+            )
+            .with_spawn_handler(|program, args, _stdin| {
+                if program == "python3" {
+                    SpawnResult {
+                        exit_code: 0,
+                        stdout: format!("python3 called with {:?}\n", args),
+                        stderr: String::new(),
+                    }
+                } else {
+                    SpawnResult {
+                        exit_code: 127,
+                        stdout: String::new(),
+                        stderr: format!("{}: not found", program),
+                    }
+                }
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./script.py");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        // Should have spawned python3 with the resolved script path
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "python3");
+        assert!(calls[0].args[0].ends_with("/script.py"));
+    }
+
+    #[test]
+    fn exec_path_shell_script() {
+        let host = MockHost::new()
+            .with_file("/home/user/test.sh", b"#!/bin/sh\necho hello\n")
+            .with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./test.sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // Shell script is executed by parsing and running through our executor
+        // echo is a builtin, so it should produce output
+        assert_eq!(run.stdout, "hello\n");
+    }
+
+    #[test]
+    fn exec_path_script_no_shebang() {
+        let host = MockHost::new().with_file("/home/user/run.sh", b"echo no_shebang\n");
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./run.sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // Scripts without shebang default to shell execution
+        assert_eq!(run.stdout, "no_shebang\n");
+    }
+
+    #[test]
+    fn exec_path_nonexistent_file() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./nonexistent.sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_ne!(run.exit_code, 0);
+        assert!(run.stderr.contains("no such file"));
+    }
+
+    #[test]
+    fn exec_path_absolute_python() {
+        let host = MockHost::new()
+            .with_file("/tmp/run.py", b"#!/usr/bin/python3\nimport sys\n")
+            .with_spawn_handler(|program, args, _stdin| {
+                if program == "python3" {
+                    SpawnResult {
+                        exit_code: 0,
+                        stdout: format!("ran python with {:?}\n", args),
+                        stderr: String::new(),
+                    }
+                } else {
+                    SpawnResult {
+                        exit_code: 127,
+                        stdout: String::new(),
+                        stderr: "not found".to_string(),
+                    }
+                }
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("/tmp/run.py arg1 arg2");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[0].program, "python3");
+        assert_eq!(calls[0].args[0], "/tmp/run.py");
+        assert_eq!(calls[0].args[1], "arg1");
+        assert_eq!(calls[0].args[2], "arg2");
+    }
+
+    // ---- shell command dispatch ----
+
+    #[test]
+    fn sh_minus_c_executes_command() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("sh -c 'echo hello'");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "hello\n");
+    }
+
+    #[test]
+    fn bash_minus_c_executes_command() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("bash -c 'echo world'");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "world\n");
+    }
+
+    #[test]
+    fn sh_script_file() {
+        let host =
+            MockHost::new().with_file("/home/user/test.sh", b"#!/bin/sh\necho from_script\n");
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("sh test.sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "from_script\n");
+    }
+
+    #[test]
+    fn bare_sh_succeeds() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    #[test]
+    fn bare_bash_succeeds() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("bash");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.exit_code, 0);
+    }
+
+    // ---- shell script positional parameters ----
+
+    #[test]
+    fn shell_script_positional_params() {
+        let host = MockHost::new().with_file("/home/user/params.sh", b"echo $1 $2\n");
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("sh params.sh hello world");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "hello world\n");
+    }
+
+    // ---- path resolution in pipeline ----
+
+    #[test]
+    fn pipeline_with_sh_dispatch() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: "piped\n".to_string(),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("echo input | sh -c 'echo piped'");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "piped\n");
+    }
+
+    #[test]
+    fn pipeline_with_path_resolution() {
+        let host = MockHost::new()
+            .with_file("/home/user/data.txt", b"content")
+            .with_spawn_handler(|program, args, _stdin| SpawnResult {
+                exit_code: 0,
+                stdout: format!("{}:{:?}\n", program, args),
+                stderr: String::new(),
+            });
+        let mut state = ShellState::new_default();
+        // cat data.txt | grep pattern
+        // In the pipeline, cat's arg "data.txt" should be resolved
+        let cmd = codepod_shell::parser::parse("cat data.txt | grep pattern");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        // cat should have its arg resolved
+        assert_eq!(calls[0].program, "cat");
+        assert!(calls[0].args[0].starts_with("/home/user/"));
+    }
+
+    // ---- creation commands always resolve ----
+
+    #[test]
+    fn mkdir_resolves_relative_path() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("mkdir -p newdir");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "mkdir");
+        // newdir should be resolved to absolute
+        assert!(calls[0].args.contains(&"/home/user/newdir".to_string()));
+    }
+
+    #[test]
+    fn touch_resolves_relative_path() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("touch newfile.txt");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        assert!(calls[0]
+            .args
+            .contains(&"/home/user/newfile.txt".to_string()));
+    }
+
+    // ---- passthrough args ----
+
+    #[test]
+    fn echo_args_not_resolved() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let state = ShellState::new_default();
+        // echo is a builtin so it won't actually spawn, but let's test the helper
+        let result = resolve_arg_if_path(&state, &host, "echo", "file.txt");
+        assert_eq!(result, "file.txt"); // not resolved
+    }
+
+    // ---- sh -c with complex commands ----
+
+    #[test]
+    fn sh_c_with_semicolons() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        state.env.insert("FOO".into(), "bar".into());
+        let cmd = codepod_shell::parser::parse("sh -c 'echo hello; echo world'");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "hello\nworld\n");
+    }
+
+    #[test]
+    fn sh_c_with_variable_expansion() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        state.env.insert("NAME".into(), "world".into());
+        let cmd = codepod_shell::parser::parse("sh -c 'echo $NAME'");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "world\n");
+    }
+
+    // ---- exec_path with arguments ----
+
+    #[test]
+    fn exec_path_shell_script_with_args() {
+        let host = MockHost::new().with_file("/home/user/greet.sh", b"#!/bin/sh\necho Hello $1\n");
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./greet.sh World");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "Hello World\n");
+    }
+
+    // ---- python3.X versioned interpreter ----
+
+    #[test]
+    fn exec_path_python3_versioned() {
+        let host = MockHost::new()
+            .with_file(
+                "/home/user/script.py",
+                b"#!/usr/bin/env python3.11\nprint('hi')\n",
+            )
+            .with_spawn_handler(|program, _args, _stdin| SpawnResult {
+                exit_code: 0,
+                stdout: format!("ran with {}\n", program),
+                stderr: String::new(),
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("./script.py");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(_run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // python3.11 is recognized as python, dispatches to python3
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[0].program, "python3");
+    }
+
+    // ---- find with default dir ----
+
+    #[test]
+    fn find_no_args_appends_cwd() {
+        let host = MockHost::new().with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        let mut state = ShellState::new_default();
+        // find with no args should append cwd
+        let cmd = codepod_shell::parser::parse("find");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[0].program, "find");
+        // Should have cwd appended as the only arg
+        assert_eq!(calls[0].args.len(), 1);
+        assert_eq!(calls[0].args[0], "/home/user");
+    }
+
+    // ---- grep pattern not resolved ----
+
+    #[test]
+    fn grep_pattern_not_resolved_but_file_is() {
+        let host = MockHost::new()
+            .with_file("/home/user/log.txt", b"some content")
+            .with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("grep error log.txt");
+        let _ = exec_command(&mut state, &host, &cmd);
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls[0].program, "grep");
+        // "error" is the pattern - should not be resolved
+        assert_eq!(calls[0].args[0], "error");
+        // "log.txt" exists, should be resolved
+        assert_eq!(calls[0].args[1], "/home/user/log.txt");
+    }
+
+    // ---- redirect with dispatched command ----
+
+    #[test]
+    fn sh_c_with_output_redirect() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("sh -c 'echo redirected' > /tmp/out.txt");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        // Output should have been redirected, so stdout is empty
+        assert_eq!(run.stdout, "");
+        // File should contain the output
+        let content = host.get_file("/tmp/out.txt").unwrap();
+        assert_eq!(content, "redirected\n");
+    }
+
+    // ---- exec_shell_script strips shebang ----
+
+    #[test]
+    fn exec_shell_script_strips_shebang() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let result = exec_shell_script(&mut state, &host, "#!/bin/bash\necho stripped\n", &[]);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "stripped\n");
+    }
+
+    // ---- pipeline with shebang dispatch ----
+
+    #[test]
+    fn pipeline_shebang_dispatch() {
+        let host = MockHost::new()
+            .with_file("/home/user/count.sh", b"#!/bin/sh\necho counted\n")
+            .with_spawn_handler(|_program, _args, _stdin| SpawnResult {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        let mut state = ShellState::new_default();
+        let cmd = codepod_shell::parser::parse("echo input | ./count.sh");
+        let result = exec_command(&mut state, &host, &cmd);
+        let ControlFlow::Normal(run) = result.unwrap() else {
+            panic!("expected Normal")
+        };
+        assert_eq!(run.stdout, "counted\n");
+    }
+
+    // ---- cwd change affects resolution ----
+
+    #[test]
+    fn path_resolution_respects_cwd() {
+        let state = ShellState {
+            cwd: "/tmp/project".into(),
+            ..ShellState::new_default()
+        };
+        let host = MockHost::new();
+        // Creation command should resolve relative to /tmp/project
+        assert_eq!(
+            resolve_arg_if_path(&state, &host, "touch", "file.txt"),
+            "/tmp/project/file.txt"
+        );
+    }
+
+    // ---- multiple dispatch types ----
+
+    #[test]
+    fn dispatch_external_shebang_returns_flow() {
+        let host = MockHost::new().with_file("/home/user/hello.sh", b"echo hi\n");
+        let mut state = ShellState::new_default();
+        let result = dispatch_external_command(&mut state, &host, "./hello.sh", &[], "");
+        // Should return Err(ControlFlow) since it was handled
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_external_sh_returns_flow() {
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let result = dispatch_external_command(&mut state, &host, "sh", &["-c", "echo hi"], "");
+        // Should return Err(ControlFlow) since it was handled
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dispatch_external_normal_command_returns_resolved_args() {
+        let host = MockHost::new().with_file("/home/user/file.txt", b"data");
+        let mut state = ShellState::new_default();
+        let result = dispatch_external_command(&mut state, &host, "cat", &["file.txt"], "");
+        // Should return Ok(Some(...)) with resolved args
+        let (prog, args) = result.unwrap().unwrap();
+        assert_eq!(prog, "cat");
+        assert_eq!(args[0], "/home/user/file.txt");
     }
 }
