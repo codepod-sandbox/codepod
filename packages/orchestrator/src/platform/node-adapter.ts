@@ -18,9 +18,18 @@ function wasmToToolName(filename: string): string {
 export class NodeAdapter implements PlatformAdapter {
   supportsWorkerExecution = true;
 
+  /** Cross-instance cache so repeated compilations of the same .wasm
+   *  (e.g. across test-level ProcessManager instances) don't re-read
+   *  from disk under resource pressure. */
+  private static compiledModules = new Map<string, WebAssembly.Module>();
+
   async loadModule(path: string): Promise<WebAssembly.Module> {
+    const cached = NodeAdapter.compiledModules.get(path);
+    if (cached) return cached;
     const buffer = await readFile(path);
-    return WebAssembly.compile(buffer);
+    const module = await WebAssembly.compile(buffer);
+    NodeAdapter.compiledModules.set(path, module);
+    return module;
   }
 
   async instantiate(
