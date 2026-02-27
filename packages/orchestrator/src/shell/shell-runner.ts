@@ -56,10 +56,11 @@ import type {
 } from './shell-types.js';
 
 import { ShellBuiltins } from './shell-builtins.js';
+import type { ShellLike } from './shell-like.js';
 
 export type { RunResult } from './shell-types.js';
 
-export class ShellRunner extends ShellBuiltins {
+export class ShellRunner extends ShellBuiltins implements ShellLike {
   protected vfs: VfsLike;
   protected mgr: ProcessManager;
   private adapter: PlatformAdapter;

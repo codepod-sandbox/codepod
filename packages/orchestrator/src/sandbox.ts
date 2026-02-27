@@ -9,6 +9,8 @@ import { VFS } from './vfs/vfs.js';
 import type { VfsOptions } from './vfs/vfs.js';
 import { ProcessManager } from './process/manager.js';
 import { ShellRunner } from './shell/shell-runner.js';
+import { ShellInstance } from './shell/shell-instance.js';
+import type { ShellLike } from './shell/shell-like.js';
 import type { RunResult } from './shell/shell-runner.js';
 import type { HistoryEntry } from './shell/history.js';
 import type { PlatformAdapter } from './platform/adapter.js';
@@ -52,6 +54,13 @@ export interface SandboxOptions {
   fsLimitBytes?: number;
   /** Path to the shell parser wasm. Defaults to `${wasmDir}/codepod-shell.wasm`. */
   shellWasmPath?: string;
+  /**
+   * Shell backend: 'typescript' uses ShellRunner (TS executor, default),
+   * 'rust-wasm' uses ShellInstance (Rust WASM executor).
+   */
+  shellBackend?: 'typescript' | 'rust-wasm';
+  /** Path to the shell-exec WASM binary (for rust-wasm backend). Defaults to `${wasmDir}/codepod-shell-exec.wasm`. */
+  shellExecWasmPath?: string;
   /** Network policy for curl/wget builtins. If omitted, network access is disabled. */
   network?: NetworkPolicy;
   /** Security policy and limits. */
@@ -74,7 +83,7 @@ const DEFAULT_FS_LIMIT = 256 * 1024 * 1024; // 256 MB
 /** Internal config for the Sandbox constructor. Not part of the public API. */
 interface SandboxParts {
   vfs: VFS;
-  runner: ShellRunner;
+  runner: ShellLike;
   timeoutMs: number;
   adapter: PlatformAdapter;
   wasmDir: string;
@@ -85,11 +94,12 @@ interface SandboxParts {
   security?: SecurityOptions;
   workerExecutor?: WorkerExecutor;
   extensionRegistry?: ExtensionRegistry;
+  shellBackend?: 'typescript' | 'rust-wasm';
 }
 
 export class Sandbox {
   private vfs: VFS;
-  private runner: ShellRunner;
+  private runner: ShellLike;
   private timeoutMs: number;
   private destroyed = false;
   private adapter: PlatformAdapter;
@@ -105,6 +115,7 @@ export class Sandbox {
   private workerExecutor: WorkerExecutor | null = null;
   private persistenceManager: PersistenceManager | null = null;
   private extensionRegistry: ExtensionRegistry | null = null;
+  private shellBackend: 'typescript' | 'rust-wasm';
 
   private constructor(parts: SandboxParts) {
     this.vfs = parts.vfs;
@@ -121,6 +132,7 @@ export class Sandbox {
     this.auditHandler = parts.security?.onAuditEvent;
     this.workerExecutor = parts.workerExecutor ?? null;
     this.extensionRegistry = parts.extensionRegistry ?? null;
+    this.shellBackend = parts.shellBackend ?? 'typescript';
   }
 
   private audit(type: string, data?: Record<string, unknown>): void {
@@ -157,47 +169,87 @@ export class Sandbox {
       }
     }
 
+    const shellBackend = options.shellBackend ?? 'typescript';
     const shellWasmPath = options.shellWasmPath ?? `${options.wasmDir}/codepod-shell.wasm`;
-    const runner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
-    // Wire extension registry to ShellRunner
-    if (extensionRegistry.list().length > 0) {
-      runner.setExtensionRegistry(extensionRegistry);
-    }
+    let runner: ShellLike;
 
-    // Apply tool allowlist to ShellRunner so extensions are also gated
-    if (options.security?.toolAllowlist) {
-      runner.setToolAllowlist(options.security.toolAllowlist);
-    }
+    if (shellBackend === 'rust-wasm') {
+      // Rust WASM backend: ShellInstance handles parsing + execution in WASM
+      const shellExecWasmPath = options.shellExecWasmPath ?? `${options.wasmDir}/codepod-shell-exec.wasm`;
+      runner = await ShellInstance.create(vfs, mgr, adapter, shellExecWasmPath);
+    } else {
+      // TypeScript backend: ShellRunner parses via WASM, executes in TS
+      const tsRunner = new ShellRunner(vfs, mgr, adapter, shellWasmPath, gateway);
 
-    // Apply output limits from security options
-    if (options.security?.limits) {
-      runner.setOutputLimits(options.security.limits.stdoutBytes, options.security.limits.stderrBytes);
-    }
+      // Wire extension registry to ShellRunner
+      if (extensionRegistry.list().length > 0) {
+        tsRunner.setExtensionRegistry(extensionRegistry);
+      }
 
-    // Apply memory limit
-    if (options.security?.limits?.memoryBytes !== undefined) {
-      runner.setMemoryLimit(options.security.limits.memoryBytes);
-    }
+      // Apply tool allowlist to ShellRunner so extensions are also gated
+      if (options.security?.toolAllowlist) {
+        tsRunner.setToolAllowlist(options.security.toolAllowlist);
+      }
 
-    // Wire PackageManager if packagePolicy is configured
-    if (options.security?.packagePolicy) {
-      const packageManager = new PackageManager(vfs, options.security.packagePolicy);
-      runner.setPackageManager(packageManager);
-    }
+      // Apply output limits from security options
+      if (options.security?.limits) {
+        tsRunner.setOutputLimits(options.security.limits.stdoutBytes, options.security.limits.stderrBytes);
+      }
 
-    // Wire audit handler so builtins can emit audit events
-    if (options.security?.onAuditEvent) {
-      const sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36);
-      const handler = options.security.onAuditEvent;
-      runner.setAuditHandler((type: string, data?: Record<string, unknown>) => {
-        handler({
-          type,
-          sessionId,
-          timestamp: Date.now(),
-          ...data,
+      // Apply memory limit
+      if (options.security?.limits?.memoryBytes !== undefined) {
+        tsRunner.setMemoryLimit(options.security.limits.memoryBytes);
+      }
+
+      // Wire PackageManager if packagePolicy is configured
+      if (options.security?.packagePolicy) {
+        const packageManager = new PackageManager(vfs, options.security.packagePolicy);
+        tsRunner.setPackageManager(packageManager);
+      }
+
+      // Wire audit handler so builtins can emit audit events
+      if (options.security?.onAuditEvent) {
+        const sessionId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const handler = options.security.onAuditEvent;
+        tsRunner.setAuditHandler((type: string, data?: Record<string, unknown>) => {
+          handler({
+            type,
+            sessionId,
+            timestamp: Date.now(),
+            ...data,
+          });
         });
-      });
+      }
+
+      // Always create PackageRegistry for pip builtin (runtime install/uninstall)
+      const pkgRegistry = new PackageRegistry();
+      tsRunner.setPackageRegistry(pkgRegistry);
+
+      // Install sandbox-native packages from PackageRegistry
+      if (options.packages && options.packages.length > 0) {
+        const toInstall = new Set<string>();
+        for (const name of options.packages) {
+          for (const dep of pkgRegistry.resolveDeps(name)) {
+            toInstall.add(dep);
+          }
+        }
+        vfs.withWriteAccess(() => {
+          for (const name of toInstall) {
+            const meta = pkgRegistry.get(name);
+            if (!meta) continue;
+            for (const [relPath, content] of Object.entries(meta.pythonFiles)) {
+              const fullPath = `/usr/lib/python/${relPath}`;
+              const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+              vfs.mkdirp(dir);
+              vfs.writeFile(fullPath, new TextEncoder().encode(content));
+            }
+            tsRunner.markPackageInstalled(name);
+          }
+        });
+      }
+
+      runner = tsRunner;
     }
 
     // Bootstrap Python socket shim when networking is enabled
@@ -235,33 +287,6 @@ export class Sandbox {
       });
     }
 
-    // Always create PackageRegistry for pip builtin (runtime install/uninstall)
-    const pkgRegistry = new PackageRegistry();
-    runner.setPackageRegistry(pkgRegistry);
-
-    // Install sandbox-native packages from PackageRegistry
-    if (options.packages && options.packages.length > 0) {
-      const toInstall = new Set<string>();
-      for (const name of options.packages) {
-        for (const dep of pkgRegistry.resolveDeps(name)) {
-          toInstall.add(dep);
-        }
-      }
-      vfs.withWriteAccess(() => {
-        for (const name of toInstall) {
-          const meta = pkgRegistry.get(name);
-          if (!meta) continue;
-          for (const [relPath, content] of Object.entries(meta.pythonFiles)) {
-            const fullPath = `/usr/lib/python/${relPath}`;
-            const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
-            vfs.mkdirp(dir);
-            vfs.writeFile(fullPath, new TextEncoder().encode(content));
-          }
-          runner.markPackageInstalled(name);
-        }
-      });
-    }
-
     // Set PYTHONPATH: user-provided paths + /usr/lib/python (always included)
     if (options.pythonPath || bridge || extensionRegistry.getPackageNames().length > 0 || (options.packages && options.packages.length > 0)) {
       const paths = [...(options.pythonPath ?? []), '/usr/lib/python'];
@@ -279,7 +304,7 @@ export class Sandbox {
       wasmDir: options.wasmDir, shellWasmPath,
       mgr, bridge, networkPolicy: options.network,
       security: options.security, workerExecutor,
-      extensionRegistry,
+      extensionRegistry, shellBackend,
     });
 
     // Wire persistence if configured
@@ -590,25 +615,36 @@ export class Sandbox {
     const { gateway, bridge } = await Sandbox.createNetworkBridge(this.networkPolicy);
     const childMgr = new ProcessManager(childVfs, this.adapter, bridge, this.security?.toolAllowlist);
     const tools = await Sandbox.registerTools(childMgr, this.adapter, this.wasmDir);
-    const childRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, gateway);
+
+    let childRunner: ShellLike;
+
+    if (this.shellBackend === 'rust-wasm') {
+      // Fork as ShellInstance — create a fresh instance and copy env
+      childRunner = await ShellInstance.create(childVfs, childMgr, this.adapter, this.shellWasmPath);
+    } else {
+      // Fork as ShellRunner
+      const tsChildRunner = new ShellRunner(childVfs, childMgr, this.adapter, this.shellWasmPath, gateway);
+
+      // Propagate tool allowlist and output limits to forked runner
+      if (this.security?.toolAllowlist) {
+        tsChildRunner.setToolAllowlist(this.security.toolAllowlist);
+      }
+      if (this.security?.limits) {
+        tsChildRunner.setOutputLimits(this.security.limits.stdoutBytes, this.security.limits.stderrBytes);
+      }
+
+      // Wire extension registry to forked runner
+      if (this.extensionRegistry && this.extensionRegistry.list().length > 0) {
+        tsChildRunner.setExtensionRegistry(this.extensionRegistry);
+      }
+
+      childRunner = tsChildRunner;
+    }
 
     // Copy env
     const envMap = this.runner.getEnvMap();
     for (const [k, v] of envMap) {
       childRunner.setEnv(k, v);
-    }
-
-    // Propagate tool allowlist and output limits to forked runner
-    if (this.security?.toolAllowlist) {
-      childRunner.setToolAllowlist(this.security.toolAllowlist);
-    }
-    if (this.security?.limits) {
-      childRunner.setOutputLimits(this.security.limits.stdoutBytes, this.security.limits.stderrBytes);
-    }
-
-    // Wire extension registry to forked runner
-    if (this.extensionRegistry && this.extensionRegistry.list().length > 0) {
-      childRunner.setExtensionRegistry(this.extensionRegistry);
     }
 
     // Create WorkerExecutor for the child if parent uses hard-kill
@@ -622,6 +658,7 @@ export class Sandbox {
       adapter: this.adapter, wasmDir: this.wasmDir, shellWasmPath: this.shellWasmPath,
       mgr: childMgr, bridge, networkPolicy: this.networkPolicy,
       security: this.security, workerExecutor: childWorkerExecutor,
+      shellBackend: this.shellBackend,
     });
   }
 
@@ -644,6 +681,7 @@ export class Sandbox {
     this.persistenceManager?.dispose().catch(() => {});
     this.workerExecutor?.dispose();
     this.bridge?.dispose();
+    this.runner.destroy?.();
   }
 
   private assertAlive(): void {

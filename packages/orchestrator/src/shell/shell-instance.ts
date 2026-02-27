@@ -14,7 +14,19 @@ import type { VfsLike } from '../vfs/vfs-like.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { PlatformAdapter } from '../platform/adapter.js';
 import type { RunResult } from './shell-types.js';
+import type { HistoryEntry } from './history.js';
+import type { ShellLike } from './shell-like.js';
 import { createShellImports } from '../host-imports/shell-imports.js';
+
+/** Default environment variables for a new ShellInstance. */
+const DEFAULT_ENV: [string, string][] = [
+  ['HOME', '/home/user'],
+  ['PWD', '/home/user'],
+  ['USER', 'user'],
+  ['PATH', '/bin:/usr/bin'],
+  ['PYTHONPATH', '/usr/lib/python'],
+  ['SHELL', '/bin/sh'],
+];
 
 export interface ShellInstanceOptions {
   /** Synchronous spawn handler for testing. Real SAB-based bridging comes later. */
@@ -27,9 +39,20 @@ export interface ShellInstanceOptions {
   ) => { exit_code: number; stdout: string; stderr: string };
 }
 
-export class ShellInstance {
+export class ShellInstance implements ShellLike {
   private instance: WebAssembly.Instance;
   private memory: WebAssembly.Memory;
+
+  // Environment (local mirror for Sandbox snapshot/restore)
+  private env: Map<string, string> = new Map(DEFAULT_ENV);
+
+  // History
+  private historyEntries: HistoryEntry[] = [];
+  private nextHistoryIndex = 1;
+
+  // Cancellation
+  private cancelledReason: string | null = null;
+  private deadlineMs: number = Infinity;
 
   private constructor(instance: WebAssembly.Instance) {
     this.instance = instance;
@@ -56,7 +79,7 @@ export class ShellInstance {
 
     // Proxy so import functions can access memory before it's assigned
     const memoryProxy = new Proxy({} as WebAssembly.Memory, {
-      get(_target, prop, receiver) {
+      get(_target, prop, _receiver) {
         const mem = getMemory();
         const val = (mem as unknown as Record<string | symbol, unknown>)[prop];
         if (typeof val === 'function') {
@@ -66,11 +89,25 @@ export class ShellInstance {
       },
     });
 
+    // We need a reference to the ShellInstance for the checkCancel callback,
+    // but the instance doesn't exist yet. Use a mutable ref.
+    let shellRef: ShellInstance | null = null;
+
     const shellImports = createShellImports({
       vfs,
       mgr,
       memory: memoryProxy,
       syncSpawn: options?.syncSpawn,
+      checkCancel: () => {
+        if (!shellRef) return 0;
+        if (shellRef.cancelledReason === 'TIMEOUT') return 1;
+        if (shellRef.cancelledReason) return 2;
+        if (shellRef.deadlineMs !== Infinity && Date.now() > shellRef.deadlineMs) {
+          shellRef.cancelledReason = 'TIMEOUT';
+          return 1;
+        }
+        return 0;
+      },
     });
 
     // WASI P1 stubs (minimal -- shell-exec doesn't use WASI for I/O)
@@ -157,8 +194,58 @@ export class ShellInstance {
       }
     }
 
-    return new ShellInstance(instance);
+    const shell = new ShellInstance(instance);
+    shellRef = shell;
+    return shell;
   }
+
+  // ── Environment ──
+
+  getEnv(name: string): string | undefined {
+    return this.env.get(name);
+  }
+
+  setEnv(name: string, value: string): void {
+    this.env.set(name, value);
+  }
+
+  /** Return a copy of all env vars (for snapshot). */
+  getEnvMap(): Map<string, string> {
+    return new Map(this.env);
+  }
+
+  /** Replace all env vars (for restore). */
+  setEnvMap(env: Map<string, string>): void {
+    this.env = new Map(env);
+  }
+
+  // ── History ──
+
+  getHistory(): HistoryEntry[] {
+    return [...this.historyEntries];
+  }
+
+  clearHistory(): void {
+    this.historyEntries = [];
+    this.nextHistoryIndex = 1;
+  }
+
+  // ── Cancellation ──
+
+  cancel(reason: string): void {
+    this.cancelledReason = reason;
+  }
+
+  setDeadlineNow(): void {
+    this.deadlineMs = 0;
+  }
+
+  resetCancel(timeoutMs?: number): void {
+    this.cancelledReason = null;
+    this.deadlineMs = timeoutMs !== undefined ? Date.now() + timeoutMs : Infinity;
+  }
+
+  // ── Command execution ──
 
   /**
    * Run a shell command and return the result.
@@ -188,6 +275,13 @@ export class ShellInstance {
     if (!alloc || !dealloc) {
       throw new Error('WASM module does not export __alloc/__dealloc');
     }
+
+    // Record in history
+    this.historyEntries.push({
+      index: this.nextHistoryIndex++,
+      command,
+      timestamp: Date.now(),
+    });
 
     // Write command string into WASM memory
     const encoder = new TextEncoder();
