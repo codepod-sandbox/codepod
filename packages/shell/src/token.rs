@@ -77,4 +77,6 @@ pub enum RedirectType {
     Heredoc(String),
     /// <<-EOF (strip leading tabs)
     HeredocStrip(String),
+    /// <<< word (herestring)
+    HereString(String),
 }

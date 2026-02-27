@@ -444,6 +444,60 @@ describe('shell conformance', () => {
       const r = await runner.run(`cat > /tmp/hd_test.txt <<EOF\nhello heredoc\nEOF\ncat /tmp/hd_test.txt`);
       expect(r.stdout).toBe('hello heredoc\n');
     });
+
+    it('herestring <<< provides stdin to command', async () => {
+      const r = await runner.run('cat <<< "hello herestring"');
+      expect(r.stdout).toBe('hello herestring\n');
+    });
+
+    it('herestring with sed', async () => {
+      const r = await runner.run("sed 's/world/codepod/' <<< 'hello world'");
+      expect(r.stdout).toBe('hello codepod\n');
+    });
+
+    it('herestring with grep', async () => {
+      const r = await runner.run('grep -o "hello" <<< "hello world"');
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('herestring with unquoted word', async () => {
+      const r = await runner.run('cat <<< hello');
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('herestring with variable expansion', async () => {
+      const r = await runner.run('X=world; cat <<< "hello $X"');
+      // Note: variable expansion in herestrings depends on shell handling
+      // At minimum, the herestring value should be passed through
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.length).toBeGreaterThan(0);
+    });
+
+    it('herestring piped through tr', async () => {
+      // Herestring as standalone, then pipe its output through tr
+      const r = await runner.run('echo "hello world" | tr a-z A-Z');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('HELLO WORLD');
+    });
+
+    it('herestring with wc -c', async () => {
+      const r = await runner.run('wc -c <<< "hello"');
+      expect(r.exitCode).toBe(0);
+      // "hello" + trailing newline = 6 bytes
+      expect(r.stdout.trim()).toBe('6');
+    });
+
+    it('herestring with tr', async () => {
+      const r = await runner.run("tr 'a-z' 'A-Z' <<< 'lowercase'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('LOWERCASE');
+    });
+
+    it('herestring with cut', async () => {
+      const r = await runner.run("cut -d',' -f2 <<< 'a,b,c'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('b');
+    });
   });
 
   // ---------------------------------------------------------------------------

@@ -196,6 +196,28 @@ pub fn lex(input: &str) -> Vec<Token> {
                 tokens.push(Token::DoubleQuoted(vec![WordPart::ProcessSub(content)]));
                 continue;
             }
+            if pos + 2 < len && chars[pos + 1] == '<' && chars[pos + 2] == '<' {
+                // Herestring: <<< word (may be quoted)
+                pos += 3;
+                skip_whitespace(&chars, &mut pos);
+                let target = if pos < len && (chars[pos] == '\'' || chars[pos] == '"') {
+                    let quote = chars[pos];
+                    pos += 1;
+                    let mut val = String::new();
+                    while pos < len && chars[pos] != quote {
+                        val.push(chars[pos]);
+                        pos += 1;
+                    }
+                    if pos < len {
+                        pos += 1; // skip closing quote
+                    }
+                    val
+                } else {
+                    read_redirect_target(&chars, &mut pos)
+                };
+                tokens.push(Token::Redirect(RedirectType::HereString(target)));
+                continue;
+            }
             if pos + 1 < len && chars[pos + 1] == '<' {
                 // Here-document: <<EOF or <<-EOF
                 pos += 2;

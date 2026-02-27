@@ -1365,6 +1365,59 @@ describe('Coreutils Integration', () => {
     });
   });
 
+  describe('python heredoc stdin', () => {
+    it('heredoc runs in script mode (no >>> prompts)', async () => {
+      const result = await runner.run("python3 <<'EOF'\nprint('hello from heredoc')\nEOF");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello from heredoc');
+      expect(result.stdout).not.toContain('>>>');
+    });
+
+    it('heredoc with multiple print statements', async () => {
+      const result = await runner.run("python3 <<'EOF'\nprint('line1')\nprint('line2')\nprint('line3')\nEOF");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('line1\nline2\nline3\n');
+      expect(result.stdout).not.toContain('>>>');
+    });
+
+    it('heredoc with try/except', async () => {
+      const result = await runner.run("python3 <<'EOF'\ntry:\n    1/0\nexcept ZeroDivisionError:\n    print('caught')\nEOF");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('caught');
+      expect(result.stdout).not.toContain('>>>');
+    });
+
+    it('heredoc with for loop', async () => {
+      const result = await runner.run("python3 <<'EOF'\nfor i in range(3):\n    print(i)\nEOF");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('0\n1\n2\n');
+    });
+
+    it('heredoc with import and computation', async () => {
+      const result = await runner.run("python3 <<'EOF'\nimport json\ndata = {'key': 'value'}\nprint(json.dumps(data))\nEOF");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('{"key": "value"}');
+    });
+
+    it('python3 -c still works alongside heredoc support', async () => {
+      const result = await runner.run('python3 -c "print(2+3)"');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('5');
+    });
+
+    it('python3 herestring provides stdin', async () => {
+      const result = await runner.run("python3 -c \"import sys; print(sys.stdin.read().strip())\" <<< 'hello from herestring'");
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('hello from herestring');
+    });
+
+    it('heredoc syntax error still reports correctly', async () => {
+      const result = await runner.run("python3 <<'EOF'\ndef broken(:\n    pass\nEOF");
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('SyntaxError');
+    });
+  });
+
   describe('dc', () => {
     it('basic arithmetic', async () => {
       const r = await runner.run('echo "3 4 + p" | dc');

@@ -274,6 +274,97 @@ describe('grep conformance', () => {
     });
   });
 
+  // ---- Only matching (-o) ----
+  describe('only matching (-o)', () => {
+    it('-oE prints only matched text', async () => {
+      const r = await runner.run('echo "abc123def456" | grep -oE "[0-9]+"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('123\n456\n');
+    });
+
+    it('-o with basic regex', async () => {
+      const r = await runner.run('echo "hello world" | grep -o "hello"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('-o multiple matches per line', async () => {
+      const r = await runner.run("echo 'aXbXcX' | grep -oE 'X'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('X\nX\nX\n');
+    });
+
+    it('-on shows line numbers', async () => {
+      vfs.writeFile('/home/user/nums.txt', new TextEncoder().encode(
+        'no match\nabc123xyz\nhello\n456world\n'
+      ));
+      const r = await runner.run('grep -onE "[0-9]+" /home/user/nums.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('2:123\n4:456\n');
+    });
+
+    it('-oc counts total matches not lines', async () => {
+      const r = await runner.run("echo 'aXbXcX' | grep -ocE 'X'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('3');
+    });
+
+    it('-oi case insensitive', async () => {
+      const r = await runner.run("echo 'Hello HELLO hello' | grep -oiE 'hello'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('Hello\nHELLO\nhello\n');
+    });
+
+    it('-o with no match exits 1', async () => {
+      const r = await runner.run('echo "abc" | grep -o "xyz"');
+      expect(r.exitCode).toBe(1);
+    });
+
+    it('-o with file input (not stdin)', async () => {
+      const r = await runner.run('grep -oE "[0-9]+" /home/user/test.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe('123\n');
+    });
+
+    it('-o with multiple files shows filenames', async () => {
+      vfs.writeFile('/home/user/a.txt', new TextEncoder().encode('cat dog\n'));
+      vfs.writeFile('/home/user/b.txt', new TextEncoder().encode('dog fish\n'));
+      const r = await runner.run('grep -o "dog" /home/user/a.txt /home/user/b.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('/home/user/a.txt:dog');
+      expect(r.stdout).toContain('/home/user/b.txt:dog');
+    });
+
+    it('-o with anchored pattern', async () => {
+      const r = await runner.run('grep -o "^hello" /home/user/test.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('hello');
+    });
+
+    it('-o with dot-star matches full span', async () => {
+      const r = await runner.run('echo "abc" | grep -o "a.*c"');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe('abc');
+    });
+
+    it('-o with -v falls back to line mode', async () => {
+      // -o combined with -v is undefined in GNU grep; we just output lines
+      const r = await runner.run('grep -ov "hello" /home/user/test.txt');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain('hello world');
+      expect(r.stdout).toContain('foo bar');
+    });
+
+    it('-o with character class from file', async () => {
+      const r = await runner.run('grep -oE "[a-z]+" /home/user/data.csv');
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('name');
+      expect(r.stdout).toContain('alice');
+      expect(r.stdout).toContain('new');
+      expect(r.stdout).toContain('york');
+    });
+  });
+
   // ---- Recursive ----
   describe('recursive (-r)', () => {
     it('-r searches directories', async () => {

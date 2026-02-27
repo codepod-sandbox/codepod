@@ -15,114 +15,59 @@ import type { VfsLike } from '../vfs/vfs-like.js';
 import { VfsError } from '../vfs/inode.js';
 import { PythonRunner } from '../python/python-runner.js';
 import { WasiHost } from '../wasi/wasi-host.js';
-import { NetworkGateway, NetworkAccessDenied } from '../network/gateway.js';
-import type { ErrorClass } from '../security.js';
+import { NetworkGateway } from '../network/gateway.js';
 import { CancelledError } from '../security.js';
 import type { PackageManager } from '../pkg/manager.js';
-import { PkgError } from '../pkg/manager.js';
 import { CommandHistory } from './history.js';
 import type { HistoryEntry } from './history.js';
 import type { ExtensionRegistry } from '../extension/registry.js';
 import { PackageRegistry } from '../packages/registry.js';
+import {
+  parseShebang,
+  normalizePath,
+  safeEvalArithmetic,
+  concatBytes,
+} from './shell-utils.js';
 
-const PYTHON_COMMANDS = new Set(['python3', 'python']);
-const SHELL_BUILTINS = new Set(['echo', 'which', 'chmod', 'test', '[', 'pwd', 'cd', 'export', 'unset', 'date', 'curl', 'wget', 'exit', 'true', 'false', 'pkg', 'pip', 'history', 'source', '.', 'set', 'read', 'eval', 'getopts', 'return', 'local', 'trap']);
-const SHELL_COMMANDS = new Set(['sh', 'bash']);
+import {
+  PYTHON_COMMANDS,
+  SHELL_BUILTINS,
+  SHELL_COMMANDS,
+  PYTHON_INTERPRETERS,
+  MAX_SUBSTITUTION_DEPTH,
+  MAX_FUNCTION_DEPTH,
+  EMPTY_RESULT,
+  BreakSignal,
+  ContinueSignal,
+  ReturnSignal,
+  ExitSignal,
+} from './shell-types.js';
 
-/** Interpreter names that should be dispatched to PythonRunner. */
-const PYTHON_INTERPRETERS = new Set(['python3', 'python']);
+import type {
+  Word,
+  WordPart,
+  Redirect,
+  RedirectType,
+  Command,
+  ListOp,
+  CaseItem,
+  Assignment,
+  RunResult,
+} from './shell-types.js';
 
-// ---- AST types matching the Rust serde output ----
+import { ShellBuiltins } from './shell-builtins.js';
 
-interface Word {
-  parts: WordPart[];
-}
+export type { RunResult } from './shell-types.js';
 
-type WordPart =
-  | { Literal: string }
-  | { QuotedLiteral: string }
-  | { Variable: string }
-  | { CommandSub: string }
-  | { ParamExpansion: { var: string; op: string; default: string } }
-  | { ArithmeticExpansion: string }
-  | { ProcessSub: string };
-
-interface Redirect {
-  redirect_type: RedirectType;
-}
-
-type RedirectType =
-  | { StdoutOverwrite: string }
-  | { StdoutAppend: string }
-  | { StdinFrom: string }
-  | { StderrOverwrite: string }
-  | { StderrAppend: string }
-  | 'StderrToStdout'
-  | { BothOverwrite: string }
-  | { Heredoc: string }
-  | { HeredocStrip: string };
-
-interface Assignment {
-  name: string;
-  value: string;
-}
-
-interface CaseItem {
-  patterns: Word[];
-  body: Command;
-}
-
-type Command =
-  | { Simple: { words: Word[]; redirects: Redirect[]; assignments: Assignment[] } }
-  | { Pipeline: { commands: Command[] } }
-  | { List: { left: Command; op: ListOp; right: Command } }
-  | { If: { condition: Command; then_body: Command; else_body: Command | null } }
-  | { For: { var: string; words: Word[]; body: Command } }
-  | { While: { condition: Command; body: Command } }
-  | { Subshell: { body: Command } }
-  | 'Break'
-  | 'Continue'
-  | { Negate: { body: Command } }
-  | { Function: { name: string; body: Command } }
-  | { Case: { word: Word; items: CaseItem[] } };
-
-type ListOp = 'And' | 'Or' | 'Seq';
-
-export interface RunResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  executionTimeMs: number;
-  truncated?: { stdout: boolean; stderr: boolean };
-  errorClass?: ErrorClass;
-}
-
-const EMPTY_RESULT: RunResult = {
-  exitCode: 0,
-  stdout: '',
-  stderr: '',
-  executionTimeMs: 0,
-};
-
-const MAX_SUBSTITUTION_DEPTH = 50;
-const MAX_FUNCTION_DEPTH = 100;
-
-class BreakSignal { constructor(public depth: number = 1) {} }
-class ContinueSignal { constructor(public depth: number = 1) {} }
-class ReturnSignal { constructor(public code: number) {} }
-class ExitSignal {
-  constructor(public code: number, public stdout: string = '', public stderr: string = '') {}
-}
-
-export class ShellRunner {
-  private vfs: VfsLike;
-  private mgr: ProcessManager;
+export class ShellRunner extends ShellBuiltins {
+  protected vfs: VfsLike;
+  protected mgr: ProcessManager;
   private adapter: PlatformAdapter;
   private shellWasmPath: string;
   private shellModule: WebAssembly.Module | null = null;
   private pythonRunner: PythonRunner | null = null;
-  private gateway: NetworkGateway | null = null;
-  private env: Map<string, string> = new Map();
+  protected gateway: NetworkGateway | null = null;
+  protected env: Map<string, string> = new Map();
   private stdoutLimit: number | undefined;
   private stderrLimit: number | undefined;
   private memoryBytes: number | undefined;
@@ -133,35 +78,35 @@ export class ShellRunner {
   /** Current shell function call depth. */
   private functionDepth = 0;
   /** Exit code of the last executed command (for $?). */
-  private lastExitCode = 0;
+  protected lastExitCode = 0;
   /** User-defined shell functions. */
   private functions: Map<string, Command> = new Map();
   /** Stack of saved local variable values for each function call. */
   private localVarStack: Map<string, string | undefined>[] = [];
   /** Package manager for the pkg builtin. */
-  private packageManager: PackageManager | null = null;
+  protected packageManager: PackageManager | null = null;
   /** Audit event handler for emitting structured audit events. */
-  private auditHandler: ((type: string, data?: Record<string, unknown>) => void) | null = null;
+  protected auditHandler: ((type: string, data?: Record<string, unknown>) => void) | null = null;
   /** Command history tracker. */
-  private history = new CommandHistory();
+  protected history = new CommandHistory();
   /** Host-provided extension registry for custom commands/packages. */
-  private extensionRegistry: ExtensionRegistry | null = null;
+  protected extensionRegistry: ExtensionRegistry | null = null;
   /** Optional allowlist of tool names permitted by security policy. */
   private toolAllowlist: Set<string> | null = null;
   /** Shell option flags (e=errexit, u=nounset). */
   private shellFlags = new Set<string>();
   /** Trap handlers (e.g. EXIT trap). */
-  private trapHandlers: Map<string, string> = new Map();
+  protected trapHandlers: Map<string, string> = new Map();
   /** Array storage for bash-style arrays. */
   private arrays: Map<string, string[]> = new Map();
   /** Whether we're in a conditional context (if condition, || / && chains). */
   private inConditionalContext = false;
   /** Pipe stdin data threaded through compound commands (while, for, if, subshell). */
-  private pipeStdin: Uint8Array | undefined;
+  protected pipeStdin: Uint8Array | undefined;
   /** Sandbox-native package registry for pip install/uninstall at runtime. */
-  private packageRegistry: PackageRegistry | null = null;
+  protected packageRegistry: PackageRegistry | null = null;
   /** Set of package names currently installed from PackageRegistry. */
-  private installedPackages = new Set<string>();
+  protected installedPackages = new Set<string>();
 
   constructor(
     vfs: VfsLike,
@@ -171,6 +116,7 @@ export class ShellRunner {
     gateway?: NetworkGateway,
     options?: { skipPopulateBin?: boolean },
   ) {
+    super();
     this.vfs = vfs;
     this.mgr = mgr;
     this.adapter = adapter;
@@ -298,7 +244,7 @@ export class ShellRunner {
   }
 
   /** Resolve a path relative to PWD. Absolute paths pass through unchanged. */
-  private resolvePath(path: string): string {
+  protected resolvePath(path: string): string {
     if (path.startsWith('/')) return path;
     const pwd = this.env.get('PWD') || '/';
     return pwd === '/' ? '/' + path : pwd + '/' + path;
@@ -482,7 +428,7 @@ export class ShellRunner {
   /**
    * Parse a command string by running the shell Wasm binary.
    */
-  private async parse(command: string): Promise<Command | null> {
+  protected async parse(command: string): Promise<Command | null> {
     if (!this.shellModule) {
       this.shellModule = await this.adapter.loadModule(this.shellWasmPath);
     }
@@ -512,7 +458,7 @@ export class ShellRunner {
 
   // ---- AST execution ----
 
-  private async execCommand(cmd: Command): Promise<RunResult> {
+  protected async execCommand(cmd: Command): Promise<RunResult> {
     if (this.cancelledReason) {
       throw new CancelledError(this.cancelledReason);
     }
@@ -623,6 +569,8 @@ export class ShellRunner {
         stdinData = new TextEncoder().encode(rt.Heredoc);
       } else if (typeof rt === 'object' && 'HeredocStrip' in rt) {
         stdinData = new TextEncoder().encode(rt.HeredocStrip);
+      } else if (typeof rt === 'object' && 'HereString' in rt) {
+        stdinData = new TextEncoder().encode(rt.HereString + '\n');
       }
     }
     // Fall back to pipe stdin from enclosing pipeline (for compound commands)
@@ -1341,7 +1289,7 @@ export class ShellRunner {
   }
 
   /** Collect positional parameters $1, $2, ... from env until a gap. */
-  private getPositionalArgs(): string[] {
+  protected getPositionalArgs(): string[] {
     const args: string[] = [];
     for (let i = 1; ; i++) {
       const val = this.env.get(String(i));
@@ -1548,7 +1496,19 @@ export class ShellRunner {
     if (!this.pythonRunner) {
       this.pythonRunner = new PythonRunner(this.mgr);
     }
-    return this.pythonRunner.run({
+
+    // When stdin data is provided but no -c or script file argument,
+    // write to a temp file so Python runs in script mode (not REPL).
+    let tempScript: string | undefined;
+    if (stdinData && stdinData.length > 0 && !args.includes('-c') &&
+        (args.length === 0 || args[0].startsWith('-'))) {
+      tempScript = `/tmp/_py_stdin_${Date.now()}.py`;
+      this.vfs.withWriteAccess(() => this.vfs.writeFile(tempScript!, stdinData!));
+      args = [tempScript, ...args];
+      stdinData = undefined;
+    }
+
+    const result = await this.pythonRunner.run({
       args,
       env: Object.fromEntries(this.env),
       stdinData,
@@ -1557,6 +1517,12 @@ export class ShellRunner {
       stderrLimit: this.stderrLimit,
       deadlineMs: this.deadlineMs,
     });
+
+    if (tempScript) {
+      try { this.vfs.withWriteAccess(() => this.vfs.unlink(tempScript!)); } catch {}
+    }
+
+    return result;
   }
 
   /**
@@ -1928,722 +1894,6 @@ export class ShellRunner {
     return safeEvalArithmetic(expanded);
   }
 
-  /** Builtin: pwd — print working directory. */
-  private builtinPwd(): RunResult {
-    const cwd = this.env.get('PWD') || '/';
-    return { exitCode: 0, stdout: cwd + '\n', stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: cd — change working directory. */
-  private builtinCd(args: string[]): RunResult {
-    let target: string;
-
-    if (args.length === 0) {
-      target = '/home/user';
-    } else if (args[0] === '-') {
-      const oldPwd = this.env.get('OLDPWD');
-      if (!oldPwd) {
-        return { exitCode: 1, stdout: '', stderr: 'cd: OLDPWD not set\n', executionTimeMs: 0 };
-      }
-      target = oldPwd;
-    } else {
-      target = this.resolvePath(args[0]);
-    }
-
-    // Normalize the path (resolve . and .. segments)
-    target = normalizePath(target);
-
-    try {
-      const stat = this.vfs.stat(target);
-      if (stat.type !== 'dir') {
-        return { exitCode: 1, stdout: '', stderr: `cd: ${args[0] ?? target}: not a directory\n`, executionTimeMs: 0 };
-      }
-    } catch {
-      return { exitCode: 1, stdout: '', stderr: `cd: ${args[0] ?? target}: no such file or directory\n`, executionTimeMs: 0 };
-    }
-
-    const oldPwd = this.env.get('PWD') || '/';
-    this.env.set('OLDPWD', oldPwd);
-    this.env.set('PWD', target);
-    return { ...EMPTY_RESULT };
-  }
-
-  /** Builtin: export — set env variables (alias for assignment). */
-  private builtinExport(args: string[]): RunResult {
-    if (args.length === 0) {
-      let stdout = '';
-      for (const [key, value] of this.env) {
-        stdout += `${key}=${value}\n`;
-      }
-      return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
-    }
-
-    for (const arg of args) {
-      const eqIdx = arg.indexOf('=');
-      if (eqIdx >= 0) {
-        this.env.set(arg.slice(0, eqIdx), arg.slice(eqIdx + 1));
-      }
-      // export FOO with no value is a no-op
-    }
-    return { ...EMPTY_RESULT };
-  }
-
-  /** Builtin: unset — remove env variables. */
-  private builtinUnset(args: string[]): RunResult {
-    for (const name of args) {
-      this.env.delete(name);
-    }
-    return { ...EMPTY_RESULT };
-  }
-
-  /** Builtin: trap — set signal/exit handlers. */
-  private builtinTrap(args: string[]): RunResult {
-    if (args.length < 2) {
-      return { ...EMPTY_RESULT };
-    }
-    const action = args[0];
-    for (let i = 1; i < args.length; i++) {
-      const signal = args[i];
-      if (action === '') {
-        this.trapHandlers.delete(signal);
-      } else {
-        this.trapHandlers.set(signal, action);
-      }
-    }
-    return { ...EMPTY_RESULT };
-  }
-
-  /** Builtin: date — print current date/time. */
-  private builtinDate(args: string[]): RunResult {
-    const now = new Date();
-
-    if (args.length > 0 && args[0].startsWith('+')) {
-      const format = args[0].slice(1);
-      const stdout = formatDate(now, format) + '\n';
-      return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
-    }
-
-    const stdout = now.toUTCString() + '\n';
-    return { exitCode: 0, stdout, stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: test / [ — evaluate conditional expressions. */
-  private builtinTest(args: string[], isBracket: boolean): RunResult {
-    // If [ syntax, require and strip trailing ]
-    if (isBracket) {
-      if (args.length === 0 || args[args.length - 1] !== ']') {
-        return { exitCode: 2, stdout: '', stderr: '[: missing \']\'\n', executionTimeMs: 0 };
-      }
-      args = args.slice(0, -1);
-    }
-
-    const result = this.evalTest(args);
-    return { exitCode: result ? 0 : 1, stdout: '', stderr: '', executionTimeMs: 0 };
-  }
-
-  private evalTest(args: string[]): boolean {
-    if (args.length === 0) return false;
-
-    // Handle ! negation
-    if (args[0] === '!' && args.length > 1) {
-      return !this.evalTest(args.slice(1));
-    }
-
-    // Unary operators
-    if (args.length === 2) {
-      const [op, val] = args;
-      switch (op) {
-        case '-f': {
-          try { const s = this.vfs.stat(this.resolvePath(val)); return s.type === 'file'; }
-          catch { return false; }
-        }
-        case '-d': {
-          try { const s = this.vfs.stat(this.resolvePath(val)); return s.type === 'dir'; }
-          catch { return false; }
-        }
-        case '-e': {
-          try { this.vfs.stat(this.resolvePath(val)); return true; }
-          catch { return false; }
-        }
-        case '-s': {
-          try { const s = this.vfs.stat(this.resolvePath(val)); return s.size > 0; }
-          catch { return false; }
-        }
-        case '-r': case '-w': case '-x': {
-          try { this.vfs.stat(this.resolvePath(val)); return true; }
-          catch { return false; }
-        }
-        case '-z': return val.length === 0;
-        case '-n': return val.length > 0;
-        default: break;
-      }
-    }
-
-    // Single arg: true if non-empty string
-    if (args.length === 1) {
-      return args[0].length > 0;
-    }
-
-    // Binary operators
-    if (args.length === 3) {
-      const [left, op, right] = args;
-      switch (op) {
-        case '=': case '==': return left === right;
-        case '!=': return left !== right;
-        case '-eq': return parseInt(left) === parseInt(right);
-        case '-ne': return parseInt(left) !== parseInt(right);
-        case '-lt': return parseInt(left) < parseInt(right);
-        case '-le': return parseInt(left) <= parseInt(right);
-        case '-gt': return parseInt(left) > parseInt(right);
-        case '-ge': return parseInt(left) >= parseInt(right);
-        default: return false;
-      }
-    }
-
-    // Compound operators: -a (AND) and -o (OR)
-    // Search for -o first (lower precedence), then -a
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '-o') {
-        return this.evalTest(args.slice(0, i)) || this.evalTest(args.slice(i + 1));
-      }
-    }
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '-a') {
-        return this.evalTest(args.slice(0, i)) && this.evalTest(args.slice(i + 1));
-      }
-    }
-
-    return false;
-  }
-
-  /** Builtin: echo — print arguments to stdout. */
-  private builtinEcho(args: string[]): RunResult {
-    let trailingNewline = true;
-    let interpretEscapes = false;
-    let startIdx = 0;
-
-    // Parse flags: -n (no newline), -e (interpret escapes), -E (no escapes, default)
-    // Support combined flags like -en, -ne, -neE, etc.
-    while (startIdx < args.length && args[startIdx].startsWith('-') && args[startIdx].length > 1 && /^-[neE]+$/.test(args[startIdx])) {
-      const flags = args[startIdx].slice(1);
-      for (const ch of flags) {
-        if (ch === 'n') trailingNewline = false;
-        else if (ch === 'e') interpretEscapes = true;
-        else if (ch === 'E') interpretEscapes = false;
-      }
-      startIdx++;
-    }
-
-    let output = args.slice(startIdx).join(' ');
-
-    if (interpretEscapes) {
-      output = this.interpretEchoEscapes(output);
-    }
-
-    output += trailingNewline ? '\n' : '';
-    return { exitCode: 0, stdout: output, stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Interpret backslash escape sequences for echo -e. */
-  private interpretEchoEscapes(s: string): string {
-    let result = '';
-    let i = 0;
-    while (i < s.length) {
-      if (s[i] === '\\' && i + 1 < s.length) {
-        const next = s[i + 1];
-        switch (next) {
-          case 'n': result += '\n'; i += 2; break;
-          case 't': result += '\t'; i += 2; break;
-          case 'r': result += '\r'; i += 2; break;
-          case 'a': result += '\x07'; i += 2; break;
-          case 'b': result += '\b'; i += 2; break;
-          case 'f': result += '\f'; i += 2; break;
-          case 'v': result += '\v'; i += 2; break;
-          case '\\': result += '\\'; i += 2; break;
-          case '0': {
-            // Octal: \0NNN (up to 3 octal digits)
-            let octal = '';
-            let j = i + 2;
-            while (j < s.length && j < i + 5 && s[j] >= '0' && s[j] <= '7') {
-              octal += s[j];
-              j++;
-            }
-            result += String.fromCharCode(parseInt(octal || '0', 8));
-            i = j;
-            break;
-          }
-          case 'x': {
-            // Hex: \xHH (up to 2 hex digits)
-            let hex = '';
-            let j = i + 2;
-            while (j < s.length && j < i + 4 && /[0-9a-fA-F]/.test(s[j])) {
-              hex += s[j];
-              j++;
-            }
-            if (hex.length > 0) {
-              result += String.fromCharCode(parseInt(hex, 16));
-              i = j;
-            } else {
-              result += '\\x';
-              i += 2;
-            }
-            break;
-          }
-          case 'c':
-            // \c — suppress further output (including trailing newline)
-            return result;
-          default:
-            result += '\\' + next;
-            i += 2;
-            break;
-        }
-      } else {
-        result += s[i];
-        i++;
-      }
-    }
-    return result;
-  }
-
-  /** Builtin: read — read a line from stdin and assign to variables. */
-  private builtinRead(args: string[], stdinData: Uint8Array | undefined): RunResult {
-    let raw = false;
-    const varNames: string[] = [];
-    for (const a of args) {
-      if (a === '-r') { raw = true; continue; }
-      varNames.push(a);
-    }
-    if (varNames.length === 0) varNames.push('REPLY');
-
-    // Get first line from stdin
-    const input = stdinData ? new TextDecoder().decode(stdinData) : '';
-    const nlIndex = input.indexOf('\n');
-    const firstLine = nlIndex !== -1 ? input.slice(0, nlIndex) : input;
-    if (!stdinData?.length || (firstLine === '' && input === '')) {
-      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-    const line = raw ? firstLine : firstLine.replace(/\\(.)/g, '$1');
-    const parts = line.split(/[ \t]+/);
-    for (let i = 0; i < varNames.length; i++) {
-      if (i === varNames.length - 1) {
-        // Last variable gets the remainder
-        this.env.set(varNames[i], parts.slice(i).join(' '));
-      } else {
-        this.env.set(varNames[i], parts[i] ?? '');
-      }
-    }
-
-    // Advance pipeStdin past the consumed line so the next `read` in a
-    // while loop gets the next line instead of re-reading the same one.
-    if (this.pipeStdin && stdinData === this.pipeStdin) {
-      const remaining = nlIndex !== -1 ? input.slice(nlIndex + 1) : '';
-      this.pipeStdin = remaining.length > 0
-        ? new TextEncoder().encode(remaining)
-        : undefined;
-    }
-
-    return { ...EMPTY_RESULT };
-  }
-
-  /** Builtin: eval — concatenate args and execute as a shell command. */
-  private async builtinEval(args: string[]): Promise<RunResult> {
-    if (args.length === 0) return { ...EMPTY_RESULT };
-    const command = args.join(' ');
-    // Re-parse and execute through the full pipeline (expansion, parsing, execution)
-    const ast = await this.parse(command);
-    if (ast === null) return { ...EMPTY_RESULT };
-    const result = await this.execCommand(ast);
-    this.lastExitCode = result.exitCode;
-    return result;
-  }
-
-  /**
-   * Builtin: getopts — POSIX option parsing for shell scripts.
-   *
-   * Usage: getopts OPTSTRING NAME [ARGS...]
-   *
-   * Uses shell variable OPTIND (1-based index into args) to track position.
-   * Sets NAME to the option character found (or '?' on error).
-   * Sets OPTARG for options that take arguments.
-   * Returns 0 while options remain, 1 when done.
-   */
-  private builtinGetopts(args: string[]): RunResult {
-    if (args.length < 2) {
-      return {
-        exitCode: 2,
-        stdout: '',
-        stderr: 'getopts: usage: getopts optstring name [arg ...]\n',
-        executionTimeMs: 0,
-      };
-    }
-    const optstring = args[0];
-    const varName = args[1];
-    // If extra args given, parse those; otherwise use positional params ($1, $2, ...)
-    const optArgs = args.length > 2 ? args.slice(2) : this.getPositionalArgs();
-
-    const optind = parseInt(this.env.get('OPTIND') ?? '1', 10);
-    const idx = optind - 1; // 0-based
-
-    if (idx >= optArgs.length) {
-      this.env.set(varName, '?');
-      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-
-    const current = optArgs[idx];
-    if (!current.startsWith('-') || current === '-' || current === '--') {
-      this.env.set(varName, '?');
-      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-
-    // Get the current character position within the option group
-    let charPos = parseInt(this.env.get('_GETOPTS_CHARPOS') ?? '1', 10);
-    const optChar = current[charPos];
-
-    if (!optChar) {
-      // Exhausted this arg group, move to next
-      this.env.set('OPTIND', String(optind + 1));
-      this.env.delete('_GETOPTS_CHARPOS');
-      this.env.set(varName, '?');
-      return { exitCode: 1, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-
-    const optPos = optstring.indexOf(optChar);
-    if (optPos === -1) {
-      // Unknown option
-      const silent = optstring.startsWith(':');
-      this.env.set(varName, '?');
-      if (!silent) {
-        // Advance position
-        if (charPos + 1 < current.length) {
-          this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
-        } else {
-          this.env.set('OPTIND', String(optind + 1));
-          this.env.delete('_GETOPTS_CHARPOS');
-        }
-        return {
-          exitCode: 0,
-          stdout: '',
-          stderr: `getopts: illegal option -- ${optChar}\n`,
-          executionTimeMs: 0,
-        };
-      }
-      this.env.set('OPTARG', optChar);
-      if (charPos + 1 < current.length) {
-        this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
-      } else {
-        this.env.set('OPTIND', String(optind + 1));
-        this.env.delete('_GETOPTS_CHARPOS');
-      }
-      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-
-    const needsArg = optstring[optPos + 1] === ':';
-    this.env.set(varName, optChar);
-
-    if (needsArg) {
-      // Check for argument attached to this option (e.g. -fVALUE)
-      const remainder = current.slice(charPos + 1);
-      if (remainder.length > 0) {
-        this.env.set('OPTARG', remainder);
-        this.env.set('OPTIND', String(optind + 1));
-        this.env.delete('_GETOPTS_CHARPOS');
-      } else if (idx + 1 < optArgs.length) {
-        this.env.set('OPTARG', optArgs[idx + 1]);
-        this.env.set('OPTIND', String(optind + 2));
-        this.env.delete('_GETOPTS_CHARPOS');
-      } else {
-        // Missing argument
-        const silent = optstring.startsWith(':');
-        if (silent) {
-          this.env.set(varName, ':');
-          this.env.set('OPTARG', optChar);
-        } else {
-          this.env.set(varName, '?');
-          return {
-            exitCode: 0,
-            stdout: '',
-            stderr: `getopts: option requires an argument -- ${optChar}\n`,
-            executionTimeMs: 0,
-          };
-        }
-        this.env.set('OPTIND', String(optind + 1));
-        this.env.delete('_GETOPTS_CHARPOS');
-      }
-    } else {
-      // No argument needed — advance within option group or to next arg
-      if (charPos + 1 < current.length) {
-        this.env.set('_GETOPTS_CHARPOS', String(charPos + 1));
-      } else {
-        this.env.set('OPTIND', String(optind + 1));
-        this.env.delete('_GETOPTS_CHARPOS');
-      }
-      this.env.delete('OPTARG');
-    }
-
-    return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: which — locate a command by searching known tool names. */
-  private builtinWhich(args: string[]): RunResult {
-    let stdout = '';
-    let exitCode = 0;
-    for (const name of args) {
-      if (this.mgr.hasTool(name) || PYTHON_COMMANDS.has(name) || SHELL_BUILTINS.has(name) || SHELL_COMMANDS.has(name) || this.extensionRegistry?.has(name)) {
-        stdout += `/bin/${name}\n`;
-      } else {
-        exitCode = 1;
-      }
-    }
-    return { exitCode, stdout, stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: chmod — change file permissions. */
-  private builtinChmod(args: string[]): RunResult {
-    if (args.length < 2) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'chmod: missing operand\n',
-        executionTimeMs: 0,
-      };
-    }
-
-    const modeArg = args[0];
-    const files = args.slice(1);
-    let stderr = '';
-    let exitCode = 0;
-
-    for (const file of files) {
-      const resolved = this.resolvePath(file);
-      try {
-        const currentMode = this.vfs.stat(resolved).permissions;
-        const newMode = parseChmodMode(modeArg, currentMode);
-        if (newMode === null) {
-          stderr += `chmod: invalid mode: '${modeArg}'\n`;
-          exitCode = 1;
-          continue;
-        }
-        this.vfs.chmod(resolved, newMode);
-      } catch {
-        stderr += `chmod: cannot access '${file}': No such file or directory\n`;
-        exitCode = 1;
-      }
-    }
-
-    return { exitCode, stdout: '', stderr, executionTimeMs: 0 };
-  }
-
-  /** Emit an audit event if an audit handler is configured. */
-  private audit(type: string, data?: Record<string, unknown>): void {
-    if (this.auditHandler) this.auditHandler(type, data);
-  }
-
-  /** Builtin: source / . — execute commands from a file in the current shell. */
-  private async builtinSource(args: string[]): Promise<RunResult> {
-    if (args.length === 0) {
-      return { exitCode: 2, stdout: '', stderr: 'source: filename argument required\n', executionTimeMs: 0 };
-    }
-
-    const filePath = this.resolvePath(args[0]);
-    let content: Uint8Array;
-    try {
-      content = this.vfs.readFile(filePath);
-    } catch {
-      return { exitCode: 1, stdout: '', stderr: `source: ${args[0]}: No such file or directory\n`, executionTimeMs: 0 };
-    }
-
-    let script = new TextDecoder().decode(content);
-
-    // Strip shebang line if present
-    if (script.startsWith('#!')) {
-      const nl = script.indexOf('\n');
-      script = nl >= 0 ? script.slice(nl + 1) : '';
-    }
-
-    const extraArgs = args.slice(1);
-
-    if (extraArgs.length > 0) {
-      // Save and set positional parameters
-      const savedPositionals: Map<string, string | undefined> = new Map();
-      savedPositionals.set('#', this.env.get('#'));
-      const prevCount = this.getPositionalArgs().length;
-      for (let i = 0; i < Math.max(extraArgs.length, prevCount, 9); i++) {
-        savedPositionals.set(String(i + 1), this.env.get(String(i + 1)));
-      }
-      for (let i = 0; i < extraArgs.length; i++) {
-        this.env.set(String(i + 1), extraArgs[i]);
-      }
-      for (let i = extraArgs.length + 1; i <= prevCount; i++) {
-        this.env.delete(String(i));
-      }
-      this.env.set('#', String(extraArgs.length));
-
-      try {
-        const result = await this.run(script);
-        return result;
-      } finally {
-        // Restore positional parameters
-        for (const [key, val] of savedPositionals) {
-          if (val !== undefined) this.env.set(key, val);
-          else this.env.delete(key);
-        }
-      }
-    }
-
-    // No extra args — just run in current shell
-    return this.run(script);
-  }
-
-  /** Builtin: pip — package install/uninstall/list/show. */
-  private builtinPip(args: string[]): RunResult {
-    const sub = args[0];
-    if (sub === '--help' || sub === '-h' || sub === undefined) {
-      return {
-        exitCode: 0,
-        stdout: 'Usage: pip <command> [options]\n\nCommands:\n  install    Install packages\n  uninstall  Uninstall packages\n  list       List installed packages\n  show       Show package details\n',
-        stderr: '',
-        executionTimeMs: 0,
-      };
-    }
-
-    if (sub === 'install') {
-      const name = args[1];
-      if (!name) {
-        return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to install\n', executionTimeMs: 0 };
-      }
-      // Check extension registry first (backwards compat)
-      const ext = this.extensionRegistry?.get(name);
-      if (ext?.pythonPackage) {
-        return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
-      }
-      // Check if already installed from PackageRegistry
-      if (this.installedPackages.has(name)) {
-        return { exitCode: 0, stdout: `Requirement already satisfied: ${name}\n`, stderr: '', executionTimeMs: 0 };
-      }
-      // Try to install from PackageRegistry
-      if (this.packageRegistry?.has(name)) {
-        const toInstall = this.packageRegistry.resolveDeps(name);
-        const newlyInstalled: string[] = [];
-        this.vfs.withWriteAccess(() => {
-          for (const depName of toInstall) {
-            if (this.installedPackages.has(depName)) continue;
-            const meta = this.packageRegistry!.get(depName)!;
-            for (const [relPath, content] of Object.entries(meta.pythonFiles)) {
-              const fullPath = `/usr/lib/python/${relPath}`;
-              const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
-              this.vfs.mkdirp(dir);
-              this.vfs.writeFile(fullPath, new TextEncoder().encode(content));
-            }
-            this.installedPackages.add(depName);
-            newlyInstalled.push(`${depName}-${meta.version}`);
-          }
-        });
-        return { exitCode: 0, stdout: `Successfully installed ${newlyInstalled.join(' ')}\n`, stderr: '', executionTimeMs: 0 };
-      }
-      // Not found anywhere
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `ERROR: Could not find a version that satisfies the requirement ${name} (not found in sandbox registry)\nAvailable packages: ${this.packageRegistry?.available().join(', ') ?? ''}\n`,
-        executionTimeMs: 0,
-      };
-    }
-
-    if (sub === 'uninstall') {
-      const name = args[1];
-      if (!name) {
-        return { exitCode: 1, stdout: '', stderr: 'ERROR: You must give at least one requirement to uninstall\n', executionTimeMs: 0 };
-      }
-      if (!this.installedPackages.has(name)) {
-        return { exitCode: 1, stdout: '', stderr: `WARNING: Skipping ${name} as it is not installed\n`, executionTimeMs: 0 };
-      }
-      const meta = this.packageRegistry?.get(name);
-      if (meta) {
-        this.vfs.withWriteAccess(() => {
-          for (const relPath of Object.keys(meta.pythonFiles)) {
-            try { this.vfs.unlink(`/usr/lib/python/${relPath}`); } catch {}
-          }
-          try { this.vfs.rmdir(`/usr/lib/python/${name}`); } catch {}
-        });
-      }
-      this.installedPackages.delete(name);
-      return { exitCode: 0, stdout: `Successfully uninstalled ${name}\n`, stderr: '', executionTimeMs: 0 };
-    }
-
-    if (sub === 'list') {
-      let out = 'Package         Version\n--------------- -------\n';
-      // Show packages from PackageRegistry that are installed
-      for (const name of [...this.installedPackages].sort()) {
-        const meta = this.packageRegistry?.get(name);
-        if (meta) {
-          out += `${name.padEnd(16)}${meta.version}\n`;
-        }
-      }
-      // Show extension packages (backwards compat)
-      const extNames = this.extensionRegistry?.getPackageNames() ?? [];
-      for (const name of extNames) {
-        if (!this.installedPackages.has(name)) {
-          const ext = this.extensionRegistry!.get(name)!;
-          out += `${name.padEnd(16)}${ext.pythonPackage!.version}\n`;
-        }
-      }
-      return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-    }
-
-    if (sub === 'show') {
-      const name = args[1];
-      if (!name) {
-        return { exitCode: 1, stdout: '', stderr: 'ERROR: Please provide a package name\n', executionTimeMs: 0 };
-      }
-      // Check PackageRegistry first
-      const meta = this.packageRegistry?.get(name);
-      if (meta) {
-        const installed = this.installedPackages.has(name);
-        let out = `Name: ${meta.name}\nVersion: ${meta.version}\nSummary: ${meta.summary}\n`;
-        out += `Status: ${installed ? 'installed' : 'available'}\nLocation: /usr/lib/python\n`;
-        if (meta.dependencies.length > 0) out += `Requires: ${meta.dependencies.join(', ')}\n`;
-        return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-      }
-      // Check extension registry (backwards compat)
-      const ext = this.extensionRegistry?.get(name);
-      if (ext?.pythonPackage) {
-        const pkg = ext.pythonPackage;
-        const files = Object.keys(pkg.files);
-        let out = `Name: ${name}\nVersion: ${pkg.version}\n`;
-        if (pkg.summary) out += `Summary: ${pkg.summary}\n`;
-        out += `Location: /usr/lib/python\nFiles:\n`;
-        for (const f of files) out += `  ${name}/${f}\n`;
-        return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-      }
-      return { exitCode: 1, stdout: '', stderr: `WARNING: Package(s) not found: ${name}\n`, executionTimeMs: 0 };
-    }
-
-    return {
-      exitCode: 1,
-      stdout: '',
-      stderr: `ERROR: unknown command "${sub}"\n`,
-      executionTimeMs: 0,
-    };
-  }
-
-  /** Builtin: history — list or clear command history. */
-  private builtinHistory(args: string[]): RunResult {
-    const sub = args[0] ?? 'list';
-
-    if (sub === 'clear') {
-      this.history.clear();
-      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-
-    if (sub === 'list') {
-      const entries = this.history.list();
-      const lines = entries.map(e => `  ${e.index}  ${e.command}`);
-      return { exitCode: 0, stdout: lines.join('\n') + (lines.length > 0 ? '\n' : ''), stderr: '', executionTimeMs: 0 };
-    }
-
-    return { exitCode: 1, stdout: '', stderr: `history: unknown subcommand: ${sub}\n`, executionTimeMs: 0 };
-  }
-
   /** Return the command history entries. */
   getHistory(): HistoryEntry[] {
     return this.history.list();
@@ -2653,505 +1903,5 @@ export class ShellRunner {
   clearHistory(): void {
     this.history.clear();
   }
-
-  /** Builtin: pkg — manage WASI binary packages. */
-  private async builtinPkg(args: string[]): Promise<RunResult> {
-    const sub = args[0];
-
-    if (!sub) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'usage: pkg <install|remove|list|info> [args...]\n',
-        executionTimeMs: 0,
-      };
-    }
-
-    if (!this.packageManager) {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: 'pkg: package manager is disabled\n',
-        executionTimeMs: 0,
-      };
-    }
-
-    const encoder = new TextEncoder();
-
-    if (sub === 'install') {
-      return this.builtinPkgInstall(args.slice(1), encoder);
-    } else if (sub === 'remove') {
-      return this.builtinPkgRemove(args.slice(1));
-    } else if (sub === 'list') {
-      return this.builtinPkgList();
-    } else if (sub === 'info') {
-      return this.builtinPkgInfo(args.slice(1));
-    } else {
-      return {
-        exitCode: 1,
-        stdout: '',
-        stderr: `pkg: unknown subcommand '${sub}'\n`,
-        executionTimeMs: 0,
-      };
-    }
-  }
-
-  /** Builtin: pkg install <url> [--name <name>] */
-  private async builtinPkgInstall(args: string[], encoder: TextEncoder): Promise<RunResult> {
-    let url: string | undefined;
-    let name: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === '--name' && i + 1 < args.length) {
-        name = args[++i];
-      } else if (!arg.startsWith('-')) {
-        url = arg;
-      }
-    }
-
-    if (!url) {
-      return { exitCode: 1, stdout: '', stderr: 'pkg install: no URL specified\n', executionTimeMs: 0 };
-    }
-
-    // Derive name from URL filename without .wasm extension
-    if (!name) {
-      const filename = url.split('/').pop() ?? '';
-      name = filename.endsWith('.wasm') ? filename.slice(0, -5) : filename;
-    }
-    if (!name) {
-      return { exitCode: 1, stdout: '', stderr: 'pkg install: could not derive package name from URL\n', executionTimeMs: 0 };
-    }
-
-    // Reject invalid package names (path traversal, empty, dots-only)
-    if (name === '' || name === '.' || name === '..' || name.includes('/')) {
-      return { exitCode: 1, stdout: '', stderr: `pkg install: invalid package name '${name}'\n`, executionTimeMs: 0 };
-    }
-
-    // Check host against policy BEFORE fetching (to emit audit event early)
-    let host: string;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      return { exitCode: 1, stdout: '', stderr: `pkg install: invalid URL '${url}'\n`, executionTimeMs: 0 };
-    }
-
-    this.audit('package.install.start', { name, url, host });
-
-    // Check host against policy BEFORE fetching
-    try {
-      this.packageManager!.checkHost(url);
-    } catch (err) {
-      if (err instanceof PkgError) {
-        this.audit('package.install.denied', { name, url, host, reason: err.message, code: err.code });
-        return { exitCode: 1, stdout: '', stderr: `pkg install: ${err.message}\n`, executionTimeMs: 0 };
-      }
-      throw err;
-    }
-
-    try {
-      // Fetch the WASM binary
-      const response = await (this.gateway?.fetch(url) ?? globalThis.fetch(url));
-      if (!response.ok) {
-        this.audit('package.install.denied', { name, url, host, reason: `HTTP ${response.status}` });
-        return { exitCode: 1, stdout: '', stderr: `pkg install: fetch failed with HTTP ${response.status}\n`, executionTimeMs: 0 };
-      }
-
-      const arrayBuf = await NetworkGateway.readResponseArrayBuffer(response);
-      if (arrayBuf === null) {
-        this.audit('package.install.denied', { name, url, host, reason: 'response too large' });
-        return { exitCode: 1, stdout: '', stderr: 'pkg install: response body too large\n', executionTimeMs: 0 };
-      }
-      const wasmBytes = new Uint8Array(arrayBuf);
-
-      // Install via PackageManager (validates host, size, count limits)
-      this.packageManager!.install(name, wasmBytes, url);
-
-      // Register with ProcessManager so the tool can be spawned
-      const wasmPath = this.packageManager!.getWasmPath(name)!;
-      this.mgr.registerTool(name, wasmPath);
-
-      // Write a stub to /bin so `which` and `ls /bin` see it
-      this.vfs.withWriteAccess(() => {
-        this.vfs.writeFile('/bin/' + name, encoder.encode('#!/bin/codepod\n# ' + name + '\n'));
-        try {
-          this.vfs.chmod('/bin/' + name, 0o755);
-        } catch { /* ignore */ }
-      });
-
-      this.audit('package.install.complete', { name, url, host, size: wasmBytes.byteLength });
-
-      return {
-        exitCode: 0,
-        stdout: `installed ${name} (${wasmBytes.byteLength} bytes) from ${url}\n`,
-        stderr: '',
-        executionTimeMs: 0,
-      };
-    } catch (err) {
-      if (err instanceof CancelledError) throw err;
-      const reason = err instanceof PkgError ? err.message : (err instanceof Error ? err.message : String(err));
-      const code = err instanceof PkgError ? err.code : 'E_PKG_FETCH';
-      this.audit('package.install.denied', { name, url, host, reason, code });
-      return { exitCode: 1, stdout: '', stderr: `pkg install: ${reason}\n`, executionTimeMs: 0 };
-    }
-  }
-
-  /** Builtin: pkg remove <name> */
-  private async builtinPkgRemove(args: string[]): Promise<RunResult> {
-    const name = args[0];
-    if (!name) {
-      return { exitCode: 1, stdout: '', stderr: 'pkg remove: no package name specified\n', executionTimeMs: 0 };
-    }
-
-    try {
-      this.packageManager!.remove(name);
-      this.audit('package.remove', { name });
-      return { exitCode: 0, stdout: `removed ${name}\n`, stderr: '', executionTimeMs: 0 };
-    } catch (err) {
-      if (err instanceof CancelledError) throw err;
-      const reason = err instanceof PkgError ? err.message : (err instanceof Error ? err.message : String(err));
-      return { exitCode: 1, stdout: '', stderr: `pkg remove: ${reason}\n`, executionTimeMs: 0 };
-    }
-  }
-
-  /** Builtin: pkg list */
-  private builtinPkgList(): RunResult {
-    const packages = this.packageManager!.list();
-    if (packages.length === 0) {
-      return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
-    }
-    const lines = packages.map(p => `${p.name}\t${p.size}\t${p.url}`).join('\n') + '\n';
-    return { exitCode: 0, stdout: lines, stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: pkg info <name> */
-  private builtinPkgInfo(args: string[]): RunResult {
-    const name = args[0];
-    if (!name) {
-      return { exitCode: 1, stdout: '', stderr: 'pkg info: no package name specified\n', executionTimeMs: 0 };
-    }
-
-    const info = this.packageManager!.info(name);
-    if (!info) {
-      return { exitCode: 1, stdout: '', stderr: `pkg info: package '${name}' not found\n`, executionTimeMs: 0 };
-    }
-
-    const out = [
-      `Name: ${info.name}`,
-      `URL: ${info.url}`,
-      `Size: ${info.size}`,
-      `Installed: ${new Date(info.installedAt).toISOString()}`,
-    ].join('\n') + '\n';
-
-    return { exitCode: 0, stdout: out, stderr: '', executionTimeMs: 0 };
-  }
-
-  /** Builtin: curl — HTTP client delegating to NetworkGateway. */
-  private async builtinCurl(args: string[]): Promise<RunResult> {
-    if (!this.gateway) {
-      return { exitCode: 1, stdout: '', stderr: 'curl: network access not configured\n', executionTimeMs: 0 };
-    }
-
-    let method = 'GET';
-    const headers: Record<string, string> = {};
-    let data: string | undefined;
-    let outputFile: string | undefined;
-    let headOnly = false;
-    let url: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === '-X' && i + 1 < args.length) { method = args[++i]; }
-      else if (arg === '-H' && i + 1 < args.length) {
-        const header = args[++i];
-        const colonIdx = header.indexOf(':');
-        if (colonIdx > 0) headers[header.slice(0, colonIdx).trim()] = header.slice(colonIdx + 1).trim();
-      }
-      else if ((arg === '-d' || arg === '--data') && i + 1 < args.length) {
-        data = args[++i];
-        if (method === 'GET') method = 'POST';
-      }
-      else if (arg === '-o' && i + 1 < args.length) { outputFile = this.resolvePath(args[++i]); }
-      else if (arg === '-s' || arg === '--silent') { /* silent mode */ }
-      else if (arg === '-I' || arg === '--head') { headOnly = true; method = 'HEAD'; }
-      else if (arg === '-L' || arg === '--location') { /* follow redirects is default with fetch() */ }
-      else if (!arg.startsWith('-')) { url = arg; }
-    }
-
-    if (!url) return { exitCode: 1, stdout: '', stderr: 'curl: no URL specified\n', executionTimeMs: 0 };
-
-    try {
-      const init: RequestInit = { method, headers };
-      if (data) {
-        init.body = data;
-        if (!headers['Content-Type']) headers['Content-Type'] = 'application/x-www-form-urlencoded';
-      }
-      const response = await this.gateway.fetch(url, init);
-
-      if (headOnly) {
-        let headerStr = `HTTP/${response.status}\n`;
-        response.headers.forEach((v, k) => { headerStr += `${k}: ${v}\n`; });
-        return { exitCode: 0, stdout: headerStr, stderr: '', executionTimeMs: 0 };
-      }
-
-      const body = await NetworkGateway.readResponseBody(response);
-      if (outputFile) {
-        this.vfs.writeFile(outputFile, new TextEncoder().encode(body));
-        return { exitCode: 0, stdout: '', stderr: '', executionTimeMs: 0 };
-      }
-      return { exitCode: 0, stdout: body, stderr: '', executionTimeMs: 0 };
-    } catch (err) {
-      if (err instanceof CancelledError) throw err;
-      if (err instanceof NetworkAccessDenied) return { exitCode: 1, stdout: '', stderr: `curl: ${err.message}\n`, executionTimeMs: 0 };
-      const msg = err instanceof Error ? err.message : String(err);
-      return { exitCode: 1, stdout: '', stderr: `curl: ${msg}\n`, executionTimeMs: 0 };
-    }
-  }
-
-  /** Builtin: wget — download files via NetworkGateway. */
-  private async builtinWget(args: string[]): Promise<RunResult> {
-    if (!this.gateway) {
-      return { exitCode: 1, stdout: '', stderr: 'wget: network access not configured\n', executionTimeMs: 0 };
-    }
-
-    let outputFile: string | undefined;
-    let toStdout = false;
-    let quiet = false;
-    let url: string | undefined;
-
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i];
-      if (arg === '-O' && i + 1 < args.length) {
-        const val = args[++i];
-        if (val === '-') toStdout = true;
-        else outputFile = this.resolvePath(val);
-      } else if (arg === '-q') { quiet = true; }
-      else if (!arg.startsWith('-')) { url = arg; }
-    }
-
-    if (!url) return { exitCode: 1, stdout: '', stderr: 'wget: no URL specified\n', executionTimeMs: 0 };
-
-    try {
-      const response = await this.gateway.fetch(url);
-      const body = await NetworkGateway.readResponseBody(response);
-
-      if (toStdout) return { exitCode: 0, stdout: body, stderr: '', executionTimeMs: 0 };
-
-      const destPath = outputFile ?? this.resolvePath(url.split('/').pop() || 'index.html');
-      this.vfs.writeFile(destPath, new TextEncoder().encode(body));
-      const stderr = quiet ? '' : `saved to ${destPath}\n`;
-      return { exitCode: 0, stdout: '', stderr, executionTimeMs: 0 };
-    } catch (err) {
-      if (err instanceof CancelledError) throw err;
-      if (err instanceof NetworkAccessDenied) return { exitCode: 1, stdout: '', stderr: `wget: ${err.message}\n`, executionTimeMs: 0 };
-      const msg = err instanceof Error ? err.message : String(err);
-      return { exitCode: 1, stdout: '', stderr: `wget: ${msg}\n`, executionTimeMs: 0 };
-    }
-  }
-
-  private tryReadFile(path: string): Uint8Array {
-    try {
-      return this.vfs.readFile(path);
-    } catch {
-      return new Uint8Array(0);
-    }
-  }
 }
 
-/**
- * Parse a chmod mode argument. Returns the new octal mode or null if invalid.
- *
- * Supports:
- *   - Octal: "755", "644", "0755"
- *   - Symbolic: "+x", "-w", "u+x", "go-w", "a+rx"
- */
-function parseChmodMode(modeArg: string, currentMode: number): number | null {
-  // Try octal first
-  if (/^0?[0-7]{3}$/.test(modeArg)) {
-    return parseInt(modeArg, 8);
-  }
-
-  // Symbolic mode: [ugoa]*[+-][rwx]+
-  const match = modeArg.match(/^([ugoa]*)([+-])([rwx]+)$/);
-  if (!match) return null;
-
-  const [, whoStr, op, permsStr] = match;
-  const who = whoStr === '' || whoStr === 'a' ? 'ugo' : whoStr;
-
-  // Build the bit mask for the specified permissions
-  let mask = 0;
-  for (const w of who) {
-    const shift = w === 'u' ? 6 : w === 'g' ? 3 : 0;
-    for (const p of permsStr) {
-      const bit = p === 'r' ? 4 : p === 'w' ? 2 : 1;
-      mask |= bit << shift;
-    }
-  }
-
-  return op === '+' ? currentMode | mask : currentMode & ~mask;
-}
-
-/**
- * Parse a shebang line and return the interpreter base name, or null.
- *
- * Handles:
- *   #!/usr/bin/env python3  → "python3"
- *   #!/usr/bin/python3      → "python3"
- *   #!/bin/sh               → "sh"
- *   #!/bin/bash              → "bash"
- *   (no shebang)            → null
- */
-function parseShebang(firstLine: string): string | null {
-  if (!firstLine.startsWith('#!')) return null;
-
-  const rest = firstLine.slice(2).trim();
-  const parts = rest.split(/\s+/);
-
-  // #!/usr/bin/env <interpreter> — use the second word
-  if (parts.length >= 2 && parts[0].endsWith('/env')) {
-    return parts[1];
-  }
-
-  // #!/path/to/interpreter — use the basename
-  if (parts.length >= 1) {
-    const slash = parts[0].lastIndexOf('/');
-    return slash >= 0 ? parts[0].slice(slash + 1) : parts[0];
-  }
-
-  return null;
-}
-
-/**
- * Normalize an absolute path by resolving `.` and `..` segments.
- * E.g. "/home/user/.." → "/home", "/home/./user" → "/home/user".
- */
-function normalizePath(path: string): string {
-  const parts = path.split('/');
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (part === '' || part === '.') continue;
-    if (part === '..') {
-      resolved.pop();
-    } else {
-      resolved.push(part);
-    }
-  }
-  return '/' + resolved.join('/');
-}
-
-/** Simple strftime-like date formatter. Supports common % tokens. */
-function formatDate(d: Date, format: string): string {
-  const pad = (n: number, w = 2) => String(n).padStart(w, '0');
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-  return format.replace(/%([YmdHMSaAbBpZsnT%])/g, (_, code: string) => {
-    switch (code) {
-      case 'Y': return String(d.getUTCFullYear());
-      case 'm': return pad(d.getUTCMonth() + 1);
-      case 'd': return pad(d.getUTCDate());
-      case 'H': return pad(d.getUTCHours());
-      case 'M': return pad(d.getUTCMinutes());
-      case 'S': return pad(d.getUTCSeconds());
-      case 'a': return days[d.getUTCDay()];
-      case 'A': return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getUTCDay()];
-      case 'b': return months[d.getUTCMonth()];
-      case 'B': return ['January','February','March','April','May','June','July','August','September','October','November','December'][d.getUTCMonth()];
-      case 'p': return d.getUTCHours() < 12 ? 'AM' : 'PM';
-      case 'Z': return 'UTC';
-      case 's': return String(Math.floor(d.getTime() / 1000));
-      case 'n': return '\n';
-      case 'T': return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-      case '%': return '%';
-      default: return `%${code}`;
-    }
-  });
-}
-
-/**
- * Safe arithmetic evaluator using recursive descent.
- * Supports: +, -, *, /, %, parentheses, comparisons (==, !=, <, >, <=, >=).
- */
-function safeEvalArithmetic(expr: string): number {
-  const tokens: string[] = [];
-  let i = 0;
-  while (i < expr.length) {
-    if (expr[i] === ' ' || expr[i] === '\t') { i++; continue; }
-    if ('0123456789'.includes(expr[i])) {
-      let num = '';
-      while (i < expr.length && '0123456789'.includes(expr[i])) { num += expr[i++]; }
-      tokens.push(num);
-    } else if ('+-*/%()'.includes(expr[i])) {
-      tokens.push(expr[i++]);
-    } else if (expr[i] === '<' || expr[i] === '>' || expr[i] === '=' || expr[i] === '!') {
-      let op = expr[i++];
-      if (i < expr.length && expr[i] === '=') { op += expr[i++]; }
-      tokens.push(op);
-    } else {
-      i++; // skip unknown
-    }
-  }
-  let pos = 0;
-  function peek(): string | undefined { return tokens[pos]; }
-  function next(): string { return tokens[pos++]; }
-  function parseExpr(): number { return parseComparison(); }
-  function parseComparison(): number {
-    let left = parseAddSub();
-    while (peek() === '==' || peek() === '!=' || peek() === '<' || peek() === '>' || peek() === '<=' || peek() === '>=') {
-      const op = next();
-      const right = parseAddSub();
-      switch (op) {
-        case '==': left = left === right ? 1 : 0; break;
-        case '!=': left = left !== right ? 1 : 0; break;
-        case '<': left = left < right ? 1 : 0; break;
-        case '>': left = left > right ? 1 : 0; break;
-        case '<=': left = left <= right ? 1 : 0; break;
-        case '>=': left = left >= right ? 1 : 0; break;
-      }
-    }
-    return left;
-  }
-  function parseAddSub(): number {
-    let left = parseMulDiv();
-    while (peek() === '+' || peek() === '-') {
-      const op = next();
-      const right = parseMulDiv();
-      left = op === '+' ? left + right : left - right;
-    }
-    return left;
-  }
-  function parseMulDiv(): number {
-    let left = parseUnary();
-    while (peek() === '*' || peek() === '/' || peek() === '%') {
-      const op = next();
-      const right = parseUnary();
-      if (op === '*') left = left * right;
-      else if (op === '/') left = right !== 0 ? Math.trunc(left / right) : 0;
-      else left = right !== 0 ? left % right : 0;
-    }
-    return left;
-  }
-  function parseUnary(): number {
-    if (peek() === '-') { next(); return -parsePrimary(); }
-    if (peek() === '+') { next(); return parsePrimary(); }
-    return parsePrimary();
-  }
-  function parsePrimary(): number {
-    if (peek() === '(') {
-      next(); // skip (
-      const val = parseExpr();
-      if (peek() === ')') next();
-      return val;
-    }
-    const tok = next();
-    return tok !== undefined ? parseInt(tok, 10) || 0 : 0;
-  }
-  return parseExpr();
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const result = new Uint8Array(a.byteLength + b.byteLength);
-  result.set(a, 0);
-  result.set(b, a.byteLength);
-  return result;
-}

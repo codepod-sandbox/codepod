@@ -15,6 +15,7 @@ struct Options {
     files_with_matches: bool,
     recursive: bool,
     extended: bool,
+    only_matching: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,26 @@ fn grep_reader<R: io::Read>(
             if opts.files_with_matches {
                 println!("{}", filename);
                 return Ok(true);
+            }
+
+            // -o with -v is undefined; ignore -o in that case
+            if opts.only_matching && !opts.invert {
+                for m in re.find_iter(&line) {
+                    if opts.count_only {
+                        match_count += 1;
+                        continue;
+                    }
+                    let mut prefix = String::new();
+                    if show_filename {
+                        prefix.push_str(filename);
+                        prefix.push(':');
+                    }
+                    if opts.line_numbers {
+                        prefix.push_str(&format!("{}:", i + 1));
+                    }
+                    println!("{}{}", prefix, m.as_str());
+                }
+                continue;
             }
 
             if opts.count_only {
@@ -159,6 +180,7 @@ fn main() {
         files_with_matches: false,
         recursive: false,
         extended: false,
+        only_matching: false,
     };
     let mut positional: Vec<String> = Vec::new();
     let mut past_flags = false;
@@ -182,6 +204,7 @@ fn main() {
                     'l' => opts.files_with_matches = true,
                     'r' | 'R' => opts.recursive = true,
                     'E' => opts.extended = true,
+                    'o' => opts.only_matching = true,
                     _ => {
                         eprintln!("grep: invalid option -- '{}'", ch);
                         process::exit(2);
