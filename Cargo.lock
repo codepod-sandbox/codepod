@@ -308,9 +308,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codepod-host-native"
+version = "0.1.0"
+dependencies = [
+ "rustpython-derive",
+ "rustpython-vm",
+]
+
+[[package]]
 name = "codepod-python"
 version = "0.1.0"
 dependencies = [
+ "codepod-host-native",
  "numpy-rust-python",
  "pandas-native",
  "pil-rust-python",
