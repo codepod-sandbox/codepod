@@ -7,7 +7,7 @@ use crate::state::ShellState;
 
 /// Execute a parsed `Command` AST node.
 ///
-/// For Task 3 only the `Command::Simple` variant is implemented.
+/// Currently only the `Command::Simple` variant is implemented.
 /// All other variants return an empty `RunResult`.
 pub fn exec_command(
     state: &mut ShellState,

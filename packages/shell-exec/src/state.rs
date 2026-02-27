@@ -26,6 +26,8 @@ pub struct ShellState {
     pub local_var_stack: Vec<HashMap<String, Option<String>>>,
     pub history: Vec<String>,
     pub cwd: String,
+    /// Seed for $RANDOM pseudo-random number generator.
+    pub rng_seed: u64,
 }
 
 impl ShellState {
@@ -52,6 +54,7 @@ impl ShellState {
             local_var_stack: Vec::new(),
             history: Vec::new(),
             cwd: "/home/user".into(),
+            rng_seed: 12345, // deterministic default; host can override
         }
     }
 

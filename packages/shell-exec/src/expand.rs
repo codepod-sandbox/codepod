@@ -117,7 +117,7 @@ fn expand_variable(state: &mut ShellState, name: &str) -> String {
         "?" => return state.last_exit_code.to_string(),
         "@" | "*" => return state.positional_args.join(" "),
         "#" => return state.positional_args.len().to_string(),
-        "RANDOM" => return random_u15().to_string(),
+        "RANDOM" => return random_u15(state).to_string(),
         "SECONDS" => return "0".to_string(), // placeholder — no start_time yet
         "LINENO" => return "0".to_string(),  // placeholder — no line tracking yet
         _ => {}
@@ -192,18 +192,15 @@ fn expand_variable(state: &mut ShellState, name: &str) -> String {
     String::new()
 }
 
-/// Generate a pseudo-random number in [0, 32768).
-fn random_u15() -> u32 {
-    // Simple deterministic-ish random without pulling in a crate.
-    // We use the address of a stack variable plus a simple hash.
-    // For production correctness we'd want a proper RNG, but for
-    // shell $RANDOM this is acceptable.
-    let mut x: u32 = 0;
-    // Use the address as entropy seed (this is a deliberately simple approach).
-    let ptr = &x as *const u32 as usize;
-    x = (ptr as u32).wrapping_mul(2654435769);
-    x ^= x >> 16;
-    x.wrapping_mul(2246822507) % 32768
+/// Generate a pseudo-random number in [0, 32768) using xorshift on state's seed.
+fn random_u15(state: &mut ShellState) -> u32 {
+    // xorshift64 — simple, fast, and produces different values each call.
+    let mut s = state.rng_seed;
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    state.rng_seed = s;
+    (s % 32768) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +264,7 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
                 }
                 // String length of variable value: ${#VAR}
                 let v = state.env.get(operand).cloned().unwrap_or_default();
-                return v.len().to_string();
+                return v.chars().count().to_string();
             }
             // ${VAR#pattern} — trim shortest prefix
             match &val {
@@ -353,37 +350,45 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
 // Substring helper
 // ---------------------------------------------------------------------------
 
+/// Collect char boundary positions for safe slicing.
+fn char_boundaries(s: &str) -> Vec<usize> {
+    s.char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(s.len()))
+        .collect()
+}
+
 fn apply_substring(s: &str, operand: &str) -> String {
     let parts: Vec<&str> = operand.splitn(2, ':').collect();
+    let char_count = s.chars().count() as isize;
     let mut offset = parts[0].parse::<isize>().unwrap_or(0);
-    let len = s.len() as isize;
 
     if offset < 0 {
-        offset = (len + offset).max(0);
+        offset = (char_count + offset).max(0);
     }
-
     let offset = offset as usize;
+
+    let boundaries = char_boundaries(s);
 
     if parts.len() > 1 {
         let length = parts[1].parse::<isize>().unwrap_or(0);
         if length < 0 {
-            // Negative length means "up to len+length from the end"
-            let end_pos = (len + length).max(0) as usize;
-            if offset <= s.len() && end_pos <= s.len() && offset <= end_pos {
-                return s[offset..end_pos].to_string();
+            let end_char = (char_count + length).max(0) as usize;
+            if offset < boundaries.len() && end_char < boundaries.len() && offset <= end_char {
+                return s[boundaries[offset]..boundaries[end_char]].to_string();
             }
             return String::new();
         }
         let length = length as usize;
-        let end = (offset + length).min(s.len());
-        if offset <= s.len() {
-            return s[offset..end].to_string();
+        let end_char = (offset + length).min(boundaries.len() - 1);
+        if offset < boundaries.len() {
+            return s[boundaries[offset]..boundaries[end_char]].to_string();
         }
         return String::new();
     }
 
-    if offset <= s.len() {
-        s[offset..].to_string()
+    if offset < boundaries.len() {
+        s[boundaries[offset]..].to_string()
     } else {
         String::new()
     }
@@ -585,18 +590,19 @@ fn match_char_class(pat: &[u8], ch: u8) -> Option<(bool, usize)> {
 // ---------------------------------------------------------------------------
 
 /// Remove shortest (greedy=false) or longest (greedy=true) prefix matching
-/// the glob pattern.
+/// the glob pattern. Uses char boundaries for UTF-8 safety.
 fn trim_prefix(val: &str, pattern: &str, greedy: bool) -> String {
+    let boundaries = char_boundaries(val);
     if greedy {
         // Try longest prefix first
-        for i in (0..=val.len()).rev() {
+        for &i in boundaries.iter().rev() {
             if glob_matches(pattern, &val[..i]) {
                 return val[i..].to_string();
             }
         }
     } else {
         // Try shortest prefix first
-        for i in 0..=val.len() {
+        for &i in &boundaries {
             if glob_matches(pattern, &val[..i]) {
                 return val[i..].to_string();
             }
@@ -606,18 +612,19 @@ fn trim_prefix(val: &str, pattern: &str, greedy: bool) -> String {
 }
 
 /// Remove shortest (greedy=false) or longest (greedy=true) suffix matching
-/// the glob pattern.
+/// the glob pattern. Uses char boundaries for UTF-8 safety.
 fn trim_suffix(val: &str, pattern: &str, greedy: bool) -> String {
+    let boundaries = char_boundaries(val);
     if greedy {
         // Try longest suffix first (start from beginning)
-        for i in 0..=val.len() {
+        for &i in &boundaries {
             if glob_matches(pattern, &val[i..]) {
                 return val[..i].to_string();
             }
         }
     } else {
         // Try shortest suffix first (start from end)
-        for i in (0..=val.len()).rev() {
+        for &i in boundaries.iter().rev() {
             if glob_matches(pattern, &val[i..]) {
                 return val[..i].to_string();
             }
@@ -627,7 +634,7 @@ fn trim_suffix(val: &str, pattern: &str, greedy: bool) -> String {
 }
 
 /// Replace the first (all=false) or all (all=true) occurrences of a glob
-/// pattern in `val`.
+/// pattern in `val`. Uses char boundaries for UTF-8 safety.
 fn replace_pattern(val: &str, operand: &str, all: bool) -> String {
     let slash_idx = operand.find('/');
     let pattern = match slash_idx {
@@ -639,35 +646,38 @@ fn replace_pattern(val: &str, operand: &str, all: bool) -> String {
         None => "",
     };
 
+    let boundaries = char_boundaries(val);
+
     if all {
         let mut result = String::new();
-        let mut i = 0;
-        while i < val.len() {
+        let mut bi = 0; // index into boundaries
+        while bi < boundaries.len() - 1 {
+            let i = boundaries[bi];
             let mut matched = false;
             // Try longest match first
-            for j in (i + 1..=val.len()).rev() {
+            for &j in boundaries[bi + 1..].iter().rev() {
                 if glob_matches(pattern, &val[i..j]) {
                     result.push_str(replacement);
-                    i = j;
+                    // Advance bi to the boundary at j
+                    bi = boundaries.iter().position(|&b| b == j).unwrap();
                     matched = true;
                     break;
                 }
             }
             if !matched {
                 // Advance one character
-                if let Some(ch) = val[i..].chars().next() {
-                    result.push(ch);
-                    i += ch.len_utf8();
-                } else {
-                    break;
-                }
+                result.push_str(&val[boundaries[bi]..boundaries[bi + 1]]);
+                bi += 1;
             }
         }
         result
     } else {
         // Replace first occurrence
-        for i in 0..val.len() {
-            for j in (i + 1..=val.len()).rev() {
+        for (bi, &i) in boundaries.iter().enumerate() {
+            if bi >= boundaries.len() - 1 {
+                break;
+            }
+            for &j in boundaries[bi + 1..].iter().rev() {
                 if glob_matches(pattern, &val[i..j]) {
                     return format!("{}{}{}", &val[..i], replacement, &val[j..]);
                 }
