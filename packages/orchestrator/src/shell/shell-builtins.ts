@@ -50,6 +50,7 @@ export abstract class ShellBuiltins {
   protected abstract history: CommandHistory;
   protected abstract packageManager: PackageManager | null;
   protected abstract auditHandler: ((type: string, data?: Record<string, unknown>) => void) | null;
+  protected abstract arrays: Map<string, string[]>;
 
   // Methods that builtins call back into on the runner
   protected abstract resolvePath(path: string): string;

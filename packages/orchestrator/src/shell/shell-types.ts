@@ -63,8 +63,10 @@ export type Command =
   | { List: { left: Command; op: ListOp; right: Command } }
   | { If: { condition: Command; then_body: Command; else_body: Command | null } }
   | { For: { var: string; words: Word[]; body: Command } }
+  | { CFor: { init: string; cond: string; step: string; body: Command } }
   | { While: { condition: Command; body: Command } }
   | { Subshell: { body: Command } }
+  | { BraceGroup: { body: Command } }
   | 'Break'
   | 'Continue'
   | { Negate: { body: Command } }
