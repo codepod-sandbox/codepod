@@ -94,12 +94,12 @@ describe('Sandbox', () => {
 
   it('VFS size limit enforces ENOSPC', async () => {
     // Use a limit large enough to fit the tool stubs the shell writes
-    // to /bin and /usr/bin during init (~3KB) plus the first file, but
-    // not the second.
-    sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter(), fsLimitBytes: 16_384 });
-    sandbox.writeFile('/tmp/a.txt', new Uint8Array(8_000));
+    // to /bin and /usr/bin during init (~3KB), the pip/pkg bootstrap
+    // config data (~120KB), plus the first file, but not the second.
+    sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter(), fsLimitBytes: 200_000 });
+    sandbox.writeFile('/tmp/a.txt', new Uint8Array(40_000));
     expect(() => {
-      sandbox.writeFile('/tmp/b.txt', new Uint8Array(10_000));
+      sandbox.writeFile('/tmp/b.txt', new Uint8Array(80_000));
     }).toThrow(/ENOSPC/);
   });
 

@@ -587,6 +587,63 @@ pub fn exec_command(
                 }));
             }
 
+            // ── Virtual commands (curl, wget, pkg, pip) ──────────────────
+            if let Some(result) = crate::virtual_commands::try_virtual_command(
+                state,
+                host,
+                cmd_name,
+                &func_args,
+                &stdin_data,
+            ) {
+                state.last_exit_code = result.exit_code;
+                let mut stdout = result.stdout;
+                let mut stderr = result.stderr;
+                apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
+                return Ok(ControlFlow::Normal(RunResult {
+                    exit_code: result.exit_code,
+                    stdout,
+                    stderr,
+                    execution_time_ms: 0,
+                }));
+            }
+
+            // ── Extensions ──────────────────────────────────────────────
+            if host.is_extension(cmd_name) {
+                let args_refs: Vec<&str> = func_args.iter().map(|s| s.as_str()).collect();
+                let env_pairs: Vec<(&str, &str)> = state
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                match host.extension_invoke(
+                    cmd_name,
+                    &args_refs,
+                    &stdin_data,
+                    &env_pairs,
+                    &state.cwd,
+                ) {
+                    Ok(r) => {
+                        state.last_exit_code = r.exit_code;
+                        let mut stdout = r.stdout;
+                        let mut stderr = r.stderr;
+                        apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
+                        return Ok(ControlFlow::Normal(RunResult {
+                            exit_code: r.exit_code,
+                            stdout,
+                            stderr,
+                            execution_time_ms: 0,
+                        }));
+                    }
+                    Err(e) => {
+                        state.last_exit_code = 1;
+                        return Ok(ControlFlow::Normal(RunResult::error(
+                            1,
+                            format!("{cmd_name}: {e}\n"),
+                        )));
+                    }
+                }
+            }
+
             // ── Path resolution and command dispatch ─────────────────────
             let (spawn_program, spawn_args) =
                 match dispatch_external_command(state, host, cmd_name, &args, &stdin_data) {
@@ -784,6 +841,83 @@ pub fn exec_command(
                                 }
                             }
                             // Track pipefail
+                            if pipefail && last_result.exit_code != 0 {
+                                pipefail_code = last_result.exit_code;
+                            }
+                            stdin_data = last_result.stdout.clone();
+                            continue;
+                        }
+
+                        // ── Virtual commands in pipeline ──
+                        if let Some(result) = crate::virtual_commands::try_virtual_command(
+                            state,
+                            host,
+                            cmd_name,
+                            &pipe_func_args,
+                            &effective_stdin,
+                        ) {
+                            state.last_exit_code = result.exit_code;
+                            let mut bstdout = result.stdout;
+                            let mut bstderr = result.stderr;
+                            apply_output_redirects(
+                                state,
+                                host,
+                                redirects,
+                                &mut bstdout,
+                                &mut bstderr,
+                            )?;
+                            last_result = RunResult {
+                                exit_code: result.exit_code,
+                                stdout: bstdout,
+                                stderr: bstderr,
+                                execution_time_ms: 0,
+                            };
+                            if pipefail && last_result.exit_code != 0 {
+                                pipefail_code = last_result.exit_code;
+                            }
+                            stdin_data = last_result.stdout.clone();
+                            continue;
+                        }
+
+                        // ── Extensions in pipeline ──
+                        if host.is_extension(cmd_name) {
+                            let args_refs: Vec<&str> =
+                                pipe_func_args.iter().map(|s| s.as_str()).collect();
+                            let env_pairs: Vec<(&str, &str)> = state
+                                .env
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.as_str()))
+                                .collect();
+                            match host.extension_invoke(
+                                cmd_name,
+                                &args_refs,
+                                &effective_stdin,
+                                &env_pairs,
+                                &state.cwd,
+                            ) {
+                                Ok(r) => {
+                                    state.last_exit_code = r.exit_code;
+                                    let mut bstdout = r.stdout;
+                                    let mut bstderr = r.stderr;
+                                    apply_output_redirects(
+                                        state,
+                                        host,
+                                        redirects,
+                                        &mut bstdout,
+                                        &mut bstderr,
+                                    )?;
+                                    last_result = RunResult {
+                                        exit_code: r.exit_code,
+                                        stdout: bstdout,
+                                        stderr: bstderr,
+                                        execution_time_ms: 0,
+                                    };
+                                }
+                                Err(e) => {
+                                    state.last_exit_code = 1;
+                                    last_result = RunResult::error(1, format!("{cmd_name}: {e}\n"));
+                                }
+                            }
                             if pipefail && last_result.exit_code != 0 {
                                 pipefail_code = last_result.exit_code;
                             }

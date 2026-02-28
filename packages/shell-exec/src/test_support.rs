@@ -3,7 +3,9 @@ pub mod mock {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
 
-    use crate::host::{CancelStatus, HostError, HostInterface, SpawnResult, StatInfo, WriteMode};
+    use crate::host::{
+        CancelStatus, FetchResult, HostError, HostInterface, SpawnResult, StatInfo, WriteMode,
+    };
 
     /// A recorded spawn invocation, for test assertions.
     #[derive(Debug, Clone)]
@@ -29,6 +31,12 @@ pub mod mock {
         /// returns a SpawnResult. When set, this takes priority over
         /// `spawn_results`.
         spawn_handler: Option<Box<dyn Fn(&str, &[&str], &str) -> SpawnResult>>,
+        /// Pre-configured fetch results keyed by URL.
+        fetch_results: HashMap<String, FetchResult>,
+        /// Extension names mapped to their invoke results.
+        extensions: HashMap<String, SpawnResult>,
+        /// Records register_tool calls for test assertions.
+        registered_tools: RefCell<Vec<(String, String)>>,
     }
 
     impl Default for MockHost {
@@ -47,6 +55,9 @@ pub mod mock {
                 glob_results: HashMap::new(),
                 spawn_calls: RefCell::new(Vec::new()),
                 spawn_handler: None,
+                fetch_results: HashMap::new(),
+                extensions: HashMap::new(),
+                registered_tools: RefCell::new(Vec::new()),
             }
         }
 
@@ -103,6 +114,23 @@ pub mod mock {
         /// Retrieve all recorded spawn calls for test assertions.
         pub fn get_spawn_calls(&self) -> Vec<SpawnCall> {
             self.spawn_calls.borrow().clone()
+        }
+
+        /// Register a pre-configured fetch result for a URL.
+        pub fn with_fetch_result(mut self, url: &str, result: FetchResult) -> Self {
+            self.fetch_results.insert(url.to_string(), result);
+            self
+        }
+
+        /// Register an extension that returns a pre-configured result.
+        pub fn with_extension(mut self, name: &str, result: SpawnResult) -> Self {
+            self.extensions.insert(name.to_string(), result);
+            self
+        }
+
+        /// Retrieve all recorded register_tool calls for test assertions.
+        pub fn get_registered_tools(&self) -> Vec<(String, String)> {
+            self.registered_tools.borrow().clone()
         }
     }
 
@@ -264,6 +292,50 @@ pub mod mock {
 
         fn readlink(&self, path: &str) -> Result<String, HostError> {
             Err(HostError::NotFound(path.to_string()))
+        }
+
+        fn fetch(
+            &self,
+            url: &str,
+            _method: &str,
+            _headers: &[(&str, &str)],
+            _body: Option<&str>,
+        ) -> FetchResult {
+            if let Some(result) = self.fetch_results.get(url) {
+                return result.clone();
+            }
+            FetchResult {
+                ok: false,
+                status: 0,
+                headers: vec![],
+                body: String::new(),
+                error: Some("networking not configured".to_string()),
+            }
+        }
+
+        fn extension_invoke(
+            &self,
+            name: &str,
+            _args: &[&str],
+            _stdin: &str,
+            _env: &[(&str, &str)],
+            _cwd: &str,
+        ) -> Result<SpawnResult, HostError> {
+            if let Some(result) = self.extensions.get(name) {
+                return Ok(result.clone());
+            }
+            Err(HostError::NotFound(format!("{name}: extension not found")))
+        }
+
+        fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError> {
+            self.registered_tools
+                .borrow_mut()
+                .push((name.to_string(), wasm_path.to_string()));
+            Ok(())
+        }
+
+        fn is_extension(&self, name: &str) -> bool {
+            self.extensions.contains_key(name)
         }
     }
 }

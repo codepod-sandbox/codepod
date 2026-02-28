@@ -5,6 +5,7 @@ pub mod executor;
 pub mod expand;
 pub mod host;
 pub mod state;
+pub mod virtual_commands;
 
 #[cfg(test)]
 pub mod test_support;

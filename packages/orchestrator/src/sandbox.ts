@@ -139,7 +139,12 @@ export class Sandbox {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const fsLimitBytes = options.fsLimitBytes ?? DEFAULT_FS_LIMIT;
 
-    const vfs = new VFS({ fsLimitBytes, fileCount: options.security?.limits?.fileCount });
+    const vfs = new VFS({
+      fsLimitBytes,
+      fileCount: options.security?.limits?.fileCount,
+      // Allow writes to system paths needed by virtual commands (pip, pkg)
+      writablePaths: ['/home/user', '/tmp', '/usr/lib/python', '/etc/codepod', '/usr/share/pkg'],
+    });
     const { gateway, bridge } = await Sandbox.createNetworkBridge(options.network);
     const mgr = new ProcessManager(vfs, adapter, bridge, options.security?.toolAllowlist);
     const tools = await Sandbox.registerTools(mgr, adapter, options.wasmDir);
@@ -173,6 +178,9 @@ export class Sandbox {
           deadlineMs: shellInstanceRef?.getDeadlineMs(),
           memoryBytes: secLimits?.memoryBytes,
         }),
+      networkBridge: bridge,
+      extensionRegistry,
+      toolAllowlist: options.security?.toolAllowlist,
     });
     shellInstanceRef = runner;
 
@@ -236,6 +244,52 @@ export class Sandbox {
               new TextEncoder().encode(src));
           }
         }
+      });
+    }
+
+    // Bootstrap VFS config data for Rust virtual commands (curl/wget/pkg/pip)
+    {
+      const enc = new TextEncoder();
+      vfs.withWriteAccess(() => {
+        vfs.mkdirp('/etc/codepod');
+
+        // pkg policy
+        const pkgPolicy = options.security?.packagePolicy ?? { enabled: false };
+        vfs.writeFile('/etc/codepod/pkg-policy.json', enc.encode(JSON.stringify(pkgPolicy)));
+
+        // pip registry (from PackageRegistry)
+        const pkgRegistry = new PackageRegistry();
+        const regData = pkgRegistry.available().map(n => {
+          const m = pkgRegistry.get(n)!;
+          return { name: m.name, version: m.version, summary: m.summary, dependencies: m.dependencies, files: m.pythonFiles };
+        });
+        vfs.writeFile('/etc/codepod/pip-registry.json', enc.encode(JSON.stringify(regData)));
+
+        // pip installed state (include pre-installed packages from options.packages)
+        const preInstalled: { name: string; version: string }[] = [];
+        if (options.packages && options.packages.length > 0) {
+          const preReg = new PackageRegistry();
+          const resolved = new Set<string>();
+          for (const name of options.packages) {
+            for (const dep of preReg.resolveDeps(name)) resolved.add(dep);
+          }
+          for (const name of resolved) {
+            const meta = preReg.get(name);
+            if (meta) preInstalled.push({ name: meta.name, version: meta.version });
+          }
+        }
+        vfs.writeFile('/etc/codepod/pip-installed.json', enc.encode(JSON.stringify(preInstalled)));
+
+        // extension metadata
+        const extMeta = extensionRegistry.list().map(e => ({
+          name: e.name,
+          description: e.description,
+          hasCommand: !!e.command,
+          pythonPackage: e.pythonPackage
+            ? { version: e.pythonPackage.version, summary: e.pythonPackage.summary }
+            : null,
+        }));
+        vfs.writeFile('/etc/codepod/extensions.json', enc.encode(JSON.stringify(extMeta)));
       });
     }
 
@@ -581,6 +635,9 @@ export class Sandbox {
           deadlineMs: childShellRef?.getDeadlineMs(),
           memoryBytes: secLimits?.memoryBytes,
         }),
+      networkBridge: bridge,
+      extensionRegistry: this.extensionRegistry ?? undefined,
+      toolAllowlist: this.security?.toolAllowlist,
     });
     childShellRef = childRunner;
 
@@ -598,7 +655,7 @@ export class Sandbox {
     // Create WorkerExecutor for the child if parent uses hard-kill
     const childWorkerExecutor = await Sandbox.createWorkerExecutor(
       childVfs, this.wasmDir, this.shellExecWasmPath, tools, this.adapter,
-      this.security, bridge, this.networkPolicy,
+      this.security, bridge, this.networkPolicy, this.extensionRegistry ?? undefined,
     );
 
     return new Sandbox({
@@ -606,6 +663,7 @@ export class Sandbox {
       adapter: this.adapter, wasmDir: this.wasmDir, shellExecWasmPath: this.shellExecWasmPath,
       mgr: childMgr, bridge, networkPolicy: this.networkPolicy,
       security: this.security, workerExecutor: childWorkerExecutor,
+      extensionRegistry: this.extensionRegistry ?? undefined,
     });
   }
 

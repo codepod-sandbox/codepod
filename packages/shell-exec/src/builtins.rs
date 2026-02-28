@@ -77,8 +77,6 @@ pub fn try_builtin(
         "date" => Some(builtin_date(host, args)),
         "exec" => builtin_exec(args),
         "readonly" => Some(builtin_readonly(state, args)),
-        // Network / package commands -- fall through to spawn
-        "curl" | "wget" | "pkg" | "pip" => None,
         _ => None,
     }
 }
@@ -1070,7 +1068,10 @@ fn builtin_type(state: &ShellState, host: &dyn HostInterface, args: &[String]) -
             output.push_str(&format!("{} is a shell builtin\n", arg));
         } else if state.functions.contains_key(arg) {
             output.push_str(&format!("{} is a function\n", arg));
-        } else if host.has_tool(arg) {
+        } else if crate::virtual_commands::is_virtual_command(arg)
+            || host.is_extension(arg)
+            || host.has_tool(arg)
+        {
             output.push_str(&format!("{} is /bin/{}\n", arg, arg));
         } else {
             output.push_str(&format!("{}: not found\n", arg));
@@ -1099,7 +1100,11 @@ fn builtin_command(host: &dyn HostInterface, args: &[String]) -> Option<BuiltinR
             return Some(BuiltinResult::Result(RunResult::error(1, String::new())));
         }
         let name = &args[1];
-        if is_builtin(name) || host.has_tool(name) {
+        if is_builtin(name)
+            || crate::virtual_commands::is_virtual_command(name)
+            || host.is_extension(name)
+            || host.has_tool(name)
+        {
             return Some(BuiltinResult::Result(RunResult::success(format!(
                 "{}\n",
                 name
@@ -1140,7 +1145,10 @@ fn builtin_which(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
     let mut code = 0;
 
     for arg in args {
-        if host.has_tool(arg) {
+        if crate::virtual_commands::is_virtual_command(arg)
+            || host.is_extension(arg)
+            || host.has_tool(arg)
+        {
             output.push_str(&format!("/bin/{}\n", arg));
         } else {
             code = 1;

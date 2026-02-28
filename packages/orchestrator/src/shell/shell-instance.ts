@@ -12,6 +12,8 @@
 import type { VfsLike } from '../vfs/vfs-like.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { PlatformAdapter } from '../platform/adapter.js';
+import type { NetworkBridgeLike } from '../network/bridge.js';
+import type { ExtensionRegistry } from '../extension/registry.js';
 import type { RunResult } from './shell-types.js';
 import type { HistoryEntry } from './history.js';
 import type { ShellLike } from './shell-like.js';
@@ -36,6 +38,12 @@ export interface ShellInstanceOptions {
     stdin: Uint8Array,
     cwd: string,
   ) => { exit_code: number; stdout: string; stderr: string };
+  /** Network bridge for synchronous HTTP fetch from WASM. */
+  networkBridge?: NetworkBridgeLike;
+  /** Extension registry for command extensions. */
+  extensionRegistry?: ExtensionRegistry;
+  /** Tool allowlist for security policy. */
+  toolAllowlist?: string[];
 }
 
 export class ShellInstance implements ShellLike {
@@ -103,6 +111,9 @@ export class ShellInstance implements ShellLike {
       mgr,
       memory: memoryProxy,
       syncSpawn: options?.syncSpawn,
+      networkBridge: options?.networkBridge,
+      extensionRegistry: options?.extensionRegistry,
+      toolAllowlist: options?.toolAllowlist,
       checkCancel: () => {
         if (!shellRef) return 0;
         if (shellRef.cancelledReason === 'TIMEOUT') return 1;
@@ -114,6 +125,14 @@ export class ShellInstance implements ShellLike {
         return 0;
       },
     });
+
+    // JSPI: Wrap async import so WASM suspends when it returns a Promise.
+    // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
+    if (options?.extensionRegistry && typeof WebAssembly.Suspending === 'function') {
+      shellImports.host_extension_invoke = new WebAssembly.Suspending(
+        shellImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+      );
+    }
 
     // WASI P1 stubs (minimal -- shell-exec doesn't use WASI for I/O)
     const wasiImports: Record<string, WebAssembly.ImportValue> = {
@@ -186,6 +205,16 @@ export class ShellInstance implements ShellLike {
 
     const instance = await adapter.instantiate(module, imports);
     memoryRef = instance.exports.memory as WebAssembly.Memory;
+
+    // JSPI: Wrap the __run_command export so it returns a Promise when
+    // the WASM stack is suspended (e.g. during async extension invocation).
+    if (options?.extensionRegistry && typeof WebAssembly.promising === 'function') {
+      const rawRunCommand = instance.exports.__run_command;
+      if (rawRunCommand) {
+        (instance.exports as Record<string, WebAssembly.ExportValue>).__run_command =
+          WebAssembly.promising(rawRunCommand as Function);
+      }
+    }
 
     // Call _start to initialize (runs main() which is a no-op for WASM).
     // wasm32-wasip1 binaries call proc_exit(0) when main returns.
@@ -274,12 +303,15 @@ export class ShellInstance implements ShellLike {
    * operations, etc.), and returns a JSON-encoded RunResult.
    */
   async run(command: string): Promise<RunResult> {
+    // When JSPI is active, __run_command is wrapped with WebAssembly.promising()
+    // and returns a Promise<number>. When JSPI is not active, it returns number.
+    // Either way, `await` handles both correctly.
     const runCommand = this.instance.exports.__run_command as (
       cmdPtr: number,
       cmdLen: number,
       outPtr: number,
       outCap: number,
-    ) => number;
+    ) => number | Promise<number>;
 
     if (!runCommand) {
       throw new Error('WASM module does not export __run_command');
@@ -323,12 +355,12 @@ export class ShellInstance implements ShellLike {
 
       let envOutCap = 256;
       let envOutPtr = alloc(envOutCap);
-      const envNeeded = runCommand(envCmdPtr, envBytes.length, envOutPtr, envOutCap);
+      const envNeeded = await runCommand(envCmdPtr, envBytes.length, envOutPtr, envOutCap);
       if (envNeeded > envOutCap) {
         dealloc(envOutPtr, envOutCap);
         envOutCap = envNeeded;
         envOutPtr = alloc(envOutCap);
-        runCommand(envCmdPtr, envBytes.length, envOutPtr, envOutCap);
+        await runCommand(envCmdPtr, envBytes.length, envOutPtr, envOutCap);
       }
       dealloc(envCmdPtr, envBytes.length);
       dealloc(envOutPtr, envOutCap);
@@ -351,14 +383,14 @@ export class ShellInstance implements ShellLike {
     let outCap = 4096;
     let outPtr = alloc(outCap);
 
-    let needed = runCommand(cmdPtr, cmdBytes.length, outPtr, outCap);
+    let needed = await runCommand(cmdPtr, cmdBytes.length, outPtr, outCap);
 
     // If buffer was too small, reallocate and retry
     if (needed > outCap) {
       dealloc(outPtr, outCap);
       outCap = needed;
       outPtr = alloc(outCap);
-      needed = runCommand(cmdPtr, cmdBytes.length, outPtr, outCap);
+      needed = await runCommand(cmdPtr, cmdBytes.length, outPtr, outCap);
     }
 
     // Read result JSON from output buffer

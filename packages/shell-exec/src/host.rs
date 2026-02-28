@@ -11,6 +11,15 @@ pub struct SpawnResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchResult {
+    pub ok: bool,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+    pub error: Option<String>,
+}
+
 /// JSON-encoded spawn request sent to the host via `host_spawn`.
 #[cfg(target_arch = "wasm32")]
 #[derive(Serialize)]
@@ -20,6 +29,27 @@ struct SpawnRequest<'a> {
     env: &'a [(&'a str, &'a str)],
     cwd: &'a str,
     stdin: &'a str,
+}
+
+/// JSON-encoded fetch request sent to the host via `host_fetch`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct FetchRequest<'a> {
+    url: &'a str,
+    method: &'a str,
+    headers: &'a [(&'a str, &'a str)],
+    body: Option<&'a str>,
+}
+
+/// JSON-encoded extension invoke request sent to the host via `host_extension_invoke`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize)]
+struct ExtensionInvokeRequest<'a> {
+    name: &'a str,
+    args: &'a [&'a str],
+    stdin: &'a str,
+    env: &'a [(&'a str, &'a str)],
+    cwd: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +136,33 @@ pub trait HostInterface {
     fn symlink(&self, target: &str, link_path: &str) -> Result<(), HostError>;
 
     fn readlink(&self, path: &str) -> Result<String, HostError>;
+
+    /// Perform an HTTP fetch via the host. All arg parsing and response
+    /// formatting happens in Rust; only the actual I/O crosses to the host.
+    fn fetch(
+        &self,
+        url: &str,
+        method: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> FetchResult;
+
+    /// Invoke a host extension command. The extension handler is an async JS
+    /// closure; JSPI handles the WASM suspend/resume transparently.
+    fn extension_invoke(
+        &self,
+        name: &str,
+        args: &[&str],
+        stdin: &str,
+        env: &[(&str, &str)],
+        cwd: &str,
+    ) -> Result<SpawnResult, HostError>;
+
+    /// Register a pkg-installed tool with the host process manager.
+    fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError>;
+
+    /// Check whether a command name is a registered host extension.
+    fn is_extension(&self, name: &str) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +244,29 @@ extern "C" {
     /// Read symbolic link target.
     pub fn host_readlink(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32)
         -> i32;
+
+    /// Perform an HTTP fetch. JSON request/response via output buffer.
+    pub fn host_fetch(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Invoke a host extension command. JSON request/response via output buffer.
+    /// Returns a Promise on the host side; JSPI suspends/resumes WASM transparently.
+    pub fn host_extension_invoke(
+        req_ptr: *const u8,
+        req_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
+
+    /// Register a pkg-installed tool with the host.
+    pub fn host_register_tool(
+        name_ptr: *const u8,
+        name_len: u32,
+        path_ptr: *const u8,
+        path_len: u32,
+    ) -> i32;
+
+    /// Check whether a command is a registered host extension. Returns 1 for true, 0 for false.
+    pub fn host_is_extension(name_ptr: *const u8, name_len: u32) -> i32;
 
     /// Read the next command from the host session loop.
     pub fn host_read_command(out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -420,6 +500,96 @@ impl HostInterface for WasmHost {
         call_with_outbuf(path, |out_ptr, out_cap| unsafe {
             host_readlink(path.as_ptr(), path.len() as u32, out_ptr, out_cap)
         })
+    }
+
+    fn fetch(
+        &self,
+        url: &str,
+        method: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> FetchResult {
+        let req = FetchRequest {
+            url,
+            method,
+            headers,
+            body,
+        };
+        let req_json = match serde_json::to_vec(&req) {
+            Ok(j) => j,
+            Err(e) => {
+                return FetchResult {
+                    ok: false,
+                    status: 0,
+                    headers: vec![],
+                    body: String::new(),
+                    error: Some(format!("fetch: failed to serialize request: {e}")),
+                }
+            }
+        };
+        let output = call_with_outbuf("fetch", |out_ptr, out_cap| unsafe {
+            host_fetch(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
+        });
+        match output {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| FetchResult {
+                ok: false,
+                status: 0,
+                headers: vec![],
+                body: String::new(),
+                error: Some(format!("fetch: failed to deserialize response: {e}")),
+            }),
+            Err(e) => FetchResult {
+                ok: false,
+                status: 0,
+                headers: vec![],
+                body: String::new(),
+                error: Some(format!("fetch: host error: {e}")),
+            },
+        }
+    }
+
+    fn extension_invoke(
+        &self,
+        name: &str,
+        args: &[&str],
+        stdin: &str,
+        env: &[(&str, &str)],
+        cwd: &str,
+    ) -> Result<SpawnResult, HostError> {
+        let req = ExtensionInvokeRequest {
+            name,
+            args,
+            stdin,
+            env,
+            cwd,
+        };
+        let req_json = serde_json::to_vec(&req)
+            .map_err(|e| HostError::Other(format!("extension_invoke: failed to serialize: {e}")))?;
+        let output = call_with_outbuf("extension_invoke", |out_ptr, out_cap| unsafe {
+            host_extension_invoke(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
+        })?;
+        serde_json::from_str(&output)
+            .map_err(|e| HostError::Other(format!("extension_invoke: failed to deserialize: {e}")))
+    }
+
+    fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError> {
+        let rc = unsafe {
+            host_register_tool(
+                name.as_ptr(),
+                name.len() as u32,
+                wasm_path.as_ptr(),
+                wasm_path.len() as u32,
+            )
+        };
+        if rc < 0 {
+            Err(rc_to_error(rc, name))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_extension(&self, name: &str) -> bool {
+        unsafe { host_is_extension(name.as_ptr(), name.len() as u32) != 0 }
     }
 }
 
