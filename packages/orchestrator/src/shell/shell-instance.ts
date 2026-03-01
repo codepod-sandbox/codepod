@@ -135,9 +135,9 @@ export class ShellInstance implements ShellLike {
     // ── Process kernel for pipe/spawn/waitpid/close_fd ──
     const kernel = new ProcessKernel();
     // Set the shell's fd targets in the kernel (pid 0)
-    kernel.setFdTarget(0, 0, createNullTarget());                              // stdin: no terminal input
-    kernel.setFdTarget(0, 1, createBufferTarget(options?.stdoutLimitBytes));    // stdout: captured
-    kernel.setFdTarget(0, 2, createBufferTarget(options?.stderrLimitBytes));    // stderr: captured
+    kernel.setFdTarget(0, 0, createNullTarget());    // stdin: no terminal input
+    kernel.setFdTarget(0, 1, createBufferTarget());   // stdout: captured (no limit on kernel fd)
+    kernel.setFdTarget(0, 2, createBufferTarget());   // stderr: captured (no limit on kernel fd)
 
     // Kernel imports provide codepod-namespace syscalls (extensions, network, process mgmt)
     const kernelImports = createKernelImports({
@@ -584,10 +584,10 @@ function spawnAsyncProcess(
   if (typeof WebAssembly.Suspending === 'function') {
     imports.wasi_snapshot_preview1.fd_read = new WebAssembly.Suspending(
       imports.wasi_snapshot_preview1.fd_read as (...args: number[]) => number,
-    );
+    ) as unknown as WebAssembly.ImportValue;
     imports.wasi_snapshot_preview1.fd_write = new WebAssembly.Suspending(
       imports.wasi_snapshot_preview1.fd_write as (...args: number[]) => number,
-    );
+    ) as unknown as WebAssembly.ImportValue;
   }
 
   // Add kernel imports if the module needs the `codepod` namespace.
@@ -609,19 +609,19 @@ function spawnAsyncProcess(
       kernel,
       spawnProcess: (req2, fdTable2) => spawnAsyncProcess(req2, fdTable2, mgr, kernel, adapter),
     });
-    imports.codepod = childKernelImports as Record<string, unknown>;
+    imports.codepod = childKernelImports as unknown as Record<string, WebAssembly.ImportValue>;
 
     // Alias host_spawn_async for WASM compatibility
-    imports.codepod.host_spawn_async = childKernelImports.host_spawn;
+    imports.codepod.host_spawn_async = childKernelImports.host_spawn as WebAssembly.ImportValue;
 
     // JSPI-wrap async syscalls in the child's codepod imports
     if (typeof WebAssembly.Suspending === 'function') {
       imports.codepod.host_waitpid = new WebAssembly.Suspending(
         childKernelImports.host_waitpid as (...args: number[]) => Promise<number>,
-      );
+      ) as unknown as WebAssembly.ImportValue;
       imports.codepod.host_yield = new WebAssembly.Suspending(
         childKernelImports.host_yield as () => Promise<void>,
-      );
+      ) as unknown as WebAssembly.ImportValue;
     }
 
     // Start the process asynchronously
