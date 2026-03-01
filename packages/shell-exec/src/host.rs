@@ -163,6 +163,32 @@ pub trait HostInterface {
 
     /// Check whether a command name is a registered host extension.
     fn is_extension(&self, name: &str) -> bool;
+
+    // ----- Process management (Task 5) -----
+
+    /// Create a pipe, returning `(read_fd, write_fd)`.
+    fn pipe(&self) -> Result<(i32, i32), HostError>;
+
+    /// Spawn a child process asynchronously (returns immediately with pid).
+    /// The caller is responsible for wiring up stdin/stdout/stderr via
+    /// file descriptors obtained from `pipe()`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_async(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin_fd: i32,
+        stdout_fd: i32,
+        stderr_fd: i32,
+    ) -> Result<i32, HostError>;
+
+    /// Wait for a child process to exit (blocking). Returns the exit code.
+    fn waitpid(&self, pid: i32) -> Result<i32, HostError>;
+
+    /// Close a host-side file descriptor.
+    fn close_fd(&self, fd: i32) -> Result<(), HostError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +299,27 @@ extern "C" {
 
     /// Write a JSON-encoded RunResult back to the host.
     pub fn host_write_result(data_ptr: *const u8, data_len: u32);
+
+    // ----- Process management syscalls (Task 5) -----
+
+    /// Create a pipe. Writes JSON `{"read_fd": N, "write_fd": M}` into the
+    /// output buffer. Returns bytes written, or negative error code.
+    fn host_pipe(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Spawn a child process asynchronously (does NOT wait for exit).
+    /// `req_ptr`/`req_len` — JSON-encoded spawn request with prog, args, env,
+    /// cwd, stdin_fd, stdout_fd, stderr_fd.
+    /// Returns the child PID (>= 0) or a negative error code.
+    fn host_spawn_async(req_ptr: *const u8, req_len: u32) -> i32;
+
+    /// Wait for a child process to exit (BLOCKING — JSPI suspends the WASM
+    /// stack while the host awaits the child).
+    /// Writes JSON `{"exit_code": N}` into the output buffer.
+    /// Returns bytes written, or negative error code.
+    fn host_waitpid(pid: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Close a host-side file descriptor. Returns 0 on success, negative on error.
+    fn host_close_fd(fd: i32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +638,69 @@ impl HostInterface for WasmHost {
     fn is_extension(&self, name: &str) -> bool {
         unsafe { host_is_extension(name.as_ptr(), name.len() as u32) != 0 }
     }
+
+    // ----- Process management (Task 5) -----
+
+    fn pipe(&self) -> Result<(i32, i32), HostError> {
+        let result_json = call_with_outbuf("pipe", |out_ptr, out_cap| unsafe {
+            host_pipe(out_ptr, out_cap)
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| HostError::IoError(format!("pipe: {e}")))?;
+        let read_fd = parsed["read_fd"].as_i64().unwrap_or(-1) as i32;
+        let write_fd = parsed["write_fd"].as_i64().unwrap_or(-1) as i32;
+        Ok((read_fd, write_fd))
+    }
+
+    fn spawn_async(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: &str,
+        stdin_fd: i32,
+        stdout_fd: i32,
+        stderr_fd: i32,
+    ) -> Result<i32, HostError> {
+        let req = serde_json::json!({
+            "prog": program,
+            "args": args,
+            "env": env,
+            "cwd": cwd,
+            "stdin_fd": stdin_fd,
+            "stdout_fd": stdout_fd,
+            "stderr_fd": stderr_fd,
+        });
+        let req_bytes = req.to_string();
+        let pid = unsafe { host_spawn_async(req_bytes.as_ptr(), req_bytes.len() as u32) };
+        if pid < 0 {
+            return Err(HostError::IoError(format!(
+                "spawn_async({}): host error code {}",
+                program, pid
+            )));
+        }
+        Ok(pid)
+    }
+
+    fn waitpid(&self, pid: i32) -> Result<i32, HostError> {
+        let result_json = call_with_outbuf("waitpid", |out_ptr, out_cap| unsafe {
+            host_waitpid(pid, out_ptr, out_cap)
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&result_json)
+            .map_err(|e| HostError::IoError(format!("waitpid: {e}")))?;
+        Ok(parsed["exit_code"].as_i64().unwrap_or(-1) as i32)
+    }
+
+    fn close_fd(&self, fd: i32) -> Result<(), HostError> {
+        let rc = unsafe { host_close_fd(fd) };
+        if rc < 0 {
+            return Err(HostError::IoError(format!(
+                "close_fd({}): host error code {}",
+                fd, rc
+            )));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,4 +721,52 @@ pub fn read_command() -> String {
 pub fn write_result(result: &crate::control::RunResult) {
     let json = serde_json::to_vec(result).unwrap();
     unsafe { host_write_result(json.as_ptr(), json.len() as u32) };
+}
+
+// ---------------------------------------------------------------------------
+// WASI P1 fd I/O wrappers (wasm32 only) — used by builtins for direct fd I/O
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "wasi_snapshot_preview1")]
+extern "C" {
+    fn fd_write(fd: i32, iovs: *const WasiIovec, iovs_len: u32, nwritten: *mut u32) -> u32;
+    fn fd_read(fd: i32, iovs: *const WasiIovec, iovs_len: u32, nread: *mut u32) -> u32;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[repr(C)]
+struct WasiIovec {
+    buf: *const u8,
+    buf_len: u32,
+}
+
+/// Write `data` to a host file descriptor via WASI `fd_write`.
+#[cfg(target_arch = "wasm32")]
+pub fn write_to_fd(fd: i32, data: &[u8]) -> Result<usize, HostError> {
+    let iov = WasiIovec {
+        buf: data.as_ptr(),
+        buf_len: data.len() as u32,
+    };
+    let mut nwritten: u32 = 0;
+    let errno = unsafe { fd_write(fd, &iov, 1, &mut nwritten) };
+    if errno != 0 {
+        return Err(HostError::IoError(format!("fd_write errno {}", errno)));
+    }
+    Ok(nwritten as usize)
+}
+
+/// Read from a host file descriptor via WASI `fd_read`.
+#[cfg(target_arch = "wasm32")]
+pub fn read_from_fd(fd: i32, buf: &mut [u8]) -> Result<usize, HostError> {
+    let iov = WasiIovec {
+        buf: buf.as_mut_ptr(),
+        buf_len: buf.len() as u32,
+    };
+    let mut nread: u32 = 0;
+    let errno = unsafe { fd_read(fd, &iov, 1, &mut nread) };
+    if errno != 0 {
+        return Err(HostError::IoError(format!("fd_read errno {}", errno)));
+    }
+    Ok(nread as usize)
 }

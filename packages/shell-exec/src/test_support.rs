@@ -337,5 +337,36 @@ pub mod mock {
         fn is_extension(&self, name: &str) -> bool {
             self.extensions.contains_key(name)
         }
+
+        // ----- Process management stubs (Task 5) -----
+
+        fn pipe(&self) -> Result<(i32, i32), HostError> {
+            Err(HostError::Other("pipe: not available in MockHost".into()))
+        }
+
+        fn spawn_async(
+            &self,
+            _program: &str,
+            _args: &[&str],
+            _env: &[(&str, &str)],
+            _cwd: &str,
+            _stdin_fd: i32,
+            _stdout_fd: i32,
+            _stderr_fd: i32,
+        ) -> Result<i32, HostError> {
+            Err(HostError::Other(
+                "spawn_async: not available in MockHost".into(),
+            ))
+        }
+
+        fn waitpid(&self, _pid: i32) -> Result<i32, HostError> {
+            Err(HostError::Other(
+                "waitpid: not available in MockHost".into(),
+            ))
+        }
+
+        fn close_fd(&self, _fd: i32) -> Result<(), HostError> {
+            Ok(())
+        }
     }
 }
