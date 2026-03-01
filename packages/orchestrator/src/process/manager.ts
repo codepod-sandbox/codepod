@@ -10,7 +10,7 @@ import type { PlatformAdapter } from '../platform/adapter.js';
 import type { VfsLike } from '../vfs/vfs-like.js';
 import { WasiHost } from '../wasi/wasi-host.js';
 import type { NetworkBridgeLike } from '../network/bridge.js';
-import { createPythonImports } from '../host-imports/python-imports.js';
+import { createKernelImports } from '../host-imports/kernel-imports.js';
 
 import type { SpawnOptions, SpawnResult } from './process.js';
 
@@ -133,7 +133,7 @@ export class ProcessManager {
         },
       });
 
-      imports.codepod = createPythonImports({
+      imports.codepod = createKernelImports({
         memory: memoryProxy,
         networkBridge: this.networkBridge ?? undefined,
         extensionHandler: this.extensionHandler ?? undefined,
@@ -299,7 +299,7 @@ export class ProcessManager {
         },
       });
 
-      imports.codepod = createPythonImports({
+      imports.codepod = createKernelImports({
         memory: memoryProxy,
         networkBridge: this.networkBridge ?? undefined,
         extensionHandler: this.extensionHandler ?? undefined,

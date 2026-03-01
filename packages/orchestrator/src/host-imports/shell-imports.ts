@@ -12,7 +12,6 @@
 import type { VfsLike } from '../vfs/vfs-like.js';
 import type { ProcessManager } from '../process/manager.js';
 import type { NetworkBridgeLike } from '../network/bridge.js';
-import type { ExtensionRegistry } from '../extension/registry.js';
 import { readString, readBytes, writeJson, writeString, writeBytes } from './common.js';
 
 // Error codes matching Rust's rc_to_error convention
@@ -143,10 +142,6 @@ export interface ShellImportsOptions {
   syncSpawn?: (cmd: string, args: string[], env: Record<string, string>, stdin: Uint8Array, cwd: string) => { exit_code: number; stdout: string; stderr: string };
   /** Network bridge for synchronous HTTP fetch from WASM. */
   networkBridge?: NetworkBridgeLike;
-  /** Extension registry for command extensions. */
-  extensionRegistry?: ExtensionRegistry;
-  /** Tool allowlist for security policy. If set, only listed tools/extensions are allowed. */
-  toolAllowlist?: string[];
 }
 
 export function createShellImports(opts: ShellImportsOptions): Record<string, WebAssembly.ImportValue> {
@@ -367,7 +362,11 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
       }
     },
 
-    // ── Network / Extensions ──
+    // ── Network / Tool registration ──
+    // Note: host_is_extension and host_extension_invoke have moved to
+    // kernel-imports.ts (createKernelImports). host_network_fetch is also
+    // provided there. host_fetch below is the shell-specific fetch variant
+    // with a different request/response shape (array-of-tuples headers).
 
     // host_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32
     // Synchronous HTTP fetch via NetworkBridge (SAB+Atomics).
@@ -412,64 +411,6 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
         const msg = e instanceof Error ? e.message : String(e);
         return writeJson(memory, outPtr, outCap, {
           ok: false, status: 0, headers: [], body: '', error: msg,
-        });
-      }
-    },
-
-    // host_is_extension(name_ptr, name_len) -> i32
-    // Synchronous check — Map.has() lookup + tool allowlist check.
-    host_is_extension(namePtr: number, nameLen: number): number {
-      const name = readString(memory, namePtr, nameLen);
-      if (!opts.extensionRegistry?.has(name)) return 0;
-      // If tool allowlist is set, only allow extensions in the list
-      if (opts.toolAllowlist && !opts.toolAllowlist.includes(name)) return 0;
-      return 1;
-    },
-
-    // host_extension_invoke(req_ptr, req_len, out_ptr, out_cap) -> i32
-    // Returns a Promise — JSPI suspends WASM, awaits the extension handler,
-    // then resumes WASM with the result.
-    async host_extension_invoke(
-      reqPtr: number, reqLen: number,
-      outPtr: number, outCap: number,
-    ): Promise<number> {
-      const reqJson = readString(memory, reqPtr, reqLen);
-
-      if (!opts.extensionRegistry) {
-        return writeJson(memory, outPtr, outCap, {
-          exit_code: 1, stdout: '', stderr: 'extensions not available\n',
-        });
-      }
-
-      try {
-        const req = JSON.parse(reqJson) as {
-          name?: string;
-          args?: string[];
-          stdin?: string;
-          env?: [string, string][];
-          cwd?: string;
-        };
-
-        const name = req.name ?? '';
-        const args = req.args ?? [];
-        const stdin = req.stdin ?? '';
-        const envObj: Record<string, string> = {};
-        if (req.env) for (const [k, v] of req.env) envObj[k] = v;
-        const cwd = req.cwd ?? '/';
-
-        const result = await opts.extensionRegistry.invoke(name, {
-          args, stdin, env: envObj, cwd,
-        });
-
-        return writeJson(memory, outPtr, outCap, {
-          exit_code: result.exitCode,
-          stdout: result.stdout ?? '',
-          stderr: result.stderr ?? '',
-        });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return writeJson(memory, outPtr, outCap, {
-          exit_code: 1, stdout: '', stderr: `${msg}\n`,
         });
       }
     },

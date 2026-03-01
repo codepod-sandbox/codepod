@@ -18,6 +18,7 @@ import type { RunResult } from './shell-types.js';
 import type { HistoryEntry } from './history.js';
 import type { ShellLike } from './shell-like.js';
 import { createShellImports } from '../host-imports/shell-imports.js';
+import { createKernelImports } from '../host-imports/kernel-imports.js';
 
 /** Default environment variables for a new ShellInstance. */
 const DEFAULT_ENV: [string, string][] = [
@@ -116,8 +117,6 @@ export class ShellInstance implements ShellLike {
       memory: memoryProxy,
       syncSpawn: options?.syncSpawn,
       networkBridge: options?.networkBridge,
-      extensionRegistry: options?.extensionRegistry,
-      toolAllowlist: options?.toolAllowlist,
       checkCancel: () => {
         if (!shellRef) return 0;
         if (shellRef.cancelledReason === 'TIMEOUT') return 1;
@@ -130,11 +129,25 @@ export class ShellInstance implements ShellLike {
       },
     });
 
+    // Kernel imports provide codepod-namespace syscalls (extensions, network, etc.)
+    const kernelImports = createKernelImports({
+      memory: memoryProxy,
+      networkBridge: options?.networkBridge,
+      extensionRegistry: options?.extensionRegistry,
+      toolAllowlist: options?.toolAllowlist,
+    });
+
+    // Merge: shell-specific imports take precedence, then kernel-level imports
+    const codepodImports: Record<string, WebAssembly.ImportValue> = {
+      ...kernelImports,
+      ...shellImports,
+    };
+
     // JSPI: Wrap async import so WASM suspends when it returns a Promise.
     // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
     if (options?.extensionRegistry && typeof WebAssembly.Suspending === 'function') {
-      shellImports.host_extension_invoke = new WebAssembly.Suspending(
-        shellImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+      codepodImports.host_extension_invoke = new WebAssembly.Suspending(
+        kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
     }
 
@@ -204,7 +217,7 @@ export class ShellInstance implements ShellLike {
 
     const imports: WebAssembly.Imports = {
       wasi_snapshot_preview1: wasiImports,
-      codepod: shellImports,
+      codepod: codepodImports,
     };
 
     const instance = await adapter.instantiate(module, imports);
