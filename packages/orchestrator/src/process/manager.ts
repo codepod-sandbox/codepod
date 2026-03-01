@@ -65,6 +65,30 @@ export class ProcessManager {
     return path;
   }
 
+  /** Return the VFS instance for external use (e.g. spawnAsyncProcess). */
+  getVfs(): VfsLike {
+    return this.vfs;
+  }
+
+  /** Return the platform adapter for external use (e.g. spawnAsyncProcess). */
+  getAdapter(): PlatformAdapter {
+    return this.adapter;
+  }
+
+  /**
+   * Resolve a tool name to a pre-loaded WebAssembly.Module, or null if not
+   * registered or not yet loaded.
+   */
+  getModule(prog: string): WebAssembly.Module | null {
+    let wasmPath: string;
+    try {
+      wasmPath = this.resolveTool(prog);
+    } catch {
+      return null;
+    }
+    return this.moduleCache.get(wasmPath) ?? null;
+  }
+
   /**
    * Spawn a Wasm process: resolve the command, load (or reuse) the
    * compiled module, wire up a fresh WasiHost, run _start, and

@@ -19,6 +19,9 @@ import type { HistoryEntry } from './history.js';
 import type { ShellLike } from './shell-like.js';
 import { createShellImports } from '../host-imports/shell-imports.js';
 import { createKernelImports } from '../host-imports/kernel-imports.js';
+import { ProcessKernel, type SpawnRequest } from '../process/kernel.js';
+import { WasiHost } from '../wasi/wasi-host.js';
+import { createBufferTarget, createNullTarget, type FdTarget } from '../wasi/fd-target.js';
 
 /** Default environment variables for a new ShellInstance. */
 const DEFAULT_ENV: [string, string][] = [
@@ -129,12 +132,24 @@ export class ShellInstance implements ShellLike {
       },
     });
 
-    // Kernel imports provide codepod-namespace syscalls (extensions, network, etc.)
+    // ── Process kernel for pipe/spawn/waitpid/close_fd ──
+    const kernel = new ProcessKernel();
+    // Set the shell's fd targets in the kernel (pid 0)
+    kernel.setFdTarget(0, 0, createNullTarget());                              // stdin: no terminal input
+    kernel.setFdTarget(0, 1, createBufferTarget(options?.stdoutLimitBytes));    // stdout: captured
+    kernel.setFdTarget(0, 2, createBufferTarget(options?.stderrLimitBytes));    // stderr: captured
+
+    // Kernel imports provide codepod-namespace syscalls (extensions, network, process mgmt)
     const kernelImports = createKernelImports({
       memory: memoryProxy,
+      callerPid: 0,
+      kernel,
       networkBridge: options?.networkBridge,
       extensionRegistry: options?.extensionRegistry,
       toolAllowlist: options?.toolAllowlist,
+      spawnProcess: (req: SpawnRequest, fdTable: Map<number, FdTarget>) => {
+        return spawnAsyncProcess(req, fdTable, mgr, kernel, adapter);
+      },
     });
 
     // Merge: shell-specific imports take precedence, then kernel-level imports
@@ -143,11 +158,26 @@ export class ShellInstance implements ShellLike {
       ...shellImports,
     };
 
-    // JSPI: Wrap async import so WASM suspends when it returns a Promise.
+    // The WASM binary imports `host_spawn_async` but kernel-imports provides `host_spawn`.
+    // Alias it so the import linker finds the right name.
+    codepodImports.host_spawn_async = kernelImports.host_spawn as WebAssembly.ImportValue;
+
+    // JSPI: Wrap async imports so WASM suspends when they return a Promise.
     // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
-    if (options?.extensionRegistry && typeof WebAssembly.Suspending === 'function') {
-      codepodImports.host_extension_invoke = new WebAssembly.Suspending(
-        kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+    if (typeof WebAssembly.Suspending === 'function') {
+      // Extension invoke (async, returns Promise)
+      if (options?.extensionRegistry) {
+        codepodImports.host_extension_invoke = new WebAssembly.Suspending(
+          kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+        ) as unknown as WebAssembly.ImportValue;
+      }
+      // Process management: host_waitpid blocks until child exits
+      codepodImports.host_waitpid = new WebAssembly.Suspending(
+        kernelImports.host_waitpid as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
+      // host_yield: cooperative scheduling primitive
+      codepodImports.host_yield = new WebAssembly.Suspending(
+        kernelImports.host_yield as () => Promise<void>,
       ) as unknown as WebAssembly.ImportValue;
     }
 
@@ -215,6 +245,19 @@ export class ShellInstance implements ShellLike {
       path_readlink: () => 44,
     };
 
+    // JSPI: Wrap WASI fd_read/fd_write for pipe suspension.
+    // When a WASM process reads from an empty pipe or writes to a full pipe,
+    // the host returns a Promise that resolves when data is available.
+    // This requires the WASI functions to be JSPI-Suspending.
+    if (typeof WebAssembly.Suspending === 'function') {
+      wasiImports.fd_read = new WebAssembly.Suspending(
+        wasiImports.fd_read as (...args: number[]) => number,
+      ) as unknown as WebAssembly.ImportValue;
+      wasiImports.fd_write = new WebAssembly.Suspending(
+        wasiImports.fd_write as (...args: number[]) => number,
+      ) as unknown as WebAssembly.ImportValue;
+    }
+
     const imports: WebAssembly.Imports = {
       wasi_snapshot_preview1: wasiImports,
       codepod: codepodImports,
@@ -224,11 +267,12 @@ export class ShellInstance implements ShellLike {
     memoryRef = instance.exports.memory as WebAssembly.Memory;
 
     // JSPI: Wrap the __run_command export so it returns a Promise when
-    // the WASM stack is suspended (e.g. during async extension invocation).
+    // the WASM stack is suspended (e.g. during async extension invocation,
+    // host_waitpid, host_yield, or pipe I/O).
     // Stored in a separate field because V8 makes WASM exports read-only.
     const rawRunCommand = instance.exports.__run_command as Function | undefined;
     let wrappedRunCommand: Function | undefined = rawRunCommand;
-    if (rawRunCommand && options?.extensionRegistry && typeof (WebAssembly as any).promising === 'function') {
+    if (rawRunCommand && typeof (WebAssembly as any).promising === 'function') {
       wrappedRunCommand = (WebAssembly as any).promising(rawRunCommand);
     }
 
@@ -498,4 +542,120 @@ export class ShellInstance implements ShellLike {
   destroy(): void {
     // WASM instance will be garbage collected
   }
+}
+
+// ── Async process spawning ──
+
+/**
+ * Spawn a child WASM process asynchronously.
+ *
+ * Called by the kernel when the shell's Rust code calls `host_spawn_async`.
+ * Allocates a PID, loads the module, creates a WasiHost with the provided
+ * fd table (which may include pipe endpoints), JSPI-wraps fd_read/fd_write
+ * for pipe suspension, instantiates the module, and registers the running
+ * process with the kernel.
+ *
+ * Returns the child PID (>= 1) or -1 on error.
+ */
+function spawnAsyncProcess(
+  req: SpawnRequest,
+  fdTable: Map<number, FdTarget>,
+  mgr: ProcessManager,
+  kernel: ProcessKernel,
+  adapter: PlatformAdapter,
+): number {
+  const pid = kernel.allocPid();
+  kernel.initProcess(pid);
+
+  const module = mgr.getModule(req.prog);
+  if (!module) return -1;
+
+  const host = new WasiHost({
+    vfs: mgr.getVfs(),
+    args: [req.prog, ...req.args],
+    env: Object.fromEntries(req.env),
+    preopens: { '/': '/' },
+    ioFds: fdTable,
+  });
+
+  const imports = host.getImports() as WebAssembly.Imports & Record<string, Record<string, unknown>>;
+
+  // JSPI-wrap fd_read/fd_write for pipe suspension in the child process.
+  if (typeof WebAssembly.Suspending === 'function') {
+    imports.wasi_snapshot_preview1.fd_read = new WebAssembly.Suspending(
+      imports.wasi_snapshot_preview1.fd_read as (...args: number[]) => number,
+    );
+    imports.wasi_snapshot_preview1.fd_write = new WebAssembly.Suspending(
+      imports.wasi_snapshot_preview1.fd_write as (...args: number[]) => number,
+    );
+  }
+
+  // Add kernel imports if the module needs the `codepod` namespace.
+  const moduleImportDescs = WebAssembly.Module.imports(module);
+  if (moduleImportDescs.some(imp => imp.module === 'codepod')) {
+    // Build a memory proxy for the child (memory comes from instance exports)
+    let childMemRef: WebAssembly.Memory | null = null;
+    const childMemoryProxy = new Proxy({} as WebAssembly.Memory, {
+      get(_target, prop) {
+        if (!childMemRef) throw new Error('child memory not initialized');
+        const val = (childMemRef as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof val === 'function' ? (val as Function).bind(childMemRef) : val;
+      },
+    });
+
+    const childKernelImports = createKernelImports({
+      memory: childMemoryProxy,
+      callerPid: pid,
+      kernel,
+      spawnProcess: (req2, fdTable2) => spawnAsyncProcess(req2, fdTable2, mgr, kernel, adapter),
+    });
+    imports.codepod = childKernelImports as Record<string, unknown>;
+
+    // Alias host_spawn_async for WASM compatibility
+    imports.codepod.host_spawn_async = childKernelImports.host_spawn;
+
+    // JSPI-wrap async syscalls in the child's codepod imports
+    if (typeof WebAssembly.Suspending === 'function') {
+      imports.codepod.host_waitpid = new WebAssembly.Suspending(
+        childKernelImports.host_waitpid as (...args: number[]) => Promise<number>,
+      );
+      imports.codepod.host_yield = new WebAssembly.Suspending(
+        childKernelImports.host_yield as () => Promise<void>,
+      );
+    }
+
+    // Start the process asynchronously
+    adapter.instantiate(module, imports).then((instance) => {
+      childMemRef = instance.exports.memory as WebAssembly.Memory;
+      host.setMemory(childMemRef);
+
+      let startFn = instance.exports._start as Function;
+      if (typeof (WebAssembly as any).promising === 'function') {
+        startFn = (WebAssembly as any).promising(startFn);
+      }
+
+      const promise = Promise.resolve().then(() => startFn()).catch(() => {});
+      kernel.registerProcess(pid, promise, host);
+    }).catch(() => {
+      // If instantiation fails, register as immediately exited
+      kernel.registerProcess(pid, Promise.resolve(), host);
+    });
+  } else {
+    // Module doesn't need codepod imports — simpler path
+    adapter.instantiate(module, imports).then((instance) => {
+      host.setMemory(instance.exports.memory as WebAssembly.Memory);
+
+      let startFn = instance.exports._start as Function;
+      if (typeof (WebAssembly as any).promising === 'function') {
+        startFn = (WebAssembly as any).promising(startFn);
+      }
+
+      const promise = Promise.resolve().then(() => startFn()).catch(() => {});
+      kernel.registerProcess(pid, promise, host);
+    }).catch(() => {
+      kernel.registerProcess(pid, Promise.resolve(), host);
+    });
+  }
+
+  return pid;
 }
