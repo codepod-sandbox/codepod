@@ -72,4 +72,37 @@ describe('AsyncPipe', () => {
     read.close();
     write.close();
   });
+
+  it('sync write returns short count when pipe nearly full', () => {
+    const [read, write] = createAsyncPipe(64);
+    write.write(new Uint8Array(60).fill(0x41)); // 60 of 64 used
+    const n = write.write(new Uint8Array(10).fill(0x42)); // only 4 bytes fit
+    expect(n).toBe(4);
+    read.close();
+    write.close();
+  });
+
+  it('writeAsync EPIPE when read end closes while writer blocked', async () => {
+    const [read, write] = createAsyncPipe(64);
+    write.write(new Uint8Array(64).fill(0x41)); // fill pipe
+    const writePromise = write.writeAsync(new Uint8Array(1).fill(0x42)); // blocks
+    read.close(); // should wake writer with EPIPE
+    const n = await writePromise;
+    expect(n).toBe(-1); // EPIPE
+    write.close();
+  });
+
+  it('writeAsync returns total bytes including partial fill', async () => {
+    const [read, write] = createAsyncPipe(64);
+    write.write(new Uint8Array(32).fill(0x41)); // 32 used
+    // writeAsync with 48 bytes: 32 fit immediately, 16 block
+    const writePromise = write.writeAsync(new Uint8Array(48).fill(0x42));
+    // Drain to unblock
+    const buf = new Uint8Array(64);
+    await read.read(buf);
+    const totalWritten = await writePromise;
+    expect(totalWritten).toBe(48); // 32 immediate + 16 remainder
+    read.close();
+    write.close();
+  });
 });

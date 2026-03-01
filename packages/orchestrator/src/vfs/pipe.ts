@@ -108,9 +108,9 @@ export interface AsyncPipeReadEnd {
 }
 
 export interface AsyncPipeWriteEnd {
-  /** Write data. Returns bytes written, or -1 on EPIPE (read end closed). */
+  /** Write data. Returns bytes written (0 if pipe full), or -1 on EPIPE (read end closed). */
   write(data: Uint8Array): number;
-  /** Write data, waiting for space if pipe is full. Returns -1 on EPIPE. */
+  /** Write data, waiting for space if pipe is full. Returns total bytes written, or -1 on EPIPE. */
   writeAsync(data: Uint8Array): Promise<number>;
   close(): void;
   readonly closed: boolean;
@@ -201,6 +201,9 @@ export function createAsyncPipe(
     },
 
     async read(buf: Uint8Array): Promise<number> {
+      if (shared.pendingReader) {
+        throw new Error('concurrent read on async pipe');
+      }
       // Data available — drain immediately.
       if (shared.totalBytes > 0) {
         const n = drainChunks(buf);
@@ -256,17 +259,22 @@ export function createAsyncPipe(
     async writeAsync(data: Uint8Array): Promise<number> {
       if (shared.readClosed) return -1;
       if (shared.writeClosed) return -1;
+      if (shared.pendingWriter) {
+        throw new Error('concurrent writeAsync on async pipe');
+      }
       const spaceAvailable = shared.capacity - shared.totalBytes;
       if (spaceAvailable >= data.length) {
         return this.write(data);
       }
       // Partially fill what we can, then block for the remainder.
+      let written = 0;
       if (spaceAvailable > 0) {
         this.write(data.subarray(0, spaceAvailable));
+        written = spaceAvailable;
         data = data.subarray(spaceAvailable);
       }
       return new Promise<number>((resolve) => {
-        shared.pendingWriter = resolve;
+        shared.pendingWriter = (n: number) => resolve(n === -1 ? -1 : written + n);
         shared.pendingWriterData = data;
       });
     },
