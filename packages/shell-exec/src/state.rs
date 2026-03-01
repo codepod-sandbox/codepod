@@ -40,6 +40,11 @@ pub struct ShellState {
     pub bash_rematch: Vec<String>,
     /// Counter for generating unique process substitution temp file paths.
     pub proc_sub_counter: u32,
+    /// Current stdout fd for the executing context (default: 1).
+    /// Pipeline stages override this to write to pipe fds.
+    pub stdout_fd: i32,
+    /// Current stdin fd for the executing context (default: 0).
+    pub stdin_fd: i32,
 }
 
 impl ShellState {
@@ -73,6 +78,8 @@ impl ShellState {
             dir_stack: Vec::new(),
             bash_rematch: Vec::new(),
             proc_sub_counter: 0,
+            stdout_fd: 1,
+            stdin_fd: 0,
         }
     }
 

@@ -46,7 +46,7 @@ pub fn try_builtin(
     run: Option<RunFn>,
 ) -> Option<BuiltinResult> {
     match cmd_name {
-        "echo" => Some(builtin_echo(args)),
+        "echo" => Some(builtin_echo(state, args)),
         "printf" => builtin_printf(state, args),
         "true" | ":" => Some(BuiltinResult::Result(RunResult::empty())),
         "false" => Some(BuiltinResult::Result(RunResult::error(1, String::new()))),
@@ -168,7 +168,7 @@ pub fn normalize_path(path: &str) -> String {
 
 // -- echo -----------------------------------------------------------------
 
-fn builtin_echo(args: &[String]) -> BuiltinResult {
+fn builtin_echo(state: &ShellState, args: &[String]) -> BuiltinResult {
     let mut newline = true;
     let mut interpret_escapes = false;
     let mut arg_start = 0;
@@ -202,6 +202,15 @@ fn builtin_echo(args: &[String]) -> BuiltinResult {
     if !output.1 && newline {
         text.push('\n');
     }
+
+    // Write to the current stdout fd (pipe or fd 1) via WASI fd_write.
+    // On non-wasm32 targets (tests), skip — RunResult.stdout still carries the data.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = crate::host::write_to_fd(state.stdout_fd, text.as_bytes());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = state; // suppress unused warning in non-wasm builds
 
     BuiltinResult::Result(RunResult::success(text))
 }
@@ -293,14 +302,15 @@ fn builtin_printf(state: &mut ShellState, args: &[String]) -> Option<BuiltinResu
         arg_idx = 2;
     }
 
-    // Without -v, fall through to spawn
-    var_name.as_ref()?;
-
     if arg_idx >= args.len() {
-        return Some(BuiltinResult::Result(RunResult::error(
-            1,
-            "printf: usage: printf [-v var] format [arguments]\n".into(),
-        )));
+        if var_name.is_some() {
+            return Some(BuiltinResult::Result(RunResult::error(
+                1,
+                "printf: usage: printf [-v var] format [arguments]\n".into(),
+            )));
+        }
+        // No -v and no format: fall through to spawn (shouldn't normally happen)
+        return None;
     }
 
     let format = &args[arg_idx];
@@ -310,10 +320,17 @@ fn builtin_printf(state: &mut ShellState, args: &[String]) -> Option<BuiltinResu
     let output = format_printf(format, fmt_args);
 
     if let Some(name) = var_name {
+        // -v mode: store into variable, no stdout output
         state.env.insert(name, output);
+        Some(BuiltinResult::Result(RunResult::empty()))
+    } else {
+        // Normal mode: write to stdout fd and return in RunResult
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = crate::host::write_to_fd(state.stdout_fd, output.as_bytes());
+        }
+        Some(BuiltinResult::Result(RunResult::success(output)))
     }
-
-    Some(BuiltinResult::Result(RunResult::empty()))
 }
 
 fn format_printf(format: &str, args: &[String]) -> String {
@@ -2870,12 +2887,15 @@ mod tests {
     }
 
     #[test]
-    fn printf_without_v_falls_through() {
+    fn printf_without_v_writes_stdout() {
         let mut state = ShellState::new_default();
         let host = MockHost::new();
         let a = make_args(&["hello %s", "world"]);
         let result = try_builtin(&mut state, &host, "printf", &a, "", None);
-        assert!(result.is_none());
+        assert!(result.is_some());
+        let r = expect_result(result.unwrap());
+        assert_eq!(r.stdout, "hello world");
+        assert_eq!(r.exit_code, 0);
     }
 
     // -- date tests -------------------------------------------------------
