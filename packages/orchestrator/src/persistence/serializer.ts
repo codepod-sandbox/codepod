@@ -49,6 +49,23 @@ const HEADER_SIZE_V2 = 12;
 /** Paths whose subtrees are virtual providers and must not be serialized. */
 const EXCLUDED_PREFIXES = ['/dev', '/proc'];
 
+/** Paths that may be written during import. Entries outside these are silently skipped. */
+const SAFE_IMPORT_PREFIXES = ['/home', '/tmp', '/usr/lib/python', '/usr/share/pkg'];
+
+/** Normalize a path (resolve . and ..) and check it falls under a safe prefix. */
+function isSafeImportPath(rawPath: string): boolean {
+  const segments: string[] = [];
+  for (const part of rawPath.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') { segments.pop(); }
+    else { segments.push(part); }
+  }
+  const normalized = '/' + segments.join('/');
+  return SAFE_IMPORT_PREFIXES.some(
+    prefix => normalized === prefix || normalized.startsWith(prefix + '/')
+  );
+}
+
 // ---- CRC32 implementation ----
 
 /** Pre-computed CRC32 lookup table (IEEE polynomial). */
@@ -162,17 +179,26 @@ export function importState(vfs: VfsLike, blob: Uint8Array): { env?: Map<string,
   const json = new TextDecoder().decode(jsonBytes);
   const state: SerializedState = JSON.parse(json);
 
-  // Restore filesystem: directories first, then files
+  // Filter out entries targeting system paths
+  const safeFiles = state.files.filter(entry => isSafeImportPath(entry.path));
+
+  // Restore filesystem: directories first, then files, then permissions
   vfs.withWriteAccess(() => {
-    for (const entry of state.files) {
+    for (const entry of safeFiles) {
       if (entry.type === 'dir') {
         vfs.mkdirp(entry.path);
       }
     }
-    for (const entry of state.files) {
+    for (const entry of safeFiles) {
       if (entry.type === 'file') {
         const content = fromBase64(entry.data);
         vfs.writeFile(entry.path, content);
+      }
+    }
+    // Apply permissions after all entries are created
+    for (const entry of safeFiles) {
+      if (entry.permissions !== undefined) {
+        vfs.chmod(entry.path, entry.permissions);
       }
     }
   });
@@ -206,12 +232,14 @@ function walkTree(
     }
 
     if (entry.type === 'dir') {
-      out.push({ path: childPath, data: '', type: 'dir' });
+      const st = vfs.stat(childPath);
+      out.push({ path: childPath, data: '', type: 'dir', permissions: st.permissions });
       walkTree(vfs, childPath, out, excludePrefixes);
     } else if (entry.type === 'file') {
       const content = vfs.readFile(childPath);
+      const st = vfs.stat(childPath);
       const b64 = toBase64(content);
-      out.push({ path: childPath, data: b64, type: 'file' });
+      out.push({ path: childPath, data: b64, type: 'file', permissions: st.permissions });
     }
     // Skip symlinks — not part of the persistence spec
   }

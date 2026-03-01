@@ -1,7 +1,8 @@
 /**
  * Tests for VFS state persistence: serializer, backends, manager, and Sandbox integration.
  */
-import { describe, it, expect, afterEach, beforeEach } from 'bun:test';
+import { describe, it, afterEach, beforeEach } from '@std/testing/bdd';
+import { expect } from '@std/expect';
 import { resolve } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -25,7 +26,7 @@ const dec = (b: Uint8Array) => new TextDecoder().decode(b);
 describe('Persistence serializer', () => {
   describe('exportState / importState round-trip', () => {
     it('round-trips VFS files and directories', () => {
-      const src = new VFS({ writablePaths: undefined });
+      const src = new VFS();
       src.withWriteAccess(() => {
         src.mkdirp('/home/user/project');
         src.writeFile('/home/user/project/main.ts', enc('console.log("hello")'));
@@ -34,7 +35,7 @@ describe('Persistence serializer', () => {
 
       const blob = exportState(src);
 
-      const dst = new VFS({ writablePaths: undefined });
+      const dst = new VFS();
       importState(dst, blob);
 
       // Verify files were restored
@@ -48,12 +49,12 @@ describe('Persistence serializer', () => {
     });
 
     it('round-trips env vars', () => {
-      const src = new VFS({ writablePaths: undefined });
+      const src = new VFS();
       const env = new Map([['PATH', '/bin:/usr/bin'], ['HOME', '/home/user'], ['LANG', 'en_US.UTF-8']]);
 
       const blob = exportState(src, env);
 
-      const dst = new VFS({ writablePaths: undefined });
+      const dst = new VFS();
       const result = importState(dst, blob);
 
       expect(result.env).toBeDefined();
@@ -63,9 +64,9 @@ describe('Persistence serializer', () => {
     });
 
     it('returns empty object when no env was stored', () => {
-      const src = new VFS({ writablePaths: undefined });
+      const src = new VFS();
       const blob = exportState(src);
-      const dst = new VFS({ writablePaths: undefined });
+      const dst = new VFS();
       const result = importState(dst, blob);
       expect(result.env).toBeUndefined();
     });
@@ -73,13 +74,13 @@ describe('Persistence serializer', () => {
 
   describe('validation', () => {
     it('rejects blob that is too short', () => {
-      expect(() => importState(new VFS({ writablePaths: undefined }), new Uint8Array(4))).toThrow(/too short/);
+      expect(() => importState(new VFS(), new Uint8Array(4))).toThrow(/too short/);
     });
 
     it('rejects blob with bad magic bytes', () => {
       const bad = new Uint8Array(16);
       bad[0] = 0x00; // wrong magic
-      expect(() => importState(new VFS({ writablePaths: undefined }), bad)).toThrow(/bad magic/);
+      expect(() => importState(new VFS(), bad)).toThrow(/bad magic/);
     });
 
     it('rejects blob with unsupported version', () => {
@@ -93,13 +94,13 @@ describe('Persistence serializer', () => {
       const full = new Uint8Array(8 + json.byteLength);
       full.set(buf.subarray(0, 8), 0);
       full.set(json, 8);
-      expect(() => importState(new VFS({ writablePaths: undefined }), full)).toThrow(/Unsupported state version/);
+      expect(() => importState(new VFS(), full)).toThrow(/Unsupported state version/);
     });
   });
 
   describe('exclusions', () => {
     it('does not include /proc or /dev contents', () => {
-      const vfs = new VFS({ writablePaths: undefined });
+      const vfs = new VFS();
       // VFS constructor registers /dev and /proc providers.
       // Write a normal file so the blob isn't empty.
       vfs.withWriteAccess(() => {
@@ -120,12 +121,107 @@ describe('Persistence serializer', () => {
     });
   });
 
+  describe('safe import path filtering', () => {
+    /** Helper: build a v2 blob from a SerializedState object. */
+    function buildBlob(state: { version: number; files: Array<{ path: string; data: string; type: string; permissions?: number }> }): Uint8Array {
+      const json = JSON.stringify(state);
+      const jsonBytes = new TextEncoder().encode(json);
+      // Compute CRC32
+      const TABLE = new Uint32Array(256);
+      for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        TABLE[i] = c;
+      }
+      let crc = 0xFFFFFFFF;
+      for (let i = 0; i < jsonBytes.byteLength; i++) {
+        crc = TABLE[(crc ^ jsonBytes[i]) & 0xFF] ^ (crc >>> 8);
+      }
+      crc = (crc ^ 0xFFFFFFFF) >>> 0;
+
+      const blob = new Uint8Array(12 + jsonBytes.byteLength);
+      blob.set([0x57, 0x53, 0x4E, 0x44], 0); // magic
+      const view = new DataView(blob.buffer);
+      view.setUint32(4, 2, true); // version 2
+      view.setUint32(8, crc, true); // CRC32
+      blob.set(jsonBytes, 12);
+      return blob;
+    }
+
+    it('importState skips entries targeting system paths', () => {
+      const blob = buildBlob({
+        version: 2,
+        files: [
+          { path: '/bin/evil', data: btoa('malicious'), type: 'file' },
+          { path: '/etc/shadow', data: btoa('secrets'), type: 'file' },
+          { path: '/usr/bin/hack', data: btoa('hack'), type: 'file' },
+          { path: '/home/user', data: '', type: 'dir' },
+          { path: '/home/user/safe.txt', data: btoa('safe'), type: 'file' },
+        ],
+      });
+
+      const vfs = new VFS();
+      importState(vfs, blob);
+
+      // Safe entry was imported
+      expect(dec(vfs.readFile('/home/user/safe.txt'))).toBe('safe');
+      // System paths were skipped
+      expect(() => vfs.stat('/bin/evil')).toThrow();
+      expect(() => vfs.stat('/etc/shadow')).toThrow();
+      expect(() => vfs.stat('/usr/bin/hack')).toThrow();
+    });
+
+    it('importState normalizes paths to prevent .. escape', () => {
+      const blob = buildBlob({
+        version: 2,
+        files: [
+          { path: '/home/user/../../bin/evil', data: btoa('escaped'), type: 'file' },
+          { path: '/tmp/./../../etc/passwd', data: btoa('passwd'), type: 'file' },
+          { path: '/home/user/legit.txt', data: btoa('legit'), type: 'file' },
+        ],
+      });
+
+      const vfs = new VFS();
+      importState(vfs, blob);
+
+      // Legitimate entry imported
+      expect(dec(vfs.readFile('/home/user/legit.txt'))).toBe('legit');
+      // Escaped paths were rejected (normalized to /bin/evil and /etc/passwd)
+      expect(() => vfs.stat('/bin/evil')).toThrow();
+      expect(() => vfs.stat('/etc/passwd')).toThrow();
+    });
+
+    it('importState allows entries under all safe prefixes', () => {
+      const blob = buildBlob({
+        version: 2,
+        files: [
+          { path: '/home', data: '', type: 'dir' },
+          { path: '/home/user/file.txt', data: btoa('home'), type: 'file' },
+          { path: '/tmp', data: '', type: 'dir' },
+          { path: '/tmp/data.bin', data: btoa('tmp'), type: 'file' },
+          { path: '/usr/lib/python', data: '', type: 'dir' },
+          { path: '/usr/lib/python/mod.py', data: btoa('py'), type: 'file' },
+          { path: '/usr/share/pkg', data: '', type: 'dir' },
+          { path: '/usr/share/pkg/tool.wasm', data: btoa('wasm'), type: 'file' },
+        ],
+      });
+
+      const vfs = new VFS();
+      importState(vfs, blob);
+
+      expect(dec(vfs.readFile('/home/user/file.txt'))).toBe('home');
+      expect(dec(vfs.readFile('/tmp/data.bin'))).toBe('tmp');
+      expect(dec(vfs.readFile('/usr/lib/python/mod.py'))).toBe('py');
+      expect(dec(vfs.readFile('/usr/share/pkg/tool.wasm'))).toBe('wasm');
+    });
+  });
+
   describe('edge cases', () => {
     it('handles empty VFS gracefully', () => {
-      const src = new VFS({ writablePaths: undefined });
+      const src = new VFS();
       const blob = exportState(src);
 
-      const dst = new VFS({ writablePaths: undefined });
+      const dst = new VFS();
       const result = importState(dst, blob);
 
       // Should not throw; env should be absent
@@ -133,7 +229,7 @@ describe('Persistence serializer', () => {
     });
 
     it('handles binary file content (all byte values)', () => {
-      const src = new VFS({ writablePaths: undefined });
+      const src = new VFS();
       const allBytes = new Uint8Array(256);
       for (let i = 0; i < 256; i++) allBytes[i] = i;
 
@@ -142,7 +238,7 @@ describe('Persistence serializer', () => {
       });
 
       const blob = exportState(src);
-      const dst = new VFS({ writablePaths: undefined });
+      const dst = new VFS();
       importState(dst, blob);
 
       const restored = dst.readFile('/tmp/binary.bin');
@@ -150,7 +246,7 @@ describe('Persistence serializer', () => {
     });
 
     it('blob has correct magic bytes and version', () => {
-      const vfs = new VFS({ writablePaths: undefined });
+      const vfs = new VFS();
       const blob = exportState(vfs);
 
       expect(blob[0]).toBe(0x57); // W
@@ -160,6 +256,23 @@ describe('Persistence serializer', () => {
 
       const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
       expect(view.getUint32(4, true)).toBe(2);
+    });
+
+    it('round-trips permissions', () => {
+      const src = new VFS();
+      src.withWriteAccess(() => {
+        src.writeFile('/tmp/readonly.txt', enc('locked'));
+        src.chmod('/tmp/readonly.txt', 0o444);
+        src.mkdirp('/tmp/restricted');
+        src.chmod('/tmp/restricted', 0o555);
+      });
+
+      const blob = exportState(src);
+      const dst = new VFS();
+      importState(dst, blob);
+
+      expect(dst.stat('/tmp/readonly.txt').permissions).toBe(0o444);
+      expect(dst.stat('/tmp/restricted').permissions).toBe(0o555);
     });
   });
 });
@@ -219,7 +332,7 @@ describe('Sandbox exportState / importState', () => {
 
 describe('VFS onChange hook', () => {
   it('fires callback on writeFile', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     let called = 0;
     vfs.setOnChange(() => called++);
     vfs.writeFile('/tmp/test.txt', enc('hello'));
@@ -227,7 +340,7 @@ describe('VFS onChange hook', () => {
   });
 
   it('fires callback on mkdir, unlink, rmdir, rename, symlink, chmod', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     let called = 0;
     vfs.setOnChange(() => called++);
 
@@ -244,7 +357,7 @@ describe('VFS onChange hook', () => {
   });
 
   it('fires callback on mkdirp', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     let called = 0;
     vfs.setOnChange(() => called++);
     vfs.mkdirp('/tmp/a/b/c');
@@ -252,7 +365,7 @@ describe('VFS onChange hook', () => {
   });
 
   it('fires callback on restore', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const snapId = vfs.snapshot();
     let called = 0;
     vfs.setOnChange(() => called++);
@@ -263,7 +376,7 @@ describe('VFS onChange hook', () => {
   it('does NOT fire during constructor init', () => {
     let called = 0;
     // Constructor creates default dirs — onChange should not fire for those
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     vfs.setOnChange(() => called++);
     // Reading should not trigger
     vfs.readFile('/dev/null');
@@ -273,7 +386,7 @@ describe('VFS onChange hook', () => {
   });
 
   it('does NOT fire during withWriteAccess', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     let called = 0;
     vfs.setOnChange(() => called++);
     vfs.withWriteAccess(() => {
@@ -283,7 +396,7 @@ describe('VFS onChange hook', () => {
   });
 
   it('can be cleared by passing null', () => {
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     let called = 0;
     vfs.setOnChange(() => called++);
     vfs.writeFile('/tmp/a.txt', enc('a'));
@@ -351,7 +464,7 @@ describe('FsBackend', () => {
 describe('PersistenceManager', () => {
   it('save/load round-trip with MemoryBackend', async () => {
     const backend = new MemoryBackend();
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const env = new Map([['FOO', 'bar']]);
     let currentEnv = env;
 
@@ -364,7 +477,7 @@ describe('PersistenceManager', () => {
     await pm.save();
 
     // Create a fresh VFS and load
-    const vfs2 = new VFS({ writablePaths: undefined });
+    const vfs2 = new VFS();
     let env2 = new Map<string, string>();
     const pm2 = new PersistenceManager(backend, vfs2, { namespace: 'test' },
       () => env2,
@@ -379,7 +492,7 @@ describe('PersistenceManager', () => {
 
   it('load returns false when no persisted state exists', async () => {
     const backend = new MemoryBackend();
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const pm = new PersistenceManager(backend, vfs, { namespace: 'empty' },
       () => new Map(),
       () => {},
@@ -389,7 +502,7 @@ describe('PersistenceManager', () => {
 
   it('clear deletes persisted state', async () => {
     const backend = new MemoryBackend();
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const pm = new PersistenceManager(backend, vfs, { namespace: 'clear-test' },
       () => new Map(),
       () => {},
@@ -402,7 +515,7 @@ describe('PersistenceManager', () => {
 
   it('autosave fires after debounce', async () => {
     const backend = new MemoryBackend();
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const pm = new PersistenceManager(backend, vfs, { namespace: 'auto', autosaveMs: 50 },
       () => new Map(),
       () => {},
@@ -425,7 +538,7 @@ describe('PersistenceManager', () => {
 
   it('dispose flushes pending save', async () => {
     const backend = new MemoryBackend();
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const pm = new PersistenceManager(backend, vfs, { namespace: 'dispose-flush', autosaveMs: 5000 },
       () => new Map(),
       () => {},
@@ -444,7 +557,7 @@ describe('PersistenceManager', () => {
   it('namespace isolation', async () => {
     const backend = new MemoryBackend();
 
-    const vfs1 = new VFS({ writablePaths: undefined });
+    const vfs1 = new VFS();
     vfs1.writeFile('/tmp/f.txt', enc('ns1'));
     const pm1 = new PersistenceManager(backend, vfs1, { namespace: 'ns1' },
       () => new Map(),
@@ -452,7 +565,7 @@ describe('PersistenceManager', () => {
     );
     await pm1.save();
 
-    const vfs2 = new VFS({ writablePaths: undefined });
+    const vfs2 = new VFS();
     vfs2.writeFile('/tmp/f.txt', enc('ns2'));
     const pm2 = new PersistenceManager(backend, vfs2, { namespace: 'ns2' },
       () => new Map(),
@@ -461,7 +574,7 @@ describe('PersistenceManager', () => {
     await pm2.save();
 
     // Load ns1 into fresh VFS
-    const vfsR = new VFS({ writablePaths: undefined });
+    const vfsR = new VFS();
     const pmR = new PersistenceManager(backend, vfsR, { namespace: 'ns1' },
       () => new Map(),
       () => {},
@@ -473,7 +586,7 @@ describe('PersistenceManager', () => {
   it('gracefully handles backend errors on load', async () => {
     const failBackend: MemoryBackend & { load: any } = new MemoryBackend();
     failBackend.load = async () => { throw new Error('disk on fire'); };
-    const vfs = new VFS({ writablePaths: undefined });
+    const vfs = new VFS();
     const pm = new PersistenceManager(failBackend, vfs, { namespace: 'fail' },
       () => new Map(),
       () => {},
