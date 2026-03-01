@@ -456,6 +456,8 @@ export class WasiHost {
               viewAfter.setUint32(nwrittenPtr, totalWritten, true);
               return WASI_EPIPE;
             }
+            // Note: partial writes (n < data.byteLength) lose trailing bytes.
+            // Task 8 replaces this with JSPI async writes that block until fully written.
             totalWritten += n;
             break;
           }
@@ -522,13 +524,7 @@ export class WasiHost {
             continue;
           }
           case 'pipe_read': {
-            // Synchronous attempt: try to drain what's available now.
-            // (Will be overridden with JSPI-based async read in Task 8.)
-            const buf = new Uint8Array(iov.len);
-            // pipe_read.read is async but we do a sync fallback for now:
-            // just return 0 (EOF) since we can't await in a sync context.
-            // Real async pipe reading will be enabled with JSPI in Task 8.
-            totalRead += 0;
+            // Sync stub — returns EOF. Real async pipe reading via JSPI in Task 8.
             const viewAfter = this.getView();
             viewAfter.setUint32(nreadPtr, totalRead, true);
             return WASI_ESUCCESS;
