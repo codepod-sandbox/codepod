@@ -791,9 +791,16 @@ pub fn exec_command(
                 ) {
                     Ok(r) => {
                         state.last_exit_code = r.exit_code;
-                        let mut stdout = String::new();
-                        let mut stderr = String::new();
+                        let mut stdout = r.stdout;
+                        let mut stderr = r.stderr;
                         apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
+                        // Write remaining output (not consumed by redirects) to fds
+                        if !stdout.is_empty() {
+                            print!("{}", stdout);
+                        }
+                        if !stderr.is_empty() {
+                            eprint!("{}", stderr);
+                        }
                         return Ok(ControlFlow::Normal(RunResult::exit(r.exit_code)));
                     }
                     Err(e) => {
@@ -1169,8 +1176,10 @@ pub fn exec_command(
                                 ) {
                                     Ok(r) => {
                                         state.last_exit_code = r.exit_code;
-                                        let mut bstdout = String::new();
-                                        let mut bstderr = String::new();
+                                        // Extension stdout becomes next stage's stdin
+                                        stdin_data = r.stdout.clone();
+                                        let mut bstdout = r.stdout;
+                                        let mut bstderr = r.stderr;
                                         apply_output_redirects(
                                             state,
                                             host,
@@ -1178,6 +1187,12 @@ pub fn exec_command(
                                             &mut bstdout,
                                             &mut bstderr,
                                         )?;
+                                        if !bstdout.is_empty() {
+                                            print!("{}", bstdout);
+                                        }
+                                        if !bstderr.is_empty() {
+                                            eprint!("{}", bstderr);
+                                        }
                                         last_result = RunResult::exit(r.exit_code);
                                     }
                                     Err(e) => {
@@ -1189,7 +1204,6 @@ pub fn exec_command(
                                 if pipefail && last_result.exit_code != 0 {
                                     pipefail_code = last_result.exit_code;
                                 }
-                                stdin_data = String::new();
                                 continue;
                             }
 
@@ -1494,15 +1508,18 @@ pub fn exec_command(
                                         .iter()
                                         .map(|(k, v)| (k.as_str(), v.as_str()))
                                         .collect();
+                                    // Read piped stdin from fd 0 for extensions
+                                    let ext_stdin = host
+                                        .read_fd(0)
+                                        .map(|d| String::from_utf8_lossy(&d).to_string())
+                                        .unwrap_or_default();
                                     match host.extension_invoke(
-                                        cmd_name, &args_refs,
-                                        "", // no string stdin in streaming mode
-                                        &env_pairs, &state.cwd,
+                                        cmd_name, &args_refs, &ext_stdin, &env_pairs, &state.cwd,
                                     ) {
                                         Ok(r) => {
                                             state.last_exit_code = r.exit_code;
-                                            let mut bstdout = String::new();
-                                            let mut bstderr = String::new();
+                                            let mut bstdout = r.stdout;
+                                            let mut bstderr = r.stderr;
                                             apply_output_redirects(
                                                 state,
                                                 host,
@@ -1510,6 +1527,12 @@ pub fn exec_command(
                                                 &mut bstdout,
                                                 &mut bstderr,
                                             )?;
+                                            if !bstdout.is_empty() {
+                                                print!("{}", bstdout);
+                                            }
+                                            if !bstderr.is_empty() {
+                                                eprint!("{}", bstderr);
+                                            }
                                             last_result = RunResult::exit(r.exit_code);
                                         }
                                         Err(e) => {

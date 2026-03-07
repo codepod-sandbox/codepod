@@ -9,6 +9,17 @@ pub struct SpawnResult {
     pub exit_code: i32,
 }
 
+/// Result from a host extension invocation. Extensions run on the host side
+/// and return their output as strings (they don't write to kernel fds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionResult {
+    pub exit_code: i32,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchResult {
     pub ok: bool,
@@ -154,7 +165,7 @@ pub trait HostInterface {
         stdin: &str,
         env: &[(&str, &str)],
         cwd: &str,
-    ) -> Result<SpawnResult, HostError>;
+    ) -> Result<ExtensionResult, HostError>;
 
     /// Register a pkg-installed tool with the host process manager.
     fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError>;
@@ -632,7 +643,7 @@ impl HostInterface for WasmHost {
         stdin: &str,
         env: &[(&str, &str)],
         cwd: &str,
-    ) -> Result<SpawnResult, HostError> {
+    ) -> Result<ExtensionResult, HostError> {
         let req = ExtensionInvokeRequest {
             name,
             args,

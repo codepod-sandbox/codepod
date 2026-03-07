@@ -5,7 +5,8 @@ pub mod mock {
     use std::sync::Mutex;
 
     use crate::host::{
-        CancelStatus, FetchResult, HostError, HostInterface, SpawnResult, StatInfo, WriteMode,
+        CancelStatus, ExtensionResult, FetchResult, HostError, HostInterface, SpawnResult,
+        StatInfo, WriteMode,
     };
 
     /// Mutex to serialize dup2 operations on fd 1 across test threads.
@@ -374,10 +375,12 @@ pub mod mock {
             _stdin: &str,
             _env: &[(&str, &str)],
             _cwd: &str,
-        ) -> Result<SpawnResult, HostError> {
+        ) -> Result<ExtensionResult, HostError> {
             if let Some(output) = self.extensions.get(name) {
-                return Ok(SpawnResult {
+                return Ok(ExtensionResult {
                     exit_code: output.exit_code,
+                    stdout: output.stdout.clone(),
+                    stderr: output.stderr.clone(),
                 });
             }
             Err(HostError::NotFound(format!("{name}: extension not found")))
