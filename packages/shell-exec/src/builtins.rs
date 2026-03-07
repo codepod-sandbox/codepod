@@ -72,7 +72,7 @@ pub fn try_builtin(
         "declare" | "typeset" => Some(builtin_declare(state, args)),
         "test" => Some(builtin_test(state, host, args)),
         "[" => Some(builtin_bracket_test(state, host, args)),
-        "read" => Some(builtin_read(state, args, stdin_data)),
+        "read" => Some(builtin_read(state, host, args)),
         "shift" => Some(builtin_shift(state, args)),
         "type" => Some(builtin_type(state, host, args)),
         "command" => builtin_command(host, args),
@@ -84,7 +84,7 @@ pub fn try_builtin(
         "history" => Some(builtin_history(state, args)),
         "trap" => Some(builtin_trap(state, args)),
         "getopts" => Some(builtin_getopts(state, args)),
-        "mapfile" | "readarray" => Some(builtin_mapfile(state, args, stdin_data)),
+        "mapfile" | "readarray" => Some(builtin_mapfile(state, host, args)),
         "chmod" => Some(builtin_chmod(state, host, args)),
         "date" => Some(builtin_date(host, args)),
         "exec" => Some(builtin_exec_cmd(state, host, args, stdin_data, run)),
@@ -353,6 +353,22 @@ fn format_printf(format: &str, args: &[String]) -> String {
                 '\\' => out.push('\\'),
                 '"' => out.push('"'),
                 'r' => out.push('\r'),
+                '0' => {
+                    // Octal escape: \0, \0N, \0NN, \0NNN
+                    let mut octal = String::new();
+                    while i + 1 < chars.len() && octal.len() < 3 && chars[i + 1].is_digit(8) {
+                        i += 1;
+                        octal.push(chars[i]);
+                    }
+                    let val = if octal.is_empty() {
+                        0u32
+                    } else {
+                        u32::from_str_radix(&octal, 8).unwrap_or(0)
+                    };
+                    if let Some(ch) = char::from_u32(val) {
+                        out.push(ch);
+                    }
+                }
                 _ => {
                     out.push('\\');
                     out.push(chars[i]);
@@ -983,7 +999,11 @@ fn eval_test_expr(state: &ShellState, host: &dyn HostInterface, args: &[String])
 
 // -- read -----------------------------------------------------------------
 
-fn builtin_read(state: &mut ShellState, args: &[String], stdin_data: &str) -> BuiltinResult {
+fn builtin_read(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    args: &[String],
+) -> BuiltinResult {
     let mut raw = false;
     let mut delimiter = '\n';
     let mut nchars: Option<usize> = None;
@@ -1024,12 +1044,26 @@ fn builtin_read(state: &mut ShellState, args: &[String], stdin_data: &str) -> Bu
         i += 1;
     }
 
-    // Determine effective stdin: use pipeline_stdin if available, else use redirect stdin
-    let use_pipeline = stdin_data.is_empty() && state.pipeline_stdin.is_some();
-    let effective_stdin: String = if use_pipeline {
+    // Stdin comes from fd 0. Input redirects and pipelines dup2 their
+    // data onto fd 0 before we get here. pipeline_stdin holds leftover
+    // data from a previous read in the same compound command.
+    let use_pipeline = if state.pipeline_stdin.is_some() {
+        true
+    } else {
+        // First read in this compound command — drain fd 0 into
+        // pipeline_stdin so subsequent reads can consume line by line.
+        match host.read_fd(0) {
+            Ok(data) if !data.is_empty() => {
+                state.pipeline_stdin = Some(String::from_utf8_lossy(&data).to_string());
+                true
+            }
+            _ => false,
+        }
+    };
+    let effective_stdin = if use_pipeline {
         state.pipeline_stdin.clone().unwrap_or_default()
     } else {
-        stdin_data.to_string()
+        String::new()
     };
 
     // Read input
@@ -1446,7 +1480,11 @@ fn builtin_getopts(state: &mut ShellState, args: &[String]) -> BuiltinResult {
 
 // -- mapfile / readarray --------------------------------------------------
 
-fn builtin_mapfile(state: &mut ShellState, args: &[String], stdin_data: &str) -> BuiltinResult {
+fn builtin_mapfile(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    args: &[String],
+) -> BuiltinResult {
     let mut strip_newline = false;
     let mut max_lines: Option<usize> = None;
     let mut array_name = "MAPFILE".to_string();
@@ -1470,6 +1508,11 @@ fn builtin_mapfile(state: &mut ShellState, args: &[String], stdin_data: &str) ->
         i += 1;
     }
 
+    // Read stdin from fd 0.
+    let stdin_data = match host.read_fd(0) {
+        Ok(data) if !data.is_empty() => String::from_utf8_lossy(&data).to_string(),
+        _ => String::new(),
+    };
     let lines: Vec<String> = stdin_data
         .split('\n')
         .enumerate()
@@ -1922,9 +1965,37 @@ mod tests {
     ) -> i32 {
         let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
         let a = make_args(args);
-        match try_builtin(state, host, cmd, &a, stdin, None).expect("expected builtin") {
+
+        // Write stdin data to a pipe and dup2 onto fd 0, matching
+        // production flow where input redirects go through fd 0.
+        let saved_fd0 = if !stdin.is_empty() {
+            let (r, w) = host.pipe().expect("pipe failed");
+            unsafe {
+                libc::write(
+                    w as libc::c_int,
+                    stdin.as_ptr() as *const libc::c_void,
+                    stdin.len(),
+                );
+            }
+            host.close_fd(w).ok();
+            let saved = host.dup(0).ok();
+            host.dup2(r, 0).ok();
+            host.close_fd(r).ok();
+            saved
+        } else {
+            None
+        };
+
+        let result = match try_builtin(state, host, cmd, &a, "", None).expect("expected builtin") {
             BuiltinResult::Result(c) | BuiltinResult::Exit(c) | BuiltinResult::Return(c) => c,
+        };
+
+        // Restore fd 0.
+        if let Some(fd) = saved_fd0 {
+            host.dup2(fd, 0).ok();
+            host.close_fd(fd).ok();
         }
+        result
     }
 
     /// Capture stdout via real OS pipes. Uses dup2 to redirect fd 1

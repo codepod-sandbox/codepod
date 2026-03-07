@@ -124,6 +124,19 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       return encoded.length;
     },
 
+    // host_write_fd(fd, data_ptr, data_len) -> i32
+    // Writes data to a pipe fd. Returns bytes written, or negative error code.
+    host_write_fd(fd: number, dataPtr: number, dataLen: number): number {
+      if (!opts.kernel) return -1;
+      const target = opts.kernel.getFdTarget(callerPid, fd);
+      if (!target || target.type !== 'pipe_write') {
+        return -1;
+      }
+      const data = new Uint8Array(memory.buffer, dataPtr, dataLen);
+      target.pipe.write(new Uint8Array(data)); // copy since wasm memory may shift
+      return dataLen;
+    },
+
     // host_dup(fd, out_ptr, out_cap) -> i32
     // Duplicates a file descriptor, returning a new fd pointing to the same target.
     host_dup(fd: number, outPtr: number, outCap: number): number {

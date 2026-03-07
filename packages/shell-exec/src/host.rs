@@ -185,6 +185,9 @@ pub trait HostInterface {
     /// Read all available data from a file descriptor (drains pipe until EOF).
     fn read_fd(&self, fd: i32) -> Result<Vec<u8>, HostError>;
 
+    /// Write data to a file descriptor.
+    fn write_fd(&self, fd: i32, data: &[u8]) -> Result<(), HostError>;
+
     /// Yield to the scheduler (cooperative scheduling: sleep(0)).
     fn yield_now(&self) -> Result<(), HostError>;
 }
@@ -330,6 +333,9 @@ extern "C" {
     /// Read all available data from a file descriptor. Writes the data into
     /// the output buffer. Returns bytes written, or negative error code.
     fn host_read_fd(fd: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Write data to a file descriptor. Returns bytes written, or negative error code.
+    fn host_write_fd(fd: i32, data_ptr: i32, data_len: i32) -> i32;
 
     /// Yield to the JS microtask queue (cooperative scheduling: sleep(0)).
     /// JSPI-suspending — allows other WASM stacks to run.
@@ -727,6 +733,14 @@ impl HostInterface for WasmHost {
             host_read_fd(fd, out_ptr, out_cap)
         })?;
         Ok(result_str.into_bytes())
+    }
+
+    fn write_fd(&self, fd: i32, data: &[u8]) -> Result<(), HostError> {
+        let rc = unsafe { host_write_fd(fd, data.as_ptr() as i32, data.len() as i32) };
+        if rc < 0 {
+            return Err(HostError::IoError(format!("write_fd({fd}): error {rc}")));
+        }
+        Ok(())
     }
 
     fn yield_now(&self) -> Result<(), HostError> {

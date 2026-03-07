@@ -452,6 +452,20 @@ pub mod mock {
             Ok(result)
         }
 
+        fn write_fd(&self, fd: i32, data: &[u8]) -> Result<(), HostError> {
+            let n = unsafe {
+                libc::write(
+                    fd as libc::c_int,
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                )
+            };
+            if n < 0 {
+                return Err(HostError::IoError(format!("write_fd({fd}) failed")));
+            }
+            Ok(())
+        }
+
         fn yield_now(&self) -> Result<(), HostError> {
             Ok(())
         }

@@ -597,6 +597,9 @@ pub fn exec_command(
             }
 
             // ── Phase 1: Extract stdin from input redirects ──────────────
+            // Collect stdin data from redirects, then write to a pipe and
+            // dup2 onto fd 0 so all consumers (builtins, spawned commands)
+            // read from standard input.
             let mut stdin_data = String::new();
             for redir in redirects {
                 match &redir.redirect_type {
@@ -641,6 +644,24 @@ pub fn exec_command(
                 }
             }
 
+            // If we have stdin data from redirects, write it to a pipe and
+            // dup2 onto fd 0 so builtins can read from standard input.
+            let stdin_pipe = if !stdin_data.is_empty() {
+                if let Ok((r, w)) = host.pipe() {
+                    // Write data to pipe, close write end so readers see EOF.
+                    let _ = host.write_fd(w, stdin_data.as_bytes());
+                    let _ = host.close_fd(w);
+                    let saved = host.dup(0).ok();
+                    let _ = host.dup2(r, 0);
+                    let _ = host.close_fd(r);
+                    saved
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // ── Check for builtin commands ────────────────────────────
             let func_args: Vec<String> = globbed[1..].iter().map(|s| s.to_string()).collect();
             let run_fn = |state: &mut ShellState, cmd_str: &str| -> RunResult {
@@ -674,12 +695,19 @@ pub fn exec_command(
                 None
             };
 
+            // When stdin_pipe is set, data is on fd 0. Otherwise pass stdin_data
+            // for builtins that still consume it as a string (mapfile, exec).
+            let builtin_stdin = if stdin_pipe.is_some() {
+                ""
+            } else {
+                &stdin_data
+            };
             if let Some(builtin_result) = crate::builtins::try_builtin(
                 state,
                 host,
                 cmd_name,
                 &func_args,
-                &stdin_data,
+                builtin_stdin,
                 Some(&run_fn),
             ) {
                 // Capture output from redirect pipe sink.
@@ -710,7 +738,18 @@ pub fn exec_command(
                 let mut stderr = String::new();
                 apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
 
+                // Restore fd 0 if we redirected stdin.
+                if let Some(fd) = stdin_pipe {
+                    let _ = host.dup2(fd, 0);
+                    let _ = host.close_fd(fd);
+                }
                 return Ok(ControlFlow::Normal(RunResult::exit(exit_code)));
+            }
+
+            // Not a builtin — restore fd 0 before other dispatch paths.
+            if let Some(fd) = stdin_pipe {
+                let _ = host.dup2(fd, 0);
+                let _ = host.close_fd(fd);
             }
 
             // Not a builtin — clean up redirect pipe sink if set.
@@ -1311,12 +1350,29 @@ pub fn exec_command(
                 state.stdin_fd = stage_stdin_fd;
                 state.stdout_fd = stage_stdout_fd;
 
+                // Connect pipe fds to standard fds so builtins and
+                // compound commands use normal fd 0/1/2 conventions.
+                let saved_fd0 = host.dup(0).ok();
+                let _ = host.dup2(stage_stdin_fd, 0);
+
                 match cmd {
                     Command::Simple {
                         words,
                         redirects,
                         assignments,
                     } => {
+                        // If 2>&1 redirect, connect stderr to stdout pipe.
+                        let has_stderr_to_stdout = redirects
+                            .iter()
+                            .any(|r| matches!(&r.redirect_type, RedirectType::StderrToStdout));
+                        let saved_fd2 = if has_stderr_to_stdout {
+                            let fd = host.dup(2).ok();
+                            let _ = host.dup2(stage_stdout_fd, 2);
+                            fd
+                        } else {
+                            None
+                        };
+
                         // Process assignments before word expansion
                         let _ = process_assignments(state, assignments, Some(&exec_fn));
 
@@ -1526,7 +1582,7 @@ pub fn exec_command(
                                                 "", // stdin comes from pipe fd, not string
                                                 stage_stdin_fd,
                                                 stage_stdout_fd,
-                                                2, // stderr_fd = 2
+                                                2, // stderr_fd — dup2'd to stdout by stage setup if 2>&1
                                             ) {
                                                 Ok(pid) => {
                                                     pids.push((pid, i));
@@ -1547,6 +1603,12 @@ pub fn exec_command(
                                 } // else: external command
                             } // else: globbed not empty
                         } // else: words not empty
+
+                        // Restore fd 2 if we redirected stderr.
+                        if let Some(fd) = saved_fd2 {
+                            let _ = host.dup2(fd, 2);
+                            let _ = host.close_fd(fd);
+                        }
                     }
                     _ => {
                         // Compound command — run inline with redirected fds.
@@ -1563,6 +1625,10 @@ pub fn exec_command(
                             }
                             Err(e) => {
                                 // Close pipes before propagating error
+                                if let Some(fd) = saved_fd0 {
+                                    let _ = host.dup2(fd, 0);
+                                    let _ = host.close_fd(fd);
+                                }
                                 for (read_fd, write_fd) in &pipes {
                                     let _ = host.close_fd(*read_fd);
                                     let _ = host.close_fd(*write_fd);
@@ -1573,6 +1639,10 @@ pub fn exec_command(
                             }
                             Ok(flow) => {
                                 // Break, Continue, Return, Cancelled — propagate
+                                if let Some(fd) = saved_fd0 {
+                                    let _ = host.dup2(fd, 0);
+                                    let _ = host.close_fd(fd);
+                                }
                                 for (read_fd, write_fd) in &pipes {
                                     let _ = host.close_fd(*read_fd);
                                     let _ = host.close_fd(*write_fd);
@@ -1587,6 +1657,12 @@ pub fn exec_command(
                         }
                         last_stage_was_spawned = false;
                     }
+                }
+
+                // Restore fd 0 after the stage.
+                if let Some(fd) = saved_fd0 {
+                    let _ = host.dup2(fd, 0);
+                    let _ = host.close_fd(fd);
                 }
 
                 // Close parent copies of pipe fds for this stage.
