@@ -152,7 +152,7 @@ export class Sandbox {
       for (const ext of options.extensions) {
         extensionRegistry.register(ext);
         if (ext.command) {
-          mgr.registerHostCommand(ext.name, ext.command);
+          mgr.registerHostCommand(ext.name, ext.command, ext.description);
         }
       }
     }

@@ -705,8 +705,8 @@ function spawnAsyncProcess(
   kernel.registerPending(pid);
 
   // Check for host commands (TypeScript handlers) first
-  const hostCmd = mgr.getHostCommand(req.prog);
-  if (hostCmd) {
+  const hostCmdEntry = mgr.getHostCommand(req.prog);
+  if (hostCmdEntry) {
     for (const [fd, target] of fdTable) kernel.setFdTarget(pid, fd, target);
     // Execute host command asynchronously
     const promise = (async () => {
@@ -719,12 +719,18 @@ function spawnAsyncProcess(
         stdinStr = new TextDecoder().decode(stdinTarget.data);
       }
       try {
-        const result = await hostCmd({
-          args: req.args,
-          stdin: stdinStr,
-          env: Object.fromEntries(req.env),
-          cwd: req.cwd,
-        });
+        // Intercept --help: return the extension's description if available
+        let result;
+        if (req.args.includes('--help') && hostCmdEntry.description) {
+          result = { stdout: hostCmdEntry.description + '\n', exitCode: 0 };
+        } else {
+          result = await hostCmdEntry.handler({
+            args: req.args,
+            stdin: stdinStr,
+            env: Object.fromEntries(req.env),
+            cwd: req.cwd,
+          });
+        }
         // Write stdout/stderr to fd targets
         if (result.stdout) {
           const data = new TextEncoder().encode(result.stdout);

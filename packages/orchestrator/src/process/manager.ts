@@ -20,7 +20,7 @@ export class ProcessManager {
   private vfs: VfsLike;
   private adapter: PlatformAdapter;
   private registry: Map<string, string> = new Map();
-  private hostCommands: Map<string, ExtensionHandler> = new Map();
+  private hostCommands: Map<string, { handler: ExtensionHandler; description?: string }> = new Map();
   private moduleCache: Map<string, WebAssembly.Module> = new Map();
   private networkBridge: NetworkBridgeLike | null;
   private currentHost: WasiHost | null = null;
@@ -57,8 +57,8 @@ export class ProcessManager {
 
   /** Register a host command (TypeScript handler) that looks like an executable.
    *  Also creates a tool stub in /usr/bin so the shell can discover it. */
-  registerHostCommand(name: string, handler: ExtensionHandler): void {
-    this.hostCommands.set(name, handler);
+  registerHostCommand(name: string, handler: ExtensionHandler, description?: string): void {
+    this.hostCommands.set(name, { handler, description });
     // Create tool stub in /usr/bin like WASM tools
     try {
       this.vfs.withWriteAccess(() => {
@@ -73,8 +73,8 @@ export class ProcessManager {
     }
   }
 
-  /** Get a host command handler by name, or undefined if not registered. */
-  getHostCommand(name: string): ExtensionHandler | undefined {
+  /** Get a host command entry by name, or undefined if not registered. */
+  getHostCommand(name: string): { handler: ExtensionHandler; description?: string } | undefined {
     return this.hostCommands.get(name);
   }
 

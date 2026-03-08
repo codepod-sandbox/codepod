@@ -57,7 +57,7 @@ class TestExtensionCommands:
         with Sandbox(extensions=[ext]) as sbx:
             result = sbx.commands.run("which myext")
             assert result.exit_code == 0
-            assert "/bin/myext" in result.stdout
+            assert "/usr/bin/myext" in result.stdout
 
 
 class TestExtensionPythonPackages:
