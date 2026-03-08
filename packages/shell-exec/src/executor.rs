@@ -775,7 +775,7 @@ pub fn exec_command(
             }
 
             // ── Extensions ──────────────────────────────────────────────
-            if host.is_extension(cmd_name) {
+            {
                 let args_refs: Vec<&str> = func_args.iter().map(|s| s.as_str()).collect();
                 let env_pairs: Vec<(&str, &str)> = state
                     .env
@@ -802,6 +802,9 @@ pub fn exec_command(
                             eprint!("{}", stderr);
                         }
                         return Ok(ControlFlow::Normal(RunResult::exit(r.exit_code)));
+                    }
+                    Err(crate::host::HostError::NotFound(_)) => {
+                        // Not an extension — fall through to external command dispatch
                     }
                     Err(e) => {
                         state.last_exit_code = 1;
@@ -1159,7 +1162,7 @@ pub fn exec_command(
                             }
 
                             // ── Extensions in pipeline ──
-                            if host.is_extension(cmd_name) {
+                            {
                                 let args_refs: Vec<&str> =
                                     pipe_func_args.iter().map(|s| s.as_str()).collect();
                                 let env_pairs: Vec<(&str, &str)> = state
@@ -1167,6 +1170,7 @@ pub fn exec_command(
                                     .iter()
                                     .map(|(k, v)| (k.as_str(), v.as_str()))
                                     .collect();
+                                let mut handled = false;
                                 match host.extension_invoke(
                                     cmd_name,
                                     &args_refs,
@@ -1194,17 +1198,24 @@ pub fn exec_command(
                                             eprint!("{}", bstderr);
                                         }
                                         last_result = RunResult::exit(r.exit_code);
+                                        handled = true;
+                                    }
+                                    Err(crate::host::HostError::NotFound(_)) => {
+                                        // Not an extension — fall through
                                     }
                                     Err(e) => {
                                         state.last_exit_code = 1;
                                         crate::shell_eprintln!("{cmd_name}: {e}");
                                         last_result = RunResult::exit(1);
+                                        handled = true;
                                     }
                                 }
-                                if pipefail && last_result.exit_code != 0 {
-                                    pipefail_code = last_result.exit_code;
+                                if handled {
+                                    if pipefail && last_result.exit_code != 0 {
+                                        pipefail_code = last_result.exit_code;
+                                    }
+                                    continue;
                                 }
-                                continue;
                             }
 
                             // ── Path resolution and command dispatch (pipeline) ──
@@ -1494,53 +1505,6 @@ pub fn exec_command(
                                         &mut bstderr,
                                     )?;
                                     last_result = RunResult::exit(result.exit_code);
-                                    if pipefail && last_result.exit_code != 0 {
-                                        pipefail_code = last_result.exit_code;
-                                    }
-                                    last_stage_was_spawned = false;
-                                }
-                                // ── Extensions in streaming pipeline ──
-                                else if host.is_extension(cmd_name) {
-                                    let args_refs: Vec<&str> =
-                                        pipe_func_args.iter().map(|s| s.as_str()).collect();
-                                    let env_pairs: Vec<(&str, &str)> = state
-                                        .env
-                                        .iter()
-                                        .map(|(k, v)| (k.as_str(), v.as_str()))
-                                        .collect();
-                                    // Read piped stdin from fd 0 for extensions
-                                    let ext_stdin = host
-                                        .read_fd(0)
-                                        .map(|d| String::from_utf8_lossy(&d).to_string())
-                                        .unwrap_or_default();
-                                    match host.extension_invoke(
-                                        cmd_name, &args_refs, &ext_stdin, &env_pairs, &state.cwd,
-                                    ) {
-                                        Ok(r) => {
-                                            state.last_exit_code = r.exit_code;
-                                            let mut bstdout = r.stdout;
-                                            let mut bstderr = r.stderr;
-                                            apply_output_redirects(
-                                                state,
-                                                host,
-                                                redirects,
-                                                &mut bstdout,
-                                                &mut bstderr,
-                                            )?;
-                                            if !bstdout.is_empty() {
-                                                print!("{}", bstdout);
-                                            }
-                                            if !bstderr.is_empty() {
-                                                eprint!("{}", bstderr);
-                                            }
-                                            last_result = RunResult::exit(r.exit_code);
-                                        }
-                                        Err(e) => {
-                                            state.last_exit_code = 1;
-                                            crate::shell_eprintln!("{cmd_name}: {e}");
-                                            last_result = RunResult::exit(1);
-                                        }
-                                    }
                                     if pipefail && last_result.exit_code != 0 {
                                         pipefail_code = last_result.exit_code;
                                     }

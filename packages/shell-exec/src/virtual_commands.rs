@@ -469,7 +469,7 @@ fn pkg_install(state: &mut ShellState, host: &dyn HostInterface, args: &[String]
         name: name.clone(),
         url: url.clone(),
         size,
-        installed_at: host.time_ms(),
+        installed_at: host.time() as u64,
     };
     packages.push(info);
     write_pkg_metadata(host, &packages);

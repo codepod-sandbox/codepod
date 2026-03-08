@@ -7,7 +7,7 @@
 //! Functions:
 //! - `_codepod.fetch(method, url, headers=None, body=None)` -> dict
 //! - `_codepod.extension_call(extension, method, **kwargs)` -> result
-//! - `_codepod.is_extension(name)` -> bool
+//! - `_codepod.extension_call(extension, method, **kwargs)` -> result (also checks existence)
 
 use rustpython_vm as vm;
 use vm::AsObject;
@@ -30,9 +30,6 @@ extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-
-    /// Check if a named extension is available. Returns 1 if yes, 0 if no.
-    fn host_is_extension(name_ptr: *const u8, name_len: u32) -> i32;
 
     /// Open a TCP/TLS socket. JSON request/response via output buffer.
     fn host_socket_connect(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32)
@@ -407,26 +404,6 @@ pub mod _codepod {
                 py_vm.ctx.exceptions.runtime_error.to_owned(),
                 "_codepod.extension_call() is only available inside a WASM sandbox".to_owned(),
             ))
-        }
-    }
-
-    /// Check if a named extension is available on the host.
-    ///
-    /// Usage: `_codepod.is_extension(name) -> bool`
-    ///
-    /// Returns False on non-WASM platforms.
-    #[pyfunction]
-    fn is_extension(name: vm::builtins::PyStrRef, _py_vm: &VirtualMachine) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let name_bytes = name.as_str().as_bytes();
-            unsafe { host_is_extension(name_bytes.as_ptr(), name_bytes.len() as u32) == 1 }
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = name;
-            false
         }
     }
 

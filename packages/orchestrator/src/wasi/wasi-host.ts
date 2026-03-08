@@ -300,12 +300,12 @@ export class WasiHost {
         fd_sync: this.fdNoOp.bind(this),
         fd_fdstat_set_flags: this.fdNoOp.bind(this),
         fd_fdstat_set_rights: this.fdNoOp.bind(this),
-        fd_filestat_set_size: this.fdNoOp.bind(this),
+        fd_filestat_set_size: this.fdFilestatSetSize.bind(this),
         fd_filestat_set_times: this.fdNoOp.bind(this),
         path_filestat_set_times: this.fdNoOp.bind(this),
+        fd_pread: this.fdPread.bind(this),
+        fd_pwrite: this.fdPwrite.bind(this),
         // Stubs that must remain ENOSYS (masking bugs or unimplemented semantics)
-        fd_pread: this.stub.bind(this),
-        fd_pwrite: this.stub.bind(this),
         fd_renumber: this.stub.bind(this),
         path_link: this.stub.bind(this),
         path_readlink: this.pathReadlink.bind(this),
@@ -1060,6 +1060,76 @@ export class WasiHost {
   private schedYield(): number {
     this.checkDeadline();
     return WASI_ESUCCESS;
+  }
+
+  /** fd_pread — positional read without changing fd offset. */
+  private fdPread(
+    fd: number,
+    iovsPtr: number,
+    iovsLen: number,
+    offset: bigint,
+    nreadPtr: number,
+  ): number {
+    // pread only works on VFS-backed fds (not ioFds/dirFds)
+    if (this.ioFds.has(fd) || this.dirFds.has(fd)) return WASI_EBADF;
+    const view = this.getView();
+    const iovecs = readIovecs(view, iovsPtr, iovsLen);
+    let totalRead = 0;
+    let pos = Number(offset);
+    try {
+      for (const iov of iovecs) {
+        const buf = new Uint8Array(iov.len);
+        const n = this.fdTable.pread(fd, buf, pos);
+        if (n > 0) {
+          this.getBytes().set(buf.subarray(0, n), iov.buf);
+          totalRead += n;
+          pos += n;
+        }
+        if (n < iov.len) break;
+      }
+    } catch (err) {
+      return fdErrorToWasi(err);
+    }
+    this.getView().setUint32(nreadPtr, totalRead, true);
+    return WASI_ESUCCESS;
+  }
+
+  /** fd_pwrite — positional write without changing fd offset. */
+  private fdPwrite(
+    fd: number,
+    iovsPtr: number,
+    iovsLen: number,
+    offset: bigint,
+    nwrittenPtr: number,
+  ): number {
+    if (this.ioFds.has(fd) || this.dirFds.has(fd)) return WASI_EBADF;
+    const view = this.getView();
+    const iovecs = readIovecs(view, iovsPtr, iovsLen);
+    let totalWritten = 0;
+    let pos = Number(offset);
+    try {
+      for (const iov of iovecs) {
+        const data = this.getBytes().slice(iov.buf, iov.buf + iov.len);
+        const n = this.fdTable.pwrite(fd, data, pos);
+        totalWritten += n;
+        pos += n;
+      }
+    } catch (err) {
+      return fdErrorToWasi(err);
+    }
+    this.getView().setUint32(nwrittenPtr, totalWritten, true);
+    return WASI_ESUCCESS;
+  }
+
+  /** fd_filestat_set_size — ftruncate. */
+  private fdFilestatSetSize(fd: number, size: bigint): number {
+    if (this.ioFds.has(fd) || this.dirFds.has(fd)) return WASI_EBADF;
+    try {
+      this.fdTable.truncate(fd, Number(size));
+      return WASI_ESUCCESS;
+    } catch (err) {
+      return fdErrorToWasi(err);
+    }
   }
 
   private stub(): number {

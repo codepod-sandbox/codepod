@@ -12,9 +12,8 @@
  *   - host_close_fd: close a file descriptor
  *
  *   Network / extensions (migrated from python-imports + shell-imports):
- *   - host_network_fetch: synchronous HTTP via NetworkBridge
+ *   - host_network_fetch: HTTP fetch via NetworkBridge (async/JSPI)
  *   - host_extension_invoke: call a host extension and get JSON result
- *   - host_is_extension: check if an extension is available
  */
 
 import type { NetworkBridgeLike } from '../network/bridge.js';
@@ -323,8 +322,10 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
           });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
+          // Signal "not found" so Rust can fall through to external command dispatch
+          const isNotFound = msg.includes('not found');
           return writeJson(memory, outPtr, outCap, {
-            exit_code: 1, stdout: '', stderr: `${msg}\n`,
+            exit_code: isNotFound ? -127 : 1, stdout: '', stderr: `${msg}\n`,
           });
         }
       }
@@ -337,31 +338,16 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
           return writeJson(memory, outPtr, outCap, result);
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          return writeJson(memory, outPtr, outCap, { ok: false, error: msg });
+          return writeJson(memory, outPtr, outCap, {
+            exit_code: 1, stdout: '', stderr: `${msg}\n`,
+          });
         }
       }
 
-      return writeJson(memory, outPtr, outCap, { ok: false, error: 'extensions not available' });
+      return writeJson(memory, outPtr, outCap, {
+        exit_code: -127, stdout: '', stderr: 'extensions not available\n',
+      });
     },
 
-    // host_is_extension(name_ptr, name_len) -> i32
-    // Returns 1 if the named extension is available, 0 otherwise.
-    host_is_extension(namePtr: number, nameLen: number): number {
-      const name = readString(memory, namePtr, nameLen);
-
-      // ExtensionRegistry check (new-style)
-      if (opts.extensionRegistry) {
-        if (!opts.extensionRegistry.has(name)) return 0;
-        if (opts.toolAllowlist && !opts.toolAllowlist.includes(name)) return 0;
-        return 1;
-      }
-
-      // Legacy extensionHandler: if handler exists, report extensions as available
-      if (opts.extensionHandler) {
-        return 1;
-      }
-
-      return 0;
-    },
   };
 }

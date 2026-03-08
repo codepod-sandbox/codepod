@@ -1157,10 +1157,7 @@ fn builtin_type(state: &ShellState, host: &dyn HostInterface, args: &[String]) -
             output.push_str(&format!("{} is a shell builtin\n", arg));
         } else if state.functions.contains_key(arg) {
             output.push_str(&format!("{} is a function\n", arg));
-        } else if crate::virtual_commands::is_virtual_command(arg)
-            || host.is_extension(arg)
-            || host.has_tool(arg)
-        {
+        } else if crate::virtual_commands::is_virtual_command(arg) || host.has_tool(arg) {
             output.push_str(&format!("{} is /usr/bin/{}\n", arg, arg));
         } else {
             output.push_str(&format!("{}: not found\n", arg));
@@ -1190,10 +1187,7 @@ fn builtin_command(host: &dyn HostInterface, args: &[String]) -> Option<BuiltinR
             shell_print!("{}", out);
             return Some(BuiltinResult::Result(0));
         }
-        if crate::virtual_commands::is_virtual_command(name)
-            || host.is_extension(name)
-            || host.has_tool(name)
-        {
+        if crate::virtual_commands::is_virtual_command(name) || host.has_tool(name) {
             let out = format!("/usr/bin/{}\n", name);
             shell_print!("{}", out);
             return Some(BuiltinResult::Result(0));
@@ -1228,10 +1222,7 @@ fn builtin_which(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
     let mut code = 0;
 
     for arg in args {
-        if is_builtin(arg)
-            || crate::virtual_commands::is_virtual_command(arg)
-            || host.is_extension(arg)
-            || host.has_tool(arg)
+        if is_builtin(arg) || crate::virtual_commands::is_virtual_command(arg) || host.has_tool(arg)
         {
             output.push_str(&format!("/bin/{}\n", arg));
         } else {
@@ -1671,8 +1662,7 @@ fn parse_symbolic_mode(s: &str, current: u32) -> Option<u32> {
 // -- date -----------------------------------------------------------------
 
 fn builtin_date(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
-    let ts_ms = host.time_ms();
-    let ts_secs = ts_ms / 1000;
+    let ts_secs = host.time() as u64;
 
     let output = if !args.is_empty() && args[0].starts_with('+') {
         let format = &args[0][1..];
@@ -2914,10 +2904,10 @@ mod tests {
     #[test]
     fn date_unix_timestamp() {
         let mut state = ShellState::new_default();
-        // MockHost time_ms returns 0 -> epoch
+        // MockHost time() returns 1700000000.0
         let host = MockHost::new();
         let (code, stdout, _) = run_capture(&mut state, &host, "date", &["+%s"]);
-        assert_eq!(stdout, "0\n");
+        assert_eq!(stdout, "1700000000\n");
         assert_eq!(code, 0);
     }
 

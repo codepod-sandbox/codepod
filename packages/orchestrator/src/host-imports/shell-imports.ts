@@ -135,8 +135,6 @@ export interface ShellImportsOptions {
   vfs: VfsLike;
   mgr: ProcessManager;
   memory: WebAssembly.Memory;
-  /** Called when the shell requests a cancellation check. */
-  checkCancel?: () => number; // 0 = ok, 1 = timeout, 2 = cancelled
   /** Synchronous spawn handler. If provided, host_spawn calls this instead of mgr.spawn(). */
   syncSpawn?: (cmd: string, args: string[], env: Record<string, string>, stdin: Uint8Array, cwd: string) => { exit_code: number; stdout: string; stderr: string };
 }
@@ -194,12 +192,8 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
       return mgr.hasTool(name) ? 1 : 0;
     },
 
-    host_check_cancel(): number {
-      return opts.checkCancel?.() ?? 0;
-    },
-
-    host_time_ms(): bigint {
-      return BigInt(Date.now());
+    host_time(): number {
+      return Date.now() / 1000;
     },
 
     // ── Filesystem ──

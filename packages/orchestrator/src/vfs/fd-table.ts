@@ -106,6 +106,41 @@ export class FdTable {
     return data.byteLength;
   }
 
+  /** Read from an open fd at a given offset without changing the fd's offset. */
+  pread(fd: number, buf: Uint8Array, offset: number): number {
+    const entry = this.getEntry(fd);
+    const available = entry.buffer.byteLength - offset;
+    if (available <= 0) return 0;
+    const toRead = Math.min(buf.byteLength, available);
+    buf.set(entry.buffer.subarray(offset, offset + toRead));
+    return toRead;
+  }
+
+  /** Write data to an open fd at a given offset without changing the fd's offset. */
+  pwrite(fd: number, data: Uint8Array, offset: number): number {
+    const entry = this.getEntry(fd);
+    const newLength = Math.max(entry.buffer.byteLength, offset + data.byteLength);
+    if (newLength > entry.buffer.byteLength) {
+      const grown = new Uint8Array(newLength);
+      grown.set(entry.buffer);
+      entry.buffer = grown;
+    }
+    entry.buffer.set(data, offset);
+    entry.dirty = true;
+    return data.byteLength;
+  }
+
+  /** Truncate (or extend) an open fd's buffer to the given size. */
+  truncate(fd: number, size: number): void {
+    const entry = this.getEntry(fd);
+    if (size === entry.buffer.byteLength) return;
+    const newBuf = new Uint8Array(size);
+    newBuf.set(entry.buffer.subarray(0, Math.min(size, entry.buffer.byteLength)));
+    entry.buffer = newBuf;
+    if (entry.offset > size) entry.offset = size;
+    entry.dirty = true;
+  }
+
   /** Seek to a position in the file. Returns the new offset. */
   seek(fd: number, offset: number, whence: SeekWhence): number {
     const entry = this.getEntry(fd);

@@ -46,6 +46,8 @@ export interface ShellInstanceOptions {
   networkBridge?: NetworkBridgeLike;
   /** Extension registry for command extensions. */
   extensionRegistry?: ExtensionRegistry;
+  /** Legacy extension handler (sync, used by Worker proxy). */
+  extensionHandler?: (cmd: Record<string, unknown>) => Record<string, unknown>;
   /** Tool allowlist for security policy. */
   toolAllowlist?: string[];
   /** Max WASM linear memory in bytes for spawned child processes. */
@@ -116,7 +118,7 @@ export class ShellInstance implements ShellLike {
       },
     });
 
-    // We need a reference to the ShellInstance for the checkCancel callback,
+    // We need a reference to the ShellInstance for the deadline check,
     // but the instance doesn't exist yet. Use a mutable ref.
     let shellRef: ShellInstance | null = null;
 
@@ -125,16 +127,6 @@ export class ShellInstance implements ShellLike {
       mgr,
       memory: memoryProxy,
       syncSpawn: options?.syncSpawn,
-      checkCancel: () => {
-        if (!shellRef) return 0;
-        if (shellRef.cancelledReason === 'TIMEOUT') return 1;
-        if (shellRef.cancelledReason) return 2;
-        if (shellRef.deadlineMs !== Infinity && Date.now() > shellRef.deadlineMs) {
-          shellRef.cancelledReason = 'TIMEOUT';
-          return 1;
-        }
-        return 0;
-      },
     });
 
     // ── Process kernel for pipe/spawn/waitpid/close_fd ──
@@ -151,6 +143,7 @@ export class ShellInstance implements ShellLike {
       kernel,
       networkBridge: options?.networkBridge,
       extensionRegistry: options?.extensionRegistry,
+      extensionHandler: options?.extensionHandler,
       toolAllowlist: options?.toolAllowlist,
       spawnProcess: (req: SpawnRequest, fdTable: Map<number, FdTarget>) => {
         if (options?.syncSpawn) {
@@ -173,12 +166,11 @@ export class ShellInstance implements ShellLike {
     // JSPI: Wrap async imports so WASM suspends when they return a Promise.
     // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
     if (typeof WebAssembly.Suspending === 'function') {
-      // Extension invoke (async, returns Promise)
-      if (options?.extensionRegistry) {
-        codepodImports.host_extension_invoke = new WebAssembly.Suspending(
-          kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
-        ) as unknown as WebAssembly.ImportValue;
-      }
+      // Extension invoke (async, returns Promise) — always wrap since the shell
+      // tries extension_invoke before external command dispatch
+      codepodImports.host_extension_invoke = new WebAssembly.Suspending(
+        kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
       // Process management: host_waitpid blocks until child exits
       codepodImports.host_waitpid = new WebAssembly.Suspending(
         kernelImports.host_waitpid as (...args: number[]) => Promise<number>,

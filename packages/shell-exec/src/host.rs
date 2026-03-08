@@ -82,13 +82,6 @@ impl std::fmt::Display for HostError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CancelStatus {
-    Running,
-    Cancelled,
-    TimedOut,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Truncate,
     Append,
@@ -121,9 +114,7 @@ pub trait HostInterface {
 
     fn has_tool(&self, name: &str) -> bool;
 
-    fn check_cancel(&self) -> CancelStatus;
-
-    fn time_ms(&self) -> u64;
+    fn time(&self) -> f64;
 
     fn stat(&self, path: &str) -> Result<StatInfo, HostError>;
 
@@ -170,9 +161,6 @@ pub trait HostInterface {
 
     /// Register a pkg-installed tool with the host process manager.
     fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError>;
-
-    /// Check whether a command name is a registered host extension.
-    fn is_extension(&self, name: &str) -> bool;
 
     /// Create a pipe, returning `(read_fd, write_fd)`.
     fn pipe(&self) -> Result<(i32, i32), HostError>;
@@ -235,12 +223,8 @@ extern "C" {
     /// Returns 1 for true, 0 for false.
     pub fn host_has_tool(name_ptr: *const u8, name_len: u32) -> i32;
 
-    /// Poll cancellation status.
-    /// Returns 0 = running, 1 = cancelled, 2 = timed-out.
-    pub fn host_check_cancel() -> i32;
-
-    /// Get current wall-clock time in milliseconds.
-    pub fn host_time_ms() -> u64;
+    /// Get current wall-clock time in seconds (f64).
+    pub fn host_time() -> f64;
 
     /// Stat a path.
     pub fn host_stat(path_ptr: *const u8, path_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -323,9 +307,6 @@ extern "C" {
         path_ptr: *const u8,
         path_len: u32,
     ) -> i32;
-
-    /// Check whether a command is a registered host extension. Returns 1 for true, 0 for false.
-    pub fn host_is_extension(name_ptr: *const u8, name_len: u32) -> i32;
 
     /// Read the next command from the host session loop.
     pub fn host_read_command(out_ptr: *mut u8, out_cap: u32) -> i32;
@@ -493,16 +474,8 @@ impl HostInterface for WasmHost {
         unsafe { host_has_tool(name.as_ptr(), name.len() as u32) != 0 }
     }
 
-    fn check_cancel(&self) -> CancelStatus {
-        match unsafe { host_check_cancel() } {
-            1 => CancelStatus::Cancelled,
-            2 => CancelStatus::TimedOut,
-            _ => CancelStatus::Running,
-        }
-    }
-
-    fn time_ms(&self) -> u64 {
-        unsafe { host_time_ms() }
+    fn time(&self) -> f64 {
+        unsafe { host_time() }
     }
 
     fn stat(&self, path: &str) -> Result<StatInfo, HostError> {
@@ -692,8 +665,14 @@ impl HostInterface for WasmHost {
         let output = call_with_outbuf("extension_invoke", |out_ptr, out_cap| unsafe {
             host_extension_invoke(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
         })?;
-        serde_json::from_str(&output)
-            .map_err(|e| HostError::Other(format!("extension_invoke: failed to deserialize: {e}")))
+        let result: ExtensionResult = serde_json::from_str(&output).map_err(|e| {
+            HostError::Other(format!("extension_invoke: failed to deserialize: {e}"))
+        })?;
+        // exit_code -127 is a sentinel from the host meaning "extension not found"
+        if result.exit_code == -127 {
+            return Err(HostError::NotFound(format!("{name}: extension not found")));
+        }
+        Ok(result)
     }
 
     fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError> {
@@ -710,10 +689,6 @@ impl HostInterface for WasmHost {
         } else {
             Ok(())
         }
-    }
-
-    fn is_extension(&self, name: &str) -> bool {
-        unsafe { host_is_extension(name.as_ptr(), name.len() as u32) != 0 }
     }
 
     // ----- Process management (Task 5) -----

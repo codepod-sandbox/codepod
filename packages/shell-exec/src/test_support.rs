@@ -5,8 +5,7 @@ pub mod mock {
     use std::sync::Mutex;
 
     use crate::host::{
-        CancelStatus, ExtensionResult, FetchResult, HostError, HostInterface, SpawnResult,
-        StatInfo, WriteMode,
+        ExtensionResult, FetchResult, HostError, HostInterface, SpawnResult, StatInfo, WriteMode,
     };
 
     /// Mutex to serialize dup2 operations on fd 1 across test threads.
@@ -225,12 +224,8 @@ pub mod mock {
             self.tools.contains(name)
         }
 
-        fn check_cancel(&self) -> CancelStatus {
-            CancelStatus::Running
-        }
-
-        fn time_ms(&self) -> u64 {
-            0
+        fn time(&self) -> f64 {
+            1700000000.0
         }
 
         fn stat(&self, path: &str) -> Result<StatInfo, HostError> {
@@ -391,10 +386,6 @@ pub mod mock {
                 .borrow_mut()
                 .push((name.to_string(), wasm_path.to_string()));
             Ok(())
-        }
-
-        fn is_extension(&self, name: &str) -> bool {
-            self.extensions.contains_key(name)
         }
 
         fn pipe(&self) -> Result<(i32, i32), HostError> {
