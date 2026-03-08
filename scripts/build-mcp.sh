@@ -65,23 +65,31 @@ sed -i.bak -E '
 ' "$BUNDLE"
 rm -f "$BUNDLE.bak"
 
+echo "==> Embedding python-shims..."
+# The bundled code resolves python-shims relative to import.meta.url (= dist/).
+# Copy them next to the bundle so deno compile --include picks them up at the
+# right relative path.
+cp -R packages/orchestrator/src/network/python-shims "$OUT_DIR/python-shims"
+
 echo "==> Compiling with deno..."
 # shellcheck disable=SC2086
 "$DENO" compile -A --no-check \
   $TARGET_FLAG \
+  --include "$OUT_DIR/python-shims" \
   -o "$OUT_DIR/codepod-mcp" \
   "$BUNDLE"
+
+rm -rf "$OUT_DIR/python-shims"
 
 rm -f "$BUNDLE"
 
 SIZE=$(du -h "$OUT_DIR/codepod-mcp" | cut -f1)
 echo "==> Built: $OUT_DIR/codepod-mcp ($SIZE)"
 
-# Generate .mcp.json at project root (one level up from codepod/)
-PROJECT_ROOT="$(cd .. && pwd)"
+# Generate .mcp.json in this project directory (where Claude Code reads it)
 CODEPOD_ROOT="$(pwd)"
 WASM_DIR="$CODEPOD_ROOT/packages/orchestrator/src/platform/__tests__/fixtures"
-MCP_JSON="$PROJECT_ROOT/.mcp.json"
+MCP_JSON="$CODEPOD_ROOT/.mcp.json"
 
 cat > "$MCP_JSON" <<MCPEOF
 {
