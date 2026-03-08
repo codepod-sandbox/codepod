@@ -13,8 +13,8 @@ export default defineConfig({
   target: 'es2022',
   platform: 'node',
   async onSuccess() {
-    // esbuild strips node: prefix on dynamic imports; restore it for deno compat.
-    const { readFileSync, writeFileSync, readdirSync } = await import('fs');
+    // Copy python-shims/ to dist/ (not bundleable — read at runtime via readFileSync)
+    const { readFileSync, writeFileSync, readdirSync, cpSync } = await import('fs');
     const { join } = await import('path');
     const dir = join(import.meta.dirname!, 'dist');
     const builtins = ['worker_threads', 'fs/promises', 'fs', 'path', 'os', 'url',
@@ -35,5 +35,10 @@ export default defineConfig({
       }
       if (changed) writeFileSync(fp, text);
     }
+
+    // Copy python-shims to dist/ so readFileSync at runtime can find them
+    const shimSrc = join(import.meta.dirname!, 'src', 'network', 'python-shims');
+    const shimDst = join(dir, 'python-shims');
+    cpSync(shimSrc, shimDst, { recursive: true });
   },
 });
