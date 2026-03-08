@@ -9,7 +9,7 @@ codepod is designed to run untrusted LLM-generated code safely. This document de
 - Network access is off by default
 - File writes are restricted to designated paths
 - Only allowlisted tools can be spawned
-- WASI syscalls for sockets, signals, and polling return `ENOSYS`
+- WASI syscalls for sockets, signals, and polling return `ENOSYS` (socket access is via `codepod` namespace, gated by network policy)
 - Resource consumption is bounded at every level
 
 ## Sandbox boundary
@@ -77,9 +77,10 @@ The `NetworkGateway` enforces:
 
 - **Static host checks** — allowlist (whitelist mode) or blocklist (blacklist mode), with wildcard support (`*.example.com`)
 - **Dynamic callback** — optional `onRequest` async callback for runtime allow/deny decisions
-- **HTTP only** — network access goes through the host `fetch()` API; no raw sockets
+- **Tiered access** — `restricted` mode (default) routes HTTP through the host `fetch()` API; `full` mode enables real TCP/TLS sockets via host bridge (Deno/Node only)
 - **Response size limits** — response bodies are streamed with configurable size caps (default 10 MB)
-- **No WASI sockets** — `sock_recv`, `sock_send`, `sock_accept`, `sock_shutdown` all return `ENOSYS`
+- **Socket host checks** — in `full` mode, socket connections are subject to the same host allow/blocklist as HTTP requests
+- **No WASI sockets** — WASI-level socket syscalls (`sock_recv`, `sock_send`, etc.) still return `ENOSYS`; socket access goes through the `codepod` WASM namespace instead
 
 ## Resource limits
 

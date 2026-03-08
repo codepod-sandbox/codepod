@@ -219,7 +219,7 @@ std::process::exit(1);
 
 | Capability | Status | Reason |
 |-----------|--------|--------|
-| Network access | No | WASI sockets not implemented |
+| Network access | Via `codepod` imports | Use `host_network_fetch` or `host_socket_*` syscalls (see [syscalls.md](./syscalls.md)) |
 | Spawn subprocesses | Not yet | Process management syscalls are shell-only (for now) |
 | Multithreading | No | `wasm32-wasip1` is single-threaded |
 | Host filesystem access | No | All I/O goes through the sandboxed VFS |

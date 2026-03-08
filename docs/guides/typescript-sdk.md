@@ -265,7 +265,35 @@ await sandbox.run('curl https://api.example.com/data');
 await sandbox.run('python3 -c "import urllib.request; print(urllib.request.urlopen(\'https://api.example.com\').read())"');
 ```
 
-When networking is enabled, a `socket.py` shim is written to `/usr/lib/python` and `PYTHONPATH` is configured automatically.
+### Network modes
+
+Two network modes control how sandbox code accesses the network:
+
+| Mode | Transport | Platforms | Use case |
+|------|-----------|-----------|----------|
+| `restricted` (default) | HTTP/HTTPS via host `fetch()` | Browser + Deno/Node | Safe HTTP-only access |
+| `full` | Real TCP/TLS sockets via host bridge | Deno/Node only | Raw socket protocols |
+
+```typescript
+// Restricted mode (default) — HTTP only, works everywhere
+const sandbox = await Sandbox.create({
+  wasmDir: './wasm',
+  network: { allowedHosts: ['api.example.com'] },
+});
+
+// Full mode — real TCP/TLS sockets (Deno/Node only)
+const sandbox = await Sandbox.create({
+  wasmDir: './wasm',
+  network: {
+    mode: 'full',
+    allowedHosts: ['db.example.com'],
+  },
+});
+```
+
+In restricted mode, Python's `socket` module buffers HTTP requests and routes them through the host's fetch API. In full mode, `socket.connect()` / `send()` / `recv()` proxy to real TCP/TLS connections on the host.
+
+When networking is enabled, `socket.py`, `ssl.py`, and `sitecustomize.py` shims are written to `/usr/lib/python` and `PYTHONPATH` is configured automatically.
 
 ## Security
 
