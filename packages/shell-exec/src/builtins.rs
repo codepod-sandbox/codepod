@@ -1222,11 +1222,29 @@ fn builtin_which(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
     let mut code = 0;
 
     for arg in args {
-        if is_builtin(arg) || crate::virtual_commands::is_virtual_command(arg) || host.has_tool(arg)
-        {
+        if is_builtin(arg) || crate::virtual_commands::is_virtual_command(arg) {
             output.push_str(&format!("/bin/{}\n", arg));
         } else {
-            code = 1;
+            // Search PATH-like directories for executables
+            let mut found = false;
+            for dir in &["/usr/bin", "/bin"] {
+                let path = format!("{}/{}", dir, arg);
+                if let Ok(info) = host.stat(&path) {
+                    if info.exists && info.is_file {
+                        output.push_str(&format!("{}\n", path));
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            // Fallback: check the tool registry (for WASM tools not yet on VFS)
+            if !found && host.has_tool(arg) {
+                output.push_str(&format!("/bin/{}\n", arg));
+                found = true;
+            }
+            if !found {
+                code = 1;
+            }
         }
     }
 

@@ -93,9 +93,9 @@ export class ProcessManager {
     this.extensionHandler = handler;
   }
 
-  /** Check if a tool name is registered. */
+  /** Check if a tool name is registered (WASM tool or host command). */
   hasTool(name: string): boolean {
-    return this.registry.has(name);
+    return this.registry.has(name) || this.hostCommands.has(name);
   }
 
   /** Check if a tool is allowed by the security policy. */
