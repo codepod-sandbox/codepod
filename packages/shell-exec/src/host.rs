@@ -9,17 +9,6 @@ pub struct SpawnResult {
     pub exit_code: i32,
 }
 
-/// Result from a host extension invocation. Extensions run on the host side
-/// and return their output as strings (they don't write to kernel fds).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionResult {
-    pub exit_code: i32,
-    #[serde(default)]
-    pub stdout: String,
-    #[serde(default)]
-    pub stderr: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchResult {
     pub ok: bool,
@@ -38,17 +27,6 @@ struct FetchRequest<'a> {
     method: &'a str,
     headers: std::collections::HashMap<&'a str, &'a str>,
     body: Option<&'a str>,
-}
-
-/// JSON-encoded extension invoke request sent to the host via `host_extension_invoke`.
-#[cfg(target_arch = "wasm32")]
-#[derive(Serialize)]
-struct ExtensionInvokeRequest<'a> {
-    name: &'a str,
-    args: &'a [&'a str],
-    stdin: &'a str,
-    env: &'a [(&'a str, &'a str)],
-    cwd: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,17 +125,6 @@ pub trait HostInterface {
         headers: &[(&str, &str)],
         body: Option<&str>,
     ) -> FetchResult;
-
-    /// Invoke a host extension command. The extension handler is an async JS
-    /// closure; JSPI handles the WASM suspend/resume transparently.
-    fn extension_invoke(
-        &self,
-        name: &str,
-        args: &[&str],
-        stdin: &str,
-        env: &[(&str, &str)],
-        cwd: &str,
-    ) -> Result<ExtensionResult, HostError>;
 
     /// Register a pkg-installed tool with the host process manager.
     fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError>;
@@ -285,15 +252,6 @@ extern "C" {
     /// Perform an HTTP fetch. JSON request/response via output buffer.
     /// Async on the host side; JSPI suspends/resumes WASM transparently.
     pub fn host_network_fetch(
-        req_ptr: *const u8,
-        req_len: u32,
-        out_ptr: *mut u8,
-        out_cap: u32,
-    ) -> i32;
-
-    /// Invoke a host extension command. JSON request/response via output buffer.
-    /// Returns a Promise on the host side; JSPI suspends/resumes WASM transparently.
-    pub fn host_extension_invoke(
         req_ptr: *const u8,
         req_len: u32,
         out_ptr: *mut u8,
@@ -643,36 +601,6 @@ impl HostInterface for WasmHost {
                 error: Some(format!("fetch: host error: {e}")),
             },
         }
-    }
-
-    fn extension_invoke(
-        &self,
-        name: &str,
-        args: &[&str],
-        stdin: &str,
-        env: &[(&str, &str)],
-        cwd: &str,
-    ) -> Result<ExtensionResult, HostError> {
-        let req = ExtensionInvokeRequest {
-            name,
-            args,
-            stdin,
-            env,
-            cwd,
-        };
-        let req_json = serde_json::to_vec(&req)
-            .map_err(|e| HostError::Other(format!("extension_invoke: failed to serialize: {e}")))?;
-        let output = call_with_outbuf("extension_invoke", |out_ptr, out_cap| unsafe {
-            host_extension_invoke(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
-        })?;
-        let result: ExtensionResult = serde_json::from_str(&output).map_err(|e| {
-            HostError::Other(format!("extension_invoke: failed to deserialize: {e}"))
-        })?;
-        // exit_code -127 is a sentinel from the host meaning "extension not found"
-        if result.exit_code == -127 {
-            return Err(HostError::NotFound(format!("{name}: extension not found")));
-        }
-        Ok(result)
     }
 
     fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError> {

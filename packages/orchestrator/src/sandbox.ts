@@ -146,10 +146,15 @@ export class Sandbox {
     const mgr = new ProcessManager(vfs, adapter, bridge, options.security?.toolAllowlist);
     const tools = await Sandbox.registerTools(mgr, adapter, options.wasmDir, vfs);
 
-    // Build extension registry
+    // Build extension registry and register host commands with ProcessManager
     const extensionRegistry = new ExtensionRegistry();
     if (options.extensions) {
-      for (const ext of options.extensions) extensionRegistry.register(ext);
+      for (const ext of options.extensions) {
+        extensionRegistry.register(ext);
+        if (ext.command) {
+          mgr.registerHostCommand(ext.name, ext.command);
+        }
+      }
     }
 
     // Process host mounts before shell so files are available immediately

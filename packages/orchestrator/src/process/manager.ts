@@ -14,11 +14,13 @@ import type { NetworkBridgeLike } from '../network/bridge.js';
 import { createKernelImports } from '../host-imports/kernel-imports.js';
 
 import type { SpawnOptions, SpawnResult } from './process.js';
+import type { ExtensionHandler } from '../extension/types.js';
 
 export class ProcessManager {
   private vfs: VfsLike;
   private adapter: PlatformAdapter;
   private registry: Map<string, string> = new Map();
+  private hostCommands: Map<string, ExtensionHandler> = new Map();
   private moduleCache: Map<string, WebAssembly.Module> = new Map();
   private networkBridge: NetworkBridgeLike | null;
   private currentHost: WasiHost | null = null;
@@ -51,6 +53,29 @@ export class ProcessManager {
     } catch {
       // VFS may not have /usr/bin yet (e.g. VfsProxy in worker) — non-fatal
     }
+  }
+
+  /** Register a host command (TypeScript handler) that looks like an executable.
+   *  Also creates a tool stub in /usr/bin so the shell can discover it. */
+  registerHostCommand(name: string, handler: ExtensionHandler): void {
+    this.hostCommands.set(name, handler);
+    // Create tool stub in /usr/bin like WASM tools
+    try {
+      this.vfs.withWriteAccess(() => {
+        this.vfs.writeFile(
+          `/usr/bin/${name}`,
+          new TextEncoder().encode(`host:${name}`),
+        );
+        this.vfs.chmod(`/usr/bin/${name}`, S_TOOL | 0o555);
+      });
+    } catch {
+      // VFS may not have /usr/bin yet — non-fatal
+    }
+  }
+
+  /** Get a host command handler by name, or undefined if not registered. */
+  getHostCommand(name: string): ExtensionHandler | undefined {
+    return this.hostCommands.get(name);
   }
 
   /** Return the names of all registered tools. */
@@ -308,6 +333,16 @@ export class ProcessManager {
         stdout: '',
         stderr: `${command}: tool not allowed by security policy\n`,
       };
+    }
+
+    // Check host commands first (TS handlers)
+    const hostCmd = this.hostCommands.get(command);
+    if (hostCmd) {
+      // Host commands are async but spawnSync needs sync results.
+      // This path is used by the Worker extension proxy which is already sync.
+      // For now, return not-found so the caller can try other paths.
+      // Host commands are primarily handled by spawnAsyncProcess.
+      return { exit_code: 127, stdout: '', stderr: `${command}: host command not available in sync mode\n` };
     }
 
     let wasmPath: string;

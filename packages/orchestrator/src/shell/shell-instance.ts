@@ -136,20 +136,17 @@ export class ShellInstance implements ShellLike {
     kernel.setFdTarget(0, 1, createBufferTarget());   // stdout: captured (no limit on kernel fd)
     kernel.setFdTarget(0, 2, createBufferTarget());   // stderr: captured (no limit on kernel fd)
 
-    // Kernel imports provide codepod-namespace syscalls (extensions, network, process mgmt)
+    // Kernel imports provide codepod-namespace syscalls (network, process mgmt)
     const kernelImports = createKernelImports({
       memory: memoryProxy,
       callerPid: 0,
       kernel,
       networkBridge: options?.networkBridge,
-      extensionRegistry: options?.extensionRegistry,
-      extensionHandler: options?.extensionHandler,
-      toolAllowlist: options?.toolAllowlist,
       spawnProcess: (req: SpawnRequest, fdTable: Map<number, FdTarget>) => {
         if (options?.syncSpawn) {
           return spawnSyncProcess(req, fdTable, kernel, options.syncSpawn);
         }
-        return spawnAsyncProcess(req, fdTable, mgr, kernel, adapter, shellRef?.getDeadlineMs(), options?.memoryBytes, options?.networkBridge, options?.extensionRegistry);
+        return spawnAsyncProcess(req, fdTable, mgr, kernel, adapter, shellRef?.getDeadlineMs(), options?.memoryBytes, options?.networkBridge);
       },
     });
 
@@ -166,11 +163,6 @@ export class ShellInstance implements ShellLike {
     // JSPI: Wrap async imports so WASM suspends when they return a Promise.
     // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
     if (typeof WebAssembly.Suspending === 'function') {
-      // Extension invoke (async, returns Promise) — always wrap since the shell
-      // tries extension_invoke before external command dispatch
-      codepodImports.host_extension_invoke = new WebAssembly.Suspending(
-        kernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
-      ) as unknown as WebAssembly.ImportValue;
       // Process management: host_waitpid blocks until child exits
       codepodImports.host_waitpid = new WebAssembly.Suspending(
         kernelImports.host_waitpid as (...args: number[]) => Promise<number>,
@@ -712,6 +704,55 @@ function spawnAsyncProcess(
   kernel.initProcess(pid);
   kernel.registerPending(pid);
 
+  // Check for host commands (TypeScript handlers) first
+  const hostCmd = mgr.getHostCommand(req.prog);
+  if (hostCmd) {
+    for (const [fd, target] of fdTable) kernel.setFdTarget(pid, fd, target);
+    // Execute host command asynchronously
+    const promise = (async () => {
+      // Read stdin from fd 0 if available
+      let stdinStr = '';
+      const stdinTarget = fdTable.get(0);
+      if (stdinTarget?.type === 'pipe_read') {
+        stdinStr = new TextDecoder().decode(stdinTarget.pipe.drainSync());
+      } else if (stdinTarget?.type === 'static') {
+        stdinStr = new TextDecoder().decode(stdinTarget.data);
+      }
+      try {
+        const result = await hostCmd({
+          args: req.args,
+          stdin: stdinStr,
+          env: Object.fromEntries(req.env),
+          cwd: req.cwd,
+        });
+        // Write stdout/stderr to fd targets
+        if (result.stdout) {
+          const data = new TextEncoder().encode(result.stdout);
+          const out = fdTable.get(1);
+          if (out?.type === 'buffer') { out.buf.push(data); out.total += data.byteLength; }
+          else if (out?.type === 'pipe_write') out.pipe.write(data);
+        }
+        if (result.stderr) {
+          const data = new TextEncoder().encode(result.stderr);
+          const err = fdTable.get(2);
+          if (err?.type === 'buffer') { err.buf.push(data); err.total += data.byteLength; }
+          else if (err?.type === 'pipe_write') err.pipe.write(data);
+        }
+        for (const [fd] of fdTable) kernel.closeFd(pid, fd);
+        kernel.registerExited(pid, result.exitCode);
+      } catch (e: unknown) {
+        const msg = new TextEncoder().encode(`${req.prog}: ${e instanceof Error ? e.message : String(e)}\n`);
+        const err = fdTable.get(2);
+        if (err?.type === 'buffer') { err.buf.push(msg); err.total += msg.byteLength; }
+        else if (err?.type === 'pipe_write') err.pipe.write(msg);
+        for (const [fd] of fdTable) kernel.closeFd(pid, fd);
+        kernel.registerExited(pid, 1);
+      }
+    })();
+    kernel.attachProcess(pid, promise, null as unknown as WasiHost);
+    return pid;
+  }
+
   const module = mgr.getModule(req.prog);
   if (!module) return -1;
 
@@ -826,6 +867,10 @@ function spawnAsyncProcess(
       ) as unknown as WebAssembly.ImportValue;
       imports.codepod.host_network_fetch = new WebAssembly.Suspending(
         childKernelImports.host_network_fetch as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
+      // Python uses host_extension_invoke for _codepod.extension_call()
+      imports.codepod.host_extension_invoke = new WebAssembly.Suspending(
+        childKernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
     }
 

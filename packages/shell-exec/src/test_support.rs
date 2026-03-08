@@ -4,9 +4,7 @@ pub mod mock {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
-    use crate::host::{
-        ExtensionResult, FetchResult, HostError, HostInterface, SpawnResult, StatInfo, WriteMode,
-    };
+    use crate::host::{FetchResult, HostError, HostInterface, SpawnResult, StatInfo, WriteMode};
 
     /// Mutex to serialize dup2 operations on fd 1 across test threads.
     pub static FD_MUTEX: Mutex<()> = Mutex::new(());
@@ -46,8 +44,6 @@ pub mod mock {
         spawn_handler: Option<Box<dyn Fn(&str, &[&str], &str) -> MockSpawnOutput>>,
         /// Pre-configured fetch results keyed by URL.
         fetch_results: HashMap<String, FetchResult>,
-        /// Extension names mapped to their invoke results.
-        extensions: HashMap<String, MockSpawnOutput>,
         /// Records register_tool calls for test assertions.
         registered_tools: RefCell<Vec<(String, String)>>,
         /// Next PID to allocate for spawn.
@@ -73,7 +69,6 @@ pub mod mock {
                 spawn_calls: RefCell::new(Vec::new()),
                 spawn_handler: None,
                 fetch_results: HashMap::new(),
-                extensions: HashMap::new(),
                 registered_tools: RefCell::new(Vec::new()),
                 next_pid: RefCell::new(100),
                 pid_results: RefCell::new(HashMap::new()),
@@ -138,12 +133,6 @@ pub mod mock {
         /// Register a pre-configured fetch result for a URL.
         pub fn with_fetch_result(mut self, url: &str, result: FetchResult) -> Self {
             self.fetch_results.insert(url.to_string(), result);
-            self
-        }
-
-        /// Register an extension that returns a pre-configured result.
-        pub fn with_extension(mut self, name: &str, result: MockSpawnOutput) -> Self {
-            self.extensions.insert(name.to_string(), result);
             self
         }
 
@@ -361,24 +350,6 @@ pub mod mock {
                 body: String::new(),
                 error: Some("networking not configured".to_string()),
             }
-        }
-
-        fn extension_invoke(
-            &self,
-            name: &str,
-            _args: &[&str],
-            _stdin: &str,
-            _env: &[(&str, &str)],
-            _cwd: &str,
-        ) -> Result<ExtensionResult, HostError> {
-            if let Some(output) = self.extensions.get(name) {
-                return Ok(ExtensionResult {
-                    exit_code: output.exit_code,
-                    stdout: output.stdout.clone(),
-                    stderr: output.stderr.clone(),
-                });
-            }
-            Err(HostError::NotFound(format!("{name}: extension not found")))
         }
 
         fn register_tool(&self, name: &str, wasm_path: &str) -> Result<(), HostError> {

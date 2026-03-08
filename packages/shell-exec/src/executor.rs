@@ -774,47 +774,9 @@ pub fn exec_command(
                 return Ok(ControlFlow::Normal(RunResult::exit(result.exit_code)));
             }
 
-            // ── Extensions ──────────────────────────────────────────────
-            {
-                let args_refs: Vec<&str> = func_args.iter().map(|s| s.as_str()).collect();
-                let env_pairs: Vec<(&str, &str)> = state
-                    .env
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                match host.extension_invoke(
-                    cmd_name,
-                    &args_refs,
-                    &stdin_data,
-                    &env_pairs,
-                    &state.cwd,
-                ) {
-                    Ok(r) => {
-                        state.last_exit_code = r.exit_code;
-                        let mut stdout = r.stdout;
-                        let mut stderr = r.stderr;
-                        apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
-                        // Write remaining output (not consumed by redirects) to fds
-                        if !stdout.is_empty() {
-                            print!("{}", stdout);
-                        }
-                        if !stderr.is_empty() {
-                            eprint!("{}", stderr);
-                        }
-                        return Ok(ControlFlow::Normal(RunResult::exit(r.exit_code)));
-                    }
-                    Err(crate::host::HostError::NotFound(_)) => {
-                        // Not an extension — fall through to external command dispatch
-                    }
-                    Err(e) => {
-                        state.last_exit_code = 1;
-                        crate::shell_eprintln!("{cmd_name}: {e}");
-                        return Ok(ControlFlow::Normal(RunResult::exit(1)));
-                    }
-                }
-            }
-
             // ── Path resolution and command dispatch ─────────────────────
+            // Host commands (extensions) are now routed through host_spawn
+            // by the host ProcessManager — no separate extension_invoke needed.
             let (spawn_program, spawn_args) =
                 match dispatch_external_command(state, host, cmd_name, &args, &stdin_data) {
                     Ok((prog, resolved)) => (prog, resolved),
@@ -1161,64 +1123,8 @@ pub fn exec_command(
                                 continue;
                             }
 
-                            // ── Extensions in pipeline ──
-                            {
-                                let args_refs: Vec<&str> =
-                                    pipe_func_args.iter().map(|s| s.as_str()).collect();
-                                let env_pairs: Vec<(&str, &str)> = state
-                                    .env
-                                    .iter()
-                                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                                    .collect();
-                                let mut handled = false;
-                                match host.extension_invoke(
-                                    cmd_name,
-                                    &args_refs,
-                                    &effective_stdin,
-                                    &env_pairs,
-                                    &state.cwd,
-                                ) {
-                                    Ok(r) => {
-                                        state.last_exit_code = r.exit_code;
-                                        // Extension stdout becomes next stage's stdin
-                                        stdin_data = r.stdout.clone();
-                                        let mut bstdout = r.stdout;
-                                        let mut bstderr = r.stderr;
-                                        apply_output_redirects(
-                                            state,
-                                            host,
-                                            redirects,
-                                            &mut bstdout,
-                                            &mut bstderr,
-                                        )?;
-                                        if !bstdout.is_empty() {
-                                            print!("{}", bstdout);
-                                        }
-                                        if !bstderr.is_empty() {
-                                            eprint!("{}", bstderr);
-                                        }
-                                        last_result = RunResult::exit(r.exit_code);
-                                        handled = true;
-                                    }
-                                    Err(crate::host::HostError::NotFound(_)) => {
-                                        // Not an extension — fall through
-                                    }
-                                    Err(e) => {
-                                        state.last_exit_code = 1;
-                                        crate::shell_eprintln!("{cmd_name}: {e}");
-                                        last_result = RunResult::exit(1);
-                                        handled = true;
-                                    }
-                                }
-                                if handled {
-                                    if pipefail && last_result.exit_code != 0 {
-                                        pipefail_code = last_result.exit_code;
-                                    }
-                                    continue;
-                                }
-                            }
-
                             // ── Path resolution and command dispatch (pipeline) ──
+                            // Host commands (extensions) are routed through host_spawn.
                             let dispatch_result = dispatch_external_command(
                                 state,
                                 host,

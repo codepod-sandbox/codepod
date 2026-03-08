@@ -11,9 +11,9 @@
  *   - host_waitpid: wait for a child process to exit (async, requires JSPI)
  *   - host_close_fd: close a file descriptor
  *
- *   Network / extensions (migrated from python-imports + shell-imports):
+ *   Network / extensions:
  *   - host_network_fetch: HTTP fetch via NetworkBridge (async/JSPI)
- *   - host_extension_invoke: call a host extension and get JSON result
+ *   - host_extension_invoke: call a host extension (Python only; shell uses host_spawn)
  */
 
 import type { NetworkBridgeLike } from '../network/bridge.js';
@@ -35,18 +35,19 @@ export interface KernelImportsOptions {
   /** Network bridge for synchronous HTTP fetch from WASM. */
   networkBridge?: NetworkBridgeLike;
 
-  /** Extension registry for command extensions (new-style). */
+  /**
+   * Extension registry for host_extension_invoke (used by Python WASM).
+   * The shell no longer calls host_extension_invoke — it routes everything
+   * through host_spawn, and the ProcessManager dispatches to host commands.
+   */
   extensionRegistry?: ExtensionRegistry;
 
   /**
-   * Legacy extension handler (old-style, used by manager.ts).
+   * Legacy extension handler (sync, used by Worker proxy).
    * If both extensionRegistry and extensionHandler are provided,
    * extensionRegistry takes precedence.
    */
   extensionHandler?: (cmd: Record<string, unknown>) => Record<string, unknown>;
-
-  /** Tool allowlist for security policy. If set, only listed extensions are allowed. */
-  toolAllowlist?: string[];
 
   /** Called by host_spawn to actually create and start a WASM process. */
   spawnProcess?: (req: SpawnRequest, fdTable: Map<number, FdTarget>) => number;
@@ -279,20 +280,18 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       } catch { return -1; }
     },
 
-    // ── Extensions ──
+    // ── Extensions (Python only — shell routes through host_spawn) ──
 
     // host_extension_invoke(req_ptr, req_len, out_ptr, out_cap) -> i32
-    // Invokes a host extension. Supports both legacy extensionHandler and
-    // the newer ExtensionRegistry interface.
-    // Returns a Promise when using ExtensionRegistry — JSPI suspends WASM,
-    // awaits the extension handler, then resumes WASM with the result.
+    // Invokes a host extension. Used by Python's _codepod.extension_call().
+    // The shell no longer calls this — it goes through host_spawn and the
+    // ProcessManager dispatches to host commands.
     async host_extension_invoke(
       reqPtr: number, reqLen: number,
       outPtr: number, outCap: number,
     ): Promise<number> {
       const reqJson = readString(memory, reqPtr, reqLen);
 
-      // Try ExtensionRegistry first (new-style, async)
       if (opts.extensionRegistry) {
         try {
           const req = JSON.parse(reqJson) as {
@@ -322,10 +321,8 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
           });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
-          // Signal "not found" so Rust can fall through to external command dispatch
-          const isNotFound = msg.includes('not found');
           return writeJson(memory, outPtr, outCap, {
-            exit_code: isNotFound ? -127 : 1, stdout: '', stderr: `${msg}\n`,
+            exit_code: 1, stdout: '', stderr: `${msg}\n`,
           });
         }
       }
@@ -345,7 +342,7 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       }
 
       return writeJson(memory, outPtr, outCap, {
-        exit_code: -127, stdout: '', stderr: 'extensions not available\n',
+        exit_code: 1, stdout: '', stderr: 'extensions not available\n',
       });
     },
 
