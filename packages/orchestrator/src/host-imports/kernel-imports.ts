@@ -193,11 +193,11 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
           ? await opts.networkBridge.fetchAsync(url, method, headers, body)
           : opts.networkBridge.fetchSync(url, method, headers, body);
         return writeJson(memory, outPtr, outCap, {
-          ok: true,
+          ok: !result.error && result.status >= 200 && result.status < 400,
           status: result.status,
           headers: result.headers,
           body: result.body,
-          error: result.error,
+          error: result.error ?? null,
         });
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);

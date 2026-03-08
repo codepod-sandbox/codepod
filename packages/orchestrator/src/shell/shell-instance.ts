@@ -125,7 +125,6 @@ export class ShellInstance implements ShellLike {
       mgr,
       memory: memoryProxy,
       syncSpawn: options?.syncSpawn,
-      networkBridge: options?.networkBridge,
       checkCancel: () => {
         if (!shellRef) return 0;
         if (shellRef.cancelledReason === 'TIMEOUT') return 1;
@@ -191,10 +190,6 @@ export class ShellInstance implements ShellLike {
       // Network fetch (async for browser JSPI support)
       codepodImports.host_network_fetch = new WebAssembly.Suspending(
         kernelImports.host_network_fetch as (...args: number[]) => Promise<number>,
-      ) as unknown as WebAssembly.ImportValue;
-      // Shell-specific fetch (used by curl/wget virtual commands)
-      codepodImports.host_fetch = new WebAssembly.Suspending(
-        shellImports.host_fetch as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
     }
 

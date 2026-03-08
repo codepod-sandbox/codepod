@@ -20,7 +20,7 @@ All WASM processes in the sandbox import host functions from the `codepod` names
 
 | Syscall | Signature | Description |
 |---------|-----------|-------------|
-| `host_network_fetch` | `(req_ptr, req_len, out_ptr, out_cap) → i32` | HTTP fetch. Request: `{ url, method, headers, body }`. Response: `{ ok, status, headers, body, error }`. |
+| `host_network_fetch` | `(req_ptr, req_len, out_ptr, out_cap) → i32` | HTTP fetch. Request: `{ url, method, headers, body }`. Response: `{ ok, status, headers, body, error }`. **Async (JSPI)**. |
 
 ## Sockets (full mode only)
 

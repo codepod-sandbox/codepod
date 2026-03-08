@@ -24,18 +24,19 @@ pub struct ExtensionResult {
 pub struct FetchResult {
     pub ok: bool,
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
     pub body: String,
     pub error: Option<String>,
 }
 
-/// JSON-encoded fetch request sent to the host via `host_fetch`.
+/// JSON-encoded fetch request sent to the host via `host_network_fetch`.
 #[cfg(target_arch = "wasm32")]
 #[derive(Serialize)]
 struct FetchRequest<'a> {
     url: &'a str,
     method: &'a str,
-    headers: &'a [(&'a str, &'a str)],
+    headers: std::collections::HashMap<&'a str, &'a str>,
     body: Option<&'a str>,
 }
 
@@ -298,7 +299,13 @@ extern "C" {
         -> i32;
 
     /// Perform an HTTP fetch. JSON request/response via output buffer.
-    pub fn host_fetch(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    /// Async on the host side; JSPI suspends/resumes WASM transparently.
+    pub fn host_network_fetch(
+        req_ptr: *const u8,
+        req_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
 
     /// Invoke a host extension command. JSON request/response via output buffer.
     /// Returns a Promise on the host side; JSPI suspends/resumes WASM transparently.
@@ -629,7 +636,7 @@ impl HostInterface for WasmHost {
         let req = FetchRequest {
             url,
             method,
-            headers,
+            headers: headers.iter().copied().collect(),
             body,
         };
         let req_json = match serde_json::to_vec(&req) {
@@ -638,27 +645,27 @@ impl HostInterface for WasmHost {
                 return FetchResult {
                     ok: false,
                     status: 0,
-                    headers: vec![],
+                    headers: Default::default(),
                     body: String::new(),
                     error: Some(format!("fetch: failed to serialize request: {e}")),
                 }
             }
         };
         let output = call_with_outbuf("fetch", |out_ptr, out_cap| unsafe {
-            host_fetch(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
+            host_network_fetch(req_json.as_ptr(), req_json.len() as u32, out_ptr, out_cap)
         });
         match output {
             Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| FetchResult {
                 ok: false,
                 status: 0,
-                headers: vec![],
+                headers: Default::default(),
                 body: String::new(),
                 error: Some(format!("fetch: failed to deserialize response: {e}")),
             }),
             Err(e) => FetchResult {
                 ok: false,
                 status: 0,
-                headers: vec![],
+                headers: Default::default(),
                 body: String::new(),
                 error: Some(format!("fetch: host error: {e}")),
             },

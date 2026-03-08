@@ -11,7 +11,6 @@
 
 import type { VfsLike } from '../vfs/vfs-like.js';
 import type { ProcessManager } from '../process/manager.js';
-import type { NetworkBridgeLike } from '../network/bridge.js';
 import { readString, readBytes, writeJson, writeString, writeBytes } from './common.js';
 
 // Error codes matching Rust's rc_to_error convention
@@ -140,8 +139,6 @@ export interface ShellImportsOptions {
   checkCancel?: () => number; // 0 = ok, 1 = timeout, 2 = cancelled
   /** Synchronous spawn handler. If provided, host_spawn calls this instead of mgr.spawn(). */
   syncSpawn?: (cmd: string, args: string[], env: Record<string, string>, stdin: Uint8Array, cwd: string) => { exit_code: number; stdout: string; stderr: string };
-  /** Network bridge for synchronous HTTP fetch from WASM. */
-  networkBridge?: NetworkBridgeLike;
 }
 
 export function createShellImports(opts: ShellImportsOptions): Record<string, WebAssembly.ImportValue> {
@@ -364,63 +361,9 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
     },
 
     // ── Network / Tool registration ──
-    // Note: host_is_extension and host_extension_invoke have moved to
-    // kernel-imports.ts (createKernelImports). host_network_fetch is also
-    // provided there. host_fetch below is the shell-specific fetch variant
-    // with a different request/response shape (array-of-tuples headers).
-
-    // host_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32
-    // Synchronous HTTP fetch via NetworkBridge (SAB+Atomics).
-    // host_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32
-    // Async HTTP fetch via NetworkBridge. Uses fetchAsync (browser/JSPI) when
-    // available, falls back to fetchSync (SAB+Atomics in Node/Deno).
-    async host_fetch(reqPtr: number, reqLen: number, outPtr: number, outCap: number): Promise<number> {
-      const reqJson = readString(memory, reqPtr, reqLen);
-
-      if (!opts.networkBridge) {
-        return writeJson(memory, outPtr, outCap, {
-          ok: false, status: 0, headers: [], body: '',
-          error: 'network access not configured',
-        });
-      }
-
-      try {
-        const req = JSON.parse(reqJson) as {
-          url?: string;
-          method?: string;
-          headers?: [string, string][];
-          body?: string | null;
-        };
-        const url = req.url ?? '';
-        const method = req.method ?? 'GET';
-        const hdrs: Record<string, string> = {};
-        if (req.headers) {
-          for (const [k, v] of req.headers) hdrs[k] = v;
-        }
-        const body = req.body ?? undefined;
-
-        // Use async fetch if available (browser), otherwise fall back to sync (SAB bridge)
-        const result = opts.networkBridge.fetchAsync
-          ? await opts.networkBridge.fetchAsync(url, method, hdrs, body)
-          : opts.networkBridge.fetchSync(url, method, hdrs, body);
-
-        // Convert headers object to array of tuples for Rust FetchResult
-        const headerPairs: [string, string][] = Object.entries(result.headers ?? {});
-
-        return writeJson(memory, outPtr, outCap, {
-          ok: !result.error && result.status >= 200 && result.status < 400,
-          status: result.status,
-          headers: headerPairs,
-          body: result.body ?? '',
-          error: result.error ?? null,
-        });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return writeJson(memory, outPtr, outCap, {
-          ok: false, status: 0, headers: [], body: '', error: msg,
-        });
-      }
-    },
+    // Note: host_is_extension, host_extension_invoke, and host_network_fetch
+    // are all provided by kernel-imports.ts (createKernelImports).
+    // The shell's Rust code calls host_network_fetch directly.
 
     // host_register_tool(name_ptr, name_len, path_ptr, path_len) -> i32
     // Register a pkg-installed tool with the process manager.

@@ -362,7 +362,7 @@ pub mod mock {
             FetchResult {
                 ok: false,
                 status: 0,
-                headers: vec![],
+                headers: Default::default(),
                 body: String::new(),
                 error: Some("networking not configured".to_string()),
             }
