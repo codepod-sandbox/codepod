@@ -15,7 +15,15 @@ const SHIM_DIR = join(dirname(fileURLToPath(import.meta.url)), 'python-shims');
 
 /** Read a Python shim file from the python-shims directory. */
 function readShim(filename: string): string {
-  return readFileSync(join(SHIM_DIR, filename), 'utf-8');
+  try {
+    return readFileSync(join(SHIM_DIR, filename), 'utf-8');
+  } catch {
+    throw new Error(
+      `Failed to read Python shim '${filename}' from ${SHIM_DIR}. ` +
+      `If running from a bundled binary, ensure the python-shims/ directory ` +
+      `is available next to the bundle.`
+    );
+  }
 }
 
 /**
@@ -37,8 +45,3 @@ export function getSslShimSource(): string {
 export function getSiteCustomizeSource(): string {
   return readShim('sitecustomize.py');
 }
-
-// Backward-compatible exports — read once at module load
-export const SOCKET_SHIM_SOURCE = readShim('socket_fetch.py');
-export const SSL_SHIM_SOURCE = readShim('ssl.py');
-export const SITE_CUSTOMIZE_SOURCE = readShim('sitecustomize.py');

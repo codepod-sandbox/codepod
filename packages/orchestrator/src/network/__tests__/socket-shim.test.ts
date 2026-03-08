@@ -1,6 +1,10 @@
 import { describe, it } from '@std/testing/bdd';
 import { expect } from '@std/expect';
-import { SOCKET_SHIM_SOURCE, SSL_SHIM_SOURCE, SITE_CUSTOMIZE_SOURCE } from '../socket-shim.js';
+import { getSocketShimSource, getSslShimSource, getSiteCustomizeSource } from '../socket-shim.js';
+
+const SOCKET_SHIM_SOURCE = getSocketShimSource();
+const SSL_SHIM_SOURCE = getSslShimSource();
+const SITE_CUSTOMIZE_SOURCE = getSiteCustomizeSource();
 
 describe('socket shim source', () => {
   it('exports a non-empty Python source string', () => {
