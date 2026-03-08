@@ -261,6 +261,16 @@ export class WasiHost {
       if (e instanceof WasiExitError) {
         return e.code;
       }
+      // WASM trap (RuntimeError: unreachable) from a Rust panic.
+      // If stderr mentions "Broken pipe", treat as SIGPIPE (exit 141 = 128+13)
+      // instead of crashing — matches POSIX behavior.
+      if (e instanceof WebAssembly.RuntimeError) {
+        const stderr = this.getStderr();
+        if (stderr.includes('Broken pipe')) {
+          this.exitCode = 141;
+          return 141;
+        }
+      }
       throw e;
     }
   }

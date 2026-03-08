@@ -2,6 +2,7 @@
 
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process;
 use std::time::SystemTime;
@@ -155,15 +156,20 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
     let cmd = output[0].as_str();
     let args = &output[1..];
 
+    let mut stdout = std::io::stdout();
     match cmd {
         "echo" => {
-            println!("{}", args.join(" "));
+            if writeln!(stdout, "{}", args.join(" ")).is_err() {
+                process::exit(0);
+            }
             *printed = true;
         }
         "cat" => {
             for arg in args {
                 if let Ok(contents) = fs::read_to_string(arg) {
-                    print!("{}", contents);
+                    if write!(stdout, "{}", contents).is_err() {
+                        process::exit(0);
+                    }
                 }
             }
             *printed = true;
@@ -212,7 +218,9 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
                     if flag_c {
                         parts.push(format!("{:>8}", bytes));
                     }
-                    println!("{} {}", parts.join(""), file);
+                    if writeln!(stdout, "{} {}", parts.join(""), file).is_err() {
+                        process::exit(0);
+                    }
                     total_lines += lines;
                     total_words += words;
                     total_bytes += bytes;
@@ -229,7 +237,7 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
                 if flag_c {
                     parts.push(format!("{:>8}", total_bytes));
                 }
-                println!("{} total", parts.join(""));
+                let _ = writeln!(stdout, "{} total", parts.join(""));
             }
             *printed = true;
         }
@@ -252,7 +260,9 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
                 if arg.starts_with('-') {
                     continue;
                 }
-                println!("{}", arg);
+                if writeln!(stdout, "{}", arg).is_err() {
+                    process::exit(0);
+                }
             }
             *printed = true;
         }
@@ -279,10 +289,13 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
                     if let Ok(contents) = fs::read_to_string(file) {
                         for line in contents.lines() {
                             if line.contains(pat) {
-                                if files.len() > 1 {
-                                    println!("{}:{}", file, line);
+                                let r = if files.len() > 1 {
+                                    writeln!(stdout, "{}:{}", file, line)
                                 } else {
-                                    println!("{}", line);
+                                    writeln!(stdout, "{}", line)
+                                };
+                                if r.is_err() {
+                                    process::exit(0);
                                 }
                             }
                         }
@@ -293,7 +306,7 @@ fn exec_command(tokens: &[String], paths: &[String], printed: &mut bool) -> bool
         }
         _ => {
             // Unknown command: print the expanded command line (best effort)
-            println!("{}", output.join(" "));
+            let _ = writeln!(stdout, "{}", output.join(" "));
             *printed = true;
         }
     }
@@ -402,12 +415,16 @@ fn eval_expr(expr: &Expr, path: &Path, printed: &mut bool) -> bool {
         }
         Expr::Not(e) => !eval_expr(e, path, printed),
         Expr::Print => {
-            println!("{}", path.display());
+            if writeln!(std::io::stdout(), "{}", path.display()).is_err() {
+                process::exit(0); // broken pipe — exit silently like POSIX
+            }
             *printed = true;
             true
         }
         Expr::Print0 => {
-            print!("{}\0", path.display());
+            if write!(std::io::stdout(), "{}\0", path.display()).is_err() {
+                process::exit(0);
+            }
             *printed = true;
             true
         }
@@ -781,8 +798,8 @@ fn walk(
                 batch_paths.push(dir.display().to_string());
             }
             // If there's no explicit action in the expression, default to -print
-            if !has_act && !printed {
-                println!("{}", dir.display());
+            if !has_act && !printed && writeln!(std::io::stdout(), "{}", dir.display()).is_err() {
+                process::exit(0);
             }
         }
     }
@@ -833,8 +850,11 @@ fn walk(
                         if collect_exec_batch(expr).is_some() {
                             batch_paths.push(child.display().to_string());
                         }
-                        if !has_act && !printed {
-                            println!("{}", child.display());
+                        if !has_act
+                            && !printed
+                            && writeln!(std::io::stdout(), "{}", child.display()).is_err()
+                        {
+                            process::exit(0);
                         }
                     }
                 }

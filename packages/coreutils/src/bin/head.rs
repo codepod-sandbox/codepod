@@ -199,6 +199,9 @@ fn run() -> i32 {
                 head_lines(BufReader::new(stdin.lock()), count, &mut stdout)
             };
             if let Err(e) = result {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    return 0;
+                }
                 eprintln!("head: standard input: {}", e);
                 exit_code = 1;
             }
@@ -213,6 +216,9 @@ fn run() -> i32 {
                         head_lines(BufReader::new(f), count, &mut stdout)
                     };
                     if let Err(e) = result {
+                        if e.kind() == io::ErrorKind::BrokenPipe {
+                            return 0;
+                        }
                         eprintln!("head: {}: {}", file, e);
                         exit_code = 1;
                     }

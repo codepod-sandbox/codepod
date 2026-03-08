@@ -1957,7 +1957,9 @@ mod tests {
         cmd: &str,
         args: &[&str],
     ) -> i32 {
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let a = make_args(args);
         match try_builtin(state, host, cmd, &a, "", None).expect("expected builtin") {
             BuiltinResult::Result(c) | BuiltinResult::Exit(c) | BuiltinResult::Return(c) => c,
@@ -1971,7 +1973,9 @@ mod tests {
         args: &[&str],
         stdin: &str,
     ) -> i32 {
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let a = make_args(args);
 
         // Write stdin data to a pipe and dup2 onto fd 0, matching
@@ -2025,7 +2029,9 @@ mod tests {
         stdin: &str,
     ) -> (i32, String, String) {
         use std::io::Write;
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let (out_r, out_w) = host.pipe().unwrap();
         let saved_stdout = state.stdout_fd;
@@ -2665,7 +2671,9 @@ mod tests {
                 RunResult::empty()
             }
         };
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let a = make_args(&["echo", "hello"]);
         let result = try_builtin(&mut state, &host, "eval", &a, "", Some(&run_fn)).unwrap();
         assert!(matches!(result, BuiltinResult::Result(0)));
@@ -2684,7 +2692,9 @@ mod tests {
                 RunResult::empty()
             }
         };
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let a = make_args(&["/tmp/script.sh"]);
         let result = try_builtin(&mut state, &host, "source", &a, "", Some(&run_fn)).unwrap();
         assert!(matches!(result, BuiltinResult::Result(0)));
@@ -2700,7 +2710,9 @@ mod tests {
             RunResult::empty()
         };
         let a = make_args(&["/tmp/script.sh"]);
-        let _lock = crate::test_support::mock::FD_MUTEX.lock().unwrap();
+        let _lock = crate::test_support::mock::FD_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let result = try_builtin(&mut state, &host, "source", &a, "", Some(&run_fn)).unwrap();
         assert!(matches!(result, BuiltinResult::Result(0)));
     }

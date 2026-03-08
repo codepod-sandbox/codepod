@@ -4,13 +4,59 @@ use std::env;
 use std::io::{self, Read, Write};
 use std::process;
 
-/// Expand a character set specification, handling ranges like a-z and escape sequences.
+/// Expand a POSIX character class like [:lower:] into its characters.
+fn expand_char_class(name: &str) -> Option<Vec<char>> {
+    match name {
+        "lower" => Some(('a'..='z').collect()),
+        "upper" => Some(('A'..='Z').collect()),
+        "digit" => Some(('0'..='9').collect()),
+        "alpha" => Some(('a'..='z').chain('A'..='Z').collect()),
+        "alnum" => Some(('0'..='9').chain('a'..='z').chain('A'..='Z').collect()),
+        "space" => Some(vec![' ', '\t', '\n', '\r', '\x0B', '\x0C']),
+        "blank" => Some(vec![' ', '\t']),
+        "punct" => Some(
+            (0x21u8..=0x2Fu8)
+                .chain(0x3Au8..=0x40u8)
+                .chain(0x5Bu8..=0x60u8)
+                .chain(0x7Bu8..=0x7Eu8)
+                .map(|b| b as char)
+                .collect(),
+        ),
+        "print" => Some((0x20u8..=0x7Eu8).map(|b| b as char).collect()),
+        "graph" => Some((0x21u8..=0x7Eu8).map(|b| b as char).collect()),
+        "cntrl" => Some(
+            (0x00u8..=0x1Fu8)
+                .chain(std::iter::once(0x7Fu8))
+                .map(|b| b as char)
+                .collect(),
+        ),
+        "xdigit" => Some(('0'..='9').chain('a'..='f').chain('A'..='F').collect()),
+        _ => None,
+    }
+}
+
+/// Expand a character set specification, handling ranges like a-z,
+/// POSIX character classes like [:lower:], and escape sequences.
 fn expand_set(spec: &str) -> Vec<char> {
     let chars: Vec<char> = spec.chars().collect();
     let mut result = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
+        // Handle POSIX character classes like [:lower:]
+        if chars[i] == '[' && i + 1 < chars.len() && chars[i + 1] == ':' {
+            if let Some(end) = chars[i + 2..].iter().position(|&c| c == ':') {
+                let class_end = i + 2 + end;
+                if class_end + 1 < chars.len() && chars[class_end + 1] == ']' {
+                    let name: String = chars[i + 2..class_end].iter().collect();
+                    if let Some(expanded) = expand_char_class(&name) {
+                        result.extend(expanded);
+                        i = class_end + 2;
+                        continue;
+                    }
+                }
+            }
+        }
         // Handle backslash escape sequences
         if chars[i] == '\\' && i + 1 < chars.len() {
             let escaped = match chars[i + 1] {

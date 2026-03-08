@@ -22,20 +22,47 @@ fn main() {
     let mut i = 1;
 
     while i < args.len() {
-        if args[i] == "-d" {
+        if args[i] == "--" {
+            file_args.extend_from_slice(&args[i + 1..]);
+            break;
+        } else if args[i] == "-d" {
             i += 1;
             if i >= args.len() {
                 eprintln!("paste: option requires an argument -- 'd'");
                 process::exit(1);
             }
             delimiter = args[i].clone();
-        } else if args[i].starts_with("-d") {
-            delimiter = args[i][2..].to_string();
-        } else if args[i] == "-s" {
-            serial = true;
-        } else if args[i] == "--" {
-            file_args.extend_from_slice(&args[i + 1..]);
-            break;
+        } else if args[i].starts_with("-") && args[i].len() > 1 && !args[i].starts_with("--") {
+            // Handle combined flags like -sd, -s, -d,
+            let flag_str = &args[i][1..];
+            let flag_chars: Vec<char> = flag_str.chars().collect();
+            let mut j = 0;
+            while j < flag_chars.len() {
+                match flag_chars[j] {
+                    's' => serial = true,
+                    'd' => {
+                        // Rest of this arg (after 'd') is the delimiter
+                        let rest: String = flag_chars[j + 1..].iter().collect();
+                        if rest.is_empty() {
+                            i += 1;
+                            if i >= args.len() {
+                                eprintln!("paste: option requires an argument -- 'd'");
+                                process::exit(1);
+                            }
+                            delimiter = args[i].clone();
+                        } else {
+                            delimiter = rest;
+                        }
+                        j = flag_chars.len(); // consumed the rest
+                        continue;
+                    }
+                    c => {
+                        eprintln!("paste: invalid option -- '{}'", c);
+                        process::exit(1);
+                    }
+                }
+                j += 1;
+            }
         } else {
             file_args.push(args[i].clone());
         }

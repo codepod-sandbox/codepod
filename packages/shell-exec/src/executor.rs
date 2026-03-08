@@ -3457,6 +3457,48 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_virtual_cmd_output_flows_through_pipe() {
+        // `curl http://example.com | cat` — curl is a virtual command that
+        // writes via shell_print! → fd 1.  With dup2(stage_stdout_fd, 1),
+        // curl's output flows through the pipe to cat's stdin.
+        use crate::host::FetchResult;
+
+        let host = MockHost::new()
+            .with_fetch_result(
+                "https://example.com",
+                FetchResult {
+                    ok: true,
+                    status: 200,
+                    headers: Default::default(),
+                    body: "hello from curl".to_string(),
+                    error: None,
+                },
+            )
+            .with_spawn_handler(|program, _args, stdin| match program {
+                "cat" => MockSpawnOutput {
+                    exit_code: 0,
+                    stdout: stdin.to_string(),
+                    stderr: String::new(),
+                },
+                _ => MockSpawnOutput {
+                    exit_code: 127,
+                    stdout: String::new(),
+                    stderr: format!("{program}: command not found"),
+                },
+            });
+        let mut state = ShellState::new_default();
+        let (exit_code, stdout) = exec_capture(&mut state, &host, "curl https://example.com | cat");
+        assert_eq!(exit_code, 0);
+        assert_eq!(stdout, "hello from curl");
+
+        // curl runs inline (virtual command), cat is spawned
+        let calls = host.get_spawn_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "cat");
+        assert_eq!(calls[0].stdin, "hello from curl");
+    }
+
+    #[test]
     fn pipeline_single_command_delegates() {
         // A Pipeline with a single command should behave identically to
         // executing that command directly.

@@ -26,13 +26,29 @@ pub fn try_virtual_command(
     args: &[String],
     stdin: &str,
 ) -> Option<RunResult> {
-    match cmd {
+    // Virtual commands write via shell_print! → fd 1.  When stdout_fd
+    // differs from 1 (pipeline pipe, redirect, command substitution),
+    // dup2 stdout_fd onto fd 1 so the output reaches the right target.
+    let do_dup2 = state.stdout_fd != 1;
+    let saved_fd1 = if do_dup2 { host.dup(1).ok() } else { None };
+    if do_dup2 {
+        let _ = host.dup2(state.stdout_fd, 1);
+    }
+
+    let result = match cmd {
         "curl" => Some(cmd_curl(state, host, args, stdin)),
         "wget" => Some(cmd_wget(state, host, args)),
         "pkg" => Some(cmd_pkg(state, host, args)),
         "pip" => Some(cmd_pip(state, host, args)),
         _ => None,
+    };
+
+    if let Some(fd) = saved_fd1 {
+        let _ = host.dup2(fd, 1);
+        let _ = host.close_fd(fd);
     }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
