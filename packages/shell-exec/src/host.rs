@@ -201,6 +201,20 @@ pub trait HostInterface {
 
     /// Yield to the scheduler (cooperative scheduling: sleep(0)).
     fn yield_now(&self) -> Result<(), HostError>;
+
+    // ----- Socket operations (full mode) -----
+
+    /// Open a TCP or TLS socket to host:port. Returns a socket_id.
+    fn socket_connect(&self, host: &str, port: u16, tls: bool) -> Result<u32, HostError>;
+
+    /// Send data on an open socket. Returns bytes sent.
+    fn socket_send(&self, socket_id: u32, data: &[u8]) -> Result<usize, HostError>;
+
+    /// Receive data from an open socket. Returns received bytes (empty = EOF).
+    fn socket_recv(&self, socket_id: u32, max_bytes: usize) -> Result<Vec<u8>, HostError>;
+
+    /// Close an open socket.
+    fn socket_close(&self, socket_id: u32) -> Result<(), HostError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +365,21 @@ extern "C" {
     /// Yield to the JS microtask queue (cooperative scheduling: sleep(0)).
     /// JSPI-suspending — allows other WASM stacks to run.
     fn host_yield();
+
+    // ----- Socket syscalls (full mode) -----
+
+    /// Open a TCP/TLS socket. JSON request/response via output buffer.
+    fn host_socket_connect(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32)
+        -> i32;
+
+    /// Send data on a socket. JSON request/response via output buffer.
+    fn host_socket_send(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Receive data from a socket. JSON request/response via output buffer.
+    fn host_socket_recv(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    /// Close a socket. JSON request only, no output buffer needed.
+    fn host_socket_close(req_ptr: *const u8, req_len: u32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -756,6 +785,70 @@ impl HostInterface for WasmHost {
 
     fn yield_now(&self) -> Result<(), HostError> {
         unsafe { host_yield() };
+        Ok(())
+    }
+
+    // ----- Socket operations (full mode) -----
+
+    fn socket_connect(&self, host: &str, port: u16, tls: bool) -> Result<u32, HostError> {
+        let req = serde_json::json!({ "host": host, "port": port, "tls": tls });
+        let req_bytes = req.to_string();
+        let output = call_with_outbuf("socket_connect", |out_ptr, out_cap| unsafe {
+            host_socket_connect(req_bytes.as_ptr(), req_bytes.len() as u32, out_ptr, out_cap)
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|e| HostError::IoError(format!("socket_connect: {e}")))?;
+        if parsed["ok"].as_bool() != Some(true) {
+            let err = parsed["error"].as_str().unwrap_or("unknown error");
+            return Err(HostError::IoError(format!("socket_connect: {err}")));
+        }
+        Ok(parsed["socket_id"].as_u64().unwrap_or(0) as u32)
+    }
+
+    fn socket_send(&self, socket_id: u32, data: &[u8]) -> Result<usize, HostError> {
+        use base64::Engine;
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        let req = serde_json::json!({ "socket_id": socket_id, "data_b64": data_b64 });
+        let req_bytes = req.to_string();
+        let output = call_with_outbuf("socket_send", |out_ptr, out_cap| unsafe {
+            host_socket_send(req_bytes.as_ptr(), req_bytes.len() as u32, out_ptr, out_cap)
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|e| HostError::IoError(format!("socket_send: {e}")))?;
+        if parsed["ok"].as_bool() != Some(true) {
+            let err = parsed["error"].as_str().unwrap_or("unknown error");
+            return Err(HostError::IoError(format!("socket_send: {err}")));
+        }
+        Ok(parsed["bytes_sent"].as_u64().unwrap_or(0) as usize)
+    }
+
+    fn socket_recv(&self, socket_id: u32, max_bytes: usize) -> Result<Vec<u8>, HostError> {
+        use base64::Engine;
+        let req = serde_json::json!({ "socket_id": socket_id, "max_bytes": max_bytes });
+        let req_bytes = req.to_string();
+        let output = call_with_outbuf("socket_recv", |out_ptr, out_cap| unsafe {
+            host_socket_recv(req_bytes.as_ptr(), req_bytes.len() as u32, out_ptr, out_cap)
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|e| HostError::IoError(format!("socket_recv: {e}")))?;
+        if parsed["ok"].as_bool() != Some(true) {
+            let err = parsed["error"].as_str().unwrap_or("unknown error");
+            return Err(HostError::IoError(format!("socket_recv: {err}")));
+        }
+        let data_b64 = parsed["data_b64"].as_str().unwrap_or("");
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| HostError::IoError(format!("socket_recv: base64 decode: {e}")))?;
+        Ok(data)
+    }
+
+    fn socket_close(&self, socket_id: u32) -> Result<(), HostError> {
+        let req = serde_json::json!({ "socket_id": socket_id });
+        let req_bytes = req.to_string();
+        let rc = unsafe { host_socket_close(req_bytes.as_ptr(), req_bytes.len() as u32) };
+        if rc < 0 {
+            return Err(HostError::IoError(format!("socket_close: error {rc}")));
+        }
         Ok(())
     }
 }

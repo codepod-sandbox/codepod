@@ -164,10 +164,10 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       await Promise.resolve();
     },
 
-    // ── Network / extensions (migrated) ──
+    // ── Network ──
 
     // host_network_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32
-    // Synchronous HTTP fetch via NetworkBridge.
+    // Synchronous HTTP fetch via NetworkBridge. Works in both restricted and full modes.
     host_network_fetch(reqPtr: number, reqLen: number, outPtr: number, outCap: number): number {
       const reqJson = readString(memory, reqPtr, reqLen);
 
@@ -200,6 +200,83 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
         return writeJson(memory, outPtr, outCap, { ok: false, error: msg });
       }
     },
+
+    // ── Sockets (full mode only) ──
+
+    // host_socket_connect(req_ptr, req_len, out_ptr, out_cap) -> i32
+    // Opens a TCP or TLS socket to the given host:port.
+    // Request JSON: { host, port, tls }
+    // Response JSON: { ok, socket_id } or { ok: false, error }
+    host_socket_connect(reqPtr: number, reqLen: number, outPtr: number, outCap: number): number {
+      if (!opts.networkBridge) {
+        return writeJson(memory, outPtr, outCap, { ok: false, error: 'networking not configured' });
+      }
+      try {
+        const req = JSON.parse(readString(memory, reqPtr, reqLen));
+        const result = opts.networkBridge.requestSync({
+          op: 'connect', host: req.host, port: req.port, tls: req.tls ?? false,
+        });
+        return writeJson(memory, outPtr, outCap, result);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return writeJson(memory, outPtr, outCap, { ok: false, error: msg });
+      }
+    },
+
+    // host_socket_send(req_ptr, req_len, out_ptr, out_cap) -> i32
+    // Sends data on an open socket.
+    // Request JSON: { socket_id, data_b64 }
+    // Response JSON: { ok, bytes_sent } or { ok: false, error }
+    host_socket_send(reqPtr: number, reqLen: number, outPtr: number, outCap: number): number {
+      if (!opts.networkBridge) {
+        return writeJson(memory, outPtr, outCap, { ok: false, error: 'networking not configured' });
+      }
+      try {
+        const req = JSON.parse(readString(memory, reqPtr, reqLen));
+        const result = opts.networkBridge.requestSync({
+          op: 'send', socket_id: req.socket_id, data_b64: req.data_b64,
+        });
+        return writeJson(memory, outPtr, outCap, result);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return writeJson(memory, outPtr, outCap, { ok: false, error: msg });
+      }
+    },
+
+    // host_socket_recv(req_ptr, req_len, out_ptr, out_cap) -> i32
+    // Receives data from an open socket.
+    // Request JSON: { socket_id, max_bytes }
+    // Response JSON: { ok, data_b64 } or { ok: false, error }
+    host_socket_recv(reqPtr: number, reqLen: number, outPtr: number, outCap: number): number {
+      if (!opts.networkBridge) {
+        return writeJson(memory, outPtr, outCap, { ok: false, error: 'networking not configured' });
+      }
+      try {
+        const req = JSON.parse(readString(memory, reqPtr, reqLen));
+        const result = opts.networkBridge.requestSync({
+          op: 'recv', socket_id: req.socket_id, max_bytes: req.max_bytes ?? 65536,
+        });
+        return writeJson(memory, outPtr, outCap, result);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return writeJson(memory, outPtr, outCap, { ok: false, error: msg });
+      }
+    },
+
+    // host_socket_close(req_ptr, req_len) -> i32
+    // Closes an open socket.
+    // Request JSON: { socket_id }
+    // Returns 0 on success, -1 on error.
+    host_socket_close(reqPtr: number, reqLen: number): number {
+      if (!opts.networkBridge) return -1;
+      try {
+        const req = JSON.parse(readString(memory, reqPtr, reqLen));
+        opts.networkBridge.requestSync({ op: 'close', socket_id: req.socket_id });
+        return 0;
+      } catch { return -1; }
+    },
+
+    // ── Extensions ──
 
     // host_extension_invoke(req_ptr, req_len, out_ptr, out_cap) -> i32
     // Invokes a host extension. Supports both legacy extensionHandler and

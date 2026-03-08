@@ -472,5 +472,21 @@ pub mod mock {
         fn yield_now(&self) -> Result<(), HostError> {
             Ok(())
         }
+
+        fn socket_connect(&self, _host: &str, _port: u16, _tls: bool) -> Result<u32, HostError> {
+            Err(HostError::IoError("sockets not available in test".into()))
+        }
+
+        fn socket_send(&self, _socket_id: u32, _data: &[u8]) -> Result<usize, HostError> {
+            Err(HostError::IoError("sockets not available in test".into()))
+        }
+
+        fn socket_recv(&self, _socket_id: u32, _max_bytes: usize) -> Result<Vec<u8>, HostError> {
+            Err(HostError::IoError("sockets not available in test".into()))
+        }
+
+        fn socket_close(&self, _socket_id: u32) -> Result<(), HostError> {
+            Err(HostError::IoError("sockets not available in test".into()))
+        }
     }
 }
