@@ -100,7 +100,7 @@ export class Sandbox {
   private bridge: NetworkBridge | null = null;
   private networkPolicy: NetworkPolicy | undefined;
   private security: SecurityOptions | undefined;
-  private sessionId: string;
+  readonly sessionId: string;
   private auditHandler: AuditEventHandler | undefined;
   private workerExecutor: WorkerExecutor | null = null;
   private persistenceManager: PersistenceManager | null = null;

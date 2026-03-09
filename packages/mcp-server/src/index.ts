@@ -1,13 +1,20 @@
 /**
- * MCP server for codepod — exposes a WASM sandbox via the Model Context Protocol.
+ * MCP server for codepod — exposes WASM sandboxes via the Model Context Protocol.
  *
- * Tools:
+ * Lifecycle tools:
+ *   create_sandbox  — create a new isolated sandbox, returns its ID
+ *   list_sandboxes  — list all active sandboxes
+ *   destroy_sandbox — tear down a sandbox and free resources
+ *   export_state    — serialize sandbox state to base64 for persistent storage
+ *   import_state    — restore a sandbox from a previously exported state blob
+ *
+ * Per-sandbox tools (require sandbox_id):
  *   run_command    — execute shell commands (full POSIX shell + coreutils)
  *   read_file      — read a file from the sandbox VFS
  *   write_file     — write a file to the sandbox VFS
  *   list_directory — list directory contents with type/size
- *   snapshot       — take a CoW snapshot of the sandbox filesystem
- *   restore        — restore to a previous snapshot
+ *   snapshot       — take a CoW snapshot (in-memory, fast)
+ *   restore        — restore to a previous in-memory snapshot
  *
  * All debug/error output goes to stderr (stdout is reserved for MCP protocol).
  */
@@ -38,15 +45,27 @@ const config = loadConfig(process.argv.slice(2), {
     ?? resolve(__dirname, '../../orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm'),
 });
 
-async function main(): Promise<void> {
-  log('Starting codepod MCP server...');
-  log(`  wasmDir:    ${config.wasmDir}`);
-  log(`  shellWasm:  ${config.shellWasm}`);
-  log(`  timeoutMs:  ${config.timeoutMs}`);
-  log(`  fsLimit:    ${config.fsLimitBytes}`);
-  log(`  mounts:     ${config.mounts.length}`);
+// --- Sandbox registry ---
+interface SandboxEntry {
+  sandbox: Sandbox;
+  createdAt: string;
+  label?: string;
+}
 
-  // --- Build network policy (only if allow/block are non-empty) ---
+const sandboxes = new Map<string, SandboxEntry>();
+const MAX_SANDBOXES = 64;
+
+function getSandbox(id: string): Sandbox {
+  const entry = sandboxes.get(id);
+  if (!entry) throw new Error(`Unknown sandbox_id: ${id}`);
+  return entry.sandbox;
+}
+
+async function createSandboxInstance(label?: string): Promise<{ id: string; sandbox: Sandbox }> {
+  if (sandboxes.size >= MAX_SANDBOXES) {
+    throw new Error(`Maximum of ${MAX_SANDBOXES} concurrent sandboxes reached`);
+  }
+
   const hasNetwork = config.network.allow.length > 0 || config.network.block.length > 0;
   const network: NetworkPolicy | undefined = hasNetwork
     ? {
@@ -55,13 +74,6 @@ async function main(): Promise<void> {
       }
     : undefined;
 
-  if (network) {
-    log(`  network:    allow=${config.network.allow.join(',')} block=${config.network.block.join(',')}`);
-  } else {
-    log('  network:    disabled');
-  }
-
-  // --- Create sandbox ---
   const sandbox = await Sandbox.create({
     wasmDir: config.wasmDir,
     adapter: new NodeAdapter(),
@@ -71,109 +83,219 @@ async function main(): Promise<void> {
     network,
     security: {
       limits: {
-        stdoutBytes: 1 * 1024 * 1024,    // 1MB stdout cap
-        stderrBytes: 1 * 1024 * 1024,    // 1MB stderr cap
-        commandBytes: 65536,              // 64KB command size
+        stdoutBytes: 1 * 1024 * 1024,
+        stderrBytes: 1 * 1024 * 1024,
+        commandBytes: 65536,
       },
     },
   });
 
-  // --- Mount host directories ---
+  // Mount host directories
   for (const mount of config.mounts) {
     const provider = new HostFsProvider(mount.hostPath, { writable: mount.writable });
     sandbox.mount(mount.sandboxPath, provider);
-    log(`  mounted:    ${mount.hostPath} → ${mount.sandboxPath} (${mount.writable ? 'rw' : 'ro'})`);
   }
 
-  // --- Create MCP server ---
+  const id = sandbox.sessionId;
+  sandboxes.set(id, {
+    sandbox,
+    createdAt: new Date().toISOString(),
+    label,
+  });
+  log(`Sandbox created: ${id}${label ? ` (${label})` : ''}`);
+  return { id, sandbox };
+}
+
+// --- MCP text response helpers ---
+function textResult(text: string) {
+  return { content: [{ type: 'text' as const, text }] };
+}
+function jsonResult(data: unknown) {
+  return textResult(JSON.stringify(data));
+}
+function errorResult(msg: string) {
+  return { isError: true as const, content: [{ type: 'text' as const, text: msg }] };
+}
+
+async function main(): Promise<void> {
+  log('Starting codepod MCP server...');
+  log(`  wasmDir:    ${config.wasmDir}`);
+  log(`  shellWasm:  ${config.shellWasm}`);
+  log(`  timeoutMs:  ${config.timeoutMs}`);
+  log(`  fsLimit:    ${config.fsLimitBytes}`);
+  log(`  mounts:     ${config.mounts.length}`);
+
   const server = new McpServer({
     name: 'codepod',
-    version: '0.0.1',
+    version: '0.1.0',
   });
 
-  // --- Tool: run_command ---
-  server.tool(
-    'run_command',
-    'Run a shell command in the WASM sandbox. Full POSIX shell with pipes, redirects, variables, loops, functions. All coreutils available (ls, grep, sed, awk, jq, find, python3, etc). State persists between calls.',
-    { command: z.string().describe('The shell command to execute') },
-    async ({ command }) => {
-      const result = await sandbox.run(command);
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            exit_code: result.exitCode,
-            stdout: result.stdout,
-            stderr: result.stderr,
-          }),
-        }],
-      };
-    },
-  );
+  // ── Lifecycle tools ─────────────────────────────────────────────
 
-  // --- Tool: read_file ---
   server.tool(
-    'read_file',
-    'Read a file from the sandbox virtual filesystem. For binary files or large reads, prefer run_command with cat/head/xxd.',
-    { path: z.string().describe('Absolute path of the file to read') },
-    async ({ path }) => {
+    'create_sandbox',
+    'Create a new isolated WASM sandbox. Returns the sandbox_id (UUID) to use with all other tools. Each sandbox has its own filesystem, env vars, shell state, and Python runtime.',
+    {
+      label: z.string().optional().describe('Optional human-readable label for this sandbox'),
+    },
+    async ({ label }) => {
       try {
-        const data = sandbox.readFile(path);
-        const text = new TextDecoder().decode(data);
-        return {
-          content: [{ type: 'text' as const, text }],
-        };
+        const { id } = await createSandboxInstance(label);
+        return jsonResult({ sandbox_id: id, label: label ?? null });
       } catch (err) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: `Error reading file: ${(err as Error).message}`,
-          }],
-        };
+        return errorResult(`Error creating sandbox: ${(err as Error).message}`);
       }
     },
   );
 
-  // --- Tool: write_file ---
+  server.tool(
+    'list_sandboxes',
+    'List all active sandboxes with their IDs, labels, and creation times.',
+    {},
+    async () => {
+      const list = Array.from(sandboxes.entries()).map(([id, entry]) => ({
+        sandbox_id: id,
+        label: entry.label ?? null,
+        created_at: entry.createdAt,
+      }));
+      return jsonResult(list);
+    },
+  );
+
+  server.tool(
+    'destroy_sandbox',
+    'Destroy a sandbox and free all its resources. The sandbox_id becomes invalid after this call.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox to destroy'),
+    },
+    async ({ sandbox_id }) => {
+      const entry = sandboxes.get(sandbox_id);
+      if (!entry) return errorResult(`Unknown sandbox_id: ${sandbox_id}`);
+      try {
+        entry.sandbox.destroy();
+      } catch {
+        // already destroyed or error during cleanup — proceed
+      }
+      sandboxes.delete(sandbox_id);
+      log(`Sandbox destroyed: ${sandbox_id}`);
+      return textResult(`Sandbox ${sandbox_id} destroyed`);
+    },
+  );
+
+  server.tool(
+    'export_state',
+    'Export the full state of a sandbox (filesystem + env vars) as a base64 blob. Use this to persist sandbox state to a database or file. The sandbox remains active after export.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox to export'),
+    },
+    async ({ sandbox_id }) => {
+      try {
+        const sandbox = getSandbox(sandbox_id);
+        const blob = sandbox.exportState();
+        const b64 = Buffer.from(blob).toString('base64');
+        return jsonResult({
+          sandbox_id,
+          size_bytes: blob.byteLength,
+          data: b64,
+        });
+      } catch (err) {
+        return errorResult(`Error exporting state: ${(err as Error).message}`);
+      }
+    },
+  );
+
+  server.tool(
+    'import_state',
+    'Create a new sandbox and restore it from a previously exported state blob. Returns the new sandbox_id.',
+    {
+      data: z.string().describe('Base64-encoded state blob from export_state'),
+      label: z.string().optional().describe('Optional label for the restored sandbox'),
+    },
+    async ({ data, label }) => {
+      try {
+        const { id, sandbox } = await createSandboxInstance(label);
+        const blob = new Uint8Array(Buffer.from(data, 'base64'));
+        sandbox.importState(blob);
+        log(`State imported into sandbox: ${id}`);
+        return jsonResult({ sandbox_id: id, label: label ?? null });
+      } catch (err) {
+        return errorResult(`Error importing state: ${(err as Error).message}`);
+      }
+    },
+  );
+
+  // ── Per-sandbox tools ───────────────────────────────────────────
+
+  server.tool(
+    'run_command',
+    'Run a shell command in a sandbox. Full POSIX shell with pipes, redirects, variables, loops, functions. All coreutils available (ls, grep, sed, awk, jq, find, python3, etc). State persists between calls.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox to run in'),
+      command: z.string().describe('The shell command to execute'),
+    },
+    async ({ sandbox_id, command }) => {
+      try {
+        const sandbox = getSandbox(sandbox_id);
+        const result = await sandbox.run(command);
+        return jsonResult({
+          exit_code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
+      } catch (err) {
+        return errorResult(`Error running command: ${(err as Error).message}`);
+      }
+    },
+  );
+
+  server.tool(
+    'read_file',
+    'Read a file from a sandbox virtual filesystem.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox'),
+      path: z.string().describe('Absolute path of the file to read'),
+    },
+    async ({ sandbox_id, path }) => {
+      try {
+        const sandbox = getSandbox(sandbox_id);
+        const data = sandbox.readFile(path);
+        return textResult(new TextDecoder().decode(data));
+      } catch (err) {
+        return errorResult(`Error reading file: ${(err as Error).message}`);
+      }
+    },
+  );
+
   server.tool(
     'write_file',
-    'Write a file to the sandbox virtual filesystem. For appending or complex writes, prefer run_command with shell redirects.',
+    'Write a file to a sandbox virtual filesystem.',
     {
+      sandbox_id: z.string().describe('ID of the sandbox'),
       path: z.string().describe('Absolute path of the file to write'),
       contents: z.string().describe('Text contents to write'),
     },
-    async ({ path, contents }) => {
+    async ({ sandbox_id, path, contents }) => {
       try {
+        const sandbox = getSandbox(sandbox_id);
         const data = new TextEncoder().encode(contents);
         sandbox.writeFile(path, data);
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Wrote ${data.byteLength} bytes to ${path}`,
-          }],
-        };
+        return textResult(`Wrote ${data.byteLength} bytes to ${path}`);
       } catch (err) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: `Error writing file: ${(err as Error).message}`,
-          }],
-        };
+        return errorResult(`Error writing file: ${(err as Error).message}`);
       }
     },
   );
 
-  // --- Tool: list_directory ---
   server.tool(
     'list_directory',
-    'List the contents of a directory in the sandbox filesystem',
+    'List the contents of a directory in a sandbox filesystem.',
     {
+      sandbox_id: z.string().describe('ID of the sandbox'),
       path: z.string().default('/home/user').describe('Absolute path of the directory to list'),
     },
-    async ({ path }) => {
+    async ({ sandbox_id, path }) => {
       try {
+        const sandbox = getSandbox(sandbox_id);
         const entries = sandbox.readDir(path);
         const enriched = entries.map((entry) => {
           let size = 0;
@@ -183,60 +305,48 @@ async function main(): Promise<void> {
             );
             size = st.size;
           } catch {
-            // stat may fail for special entries; default to 0
+            // stat may fail for special entries
           }
           return { name: entry.name, type: entry.type, size };
         });
-        return {
-          content: [{
-            type: 'text' as const,
-            text: JSON.stringify(enriched),
-          }],
-        };
+        return jsonResult(enriched);
       } catch (err) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: `Error listing directory: ${(err as Error).message}`,
-          }],
-        };
+        return errorResult(`Error listing directory: ${(err as Error).message}`);
       }
     },
   );
 
-  // --- Tool: snapshot ---
   server.tool(
     'snapshot',
-    'Take a copy-on-write snapshot of the sandbox filesystem. Returns a snapshot ID for later restore. Useful before destructive operations.',
-    {},
-    async () => {
-      const id = sandbox.snapshot();
-      return {
-        content: [{ type: 'text' as const, text: `Snapshot created: ${id}` }],
-      };
+    'Take an in-memory copy-on-write snapshot of a sandbox filesystem. Returns a snapshot ID for later restore. Fast and cheap — use before destructive operations.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox'),
+    },
+    async ({ sandbox_id }) => {
+      try {
+        const sandbox = getSandbox(sandbox_id);
+        const id = sandbox.snapshot();
+        return jsonResult({ sandbox_id, snapshot_id: id });
+      } catch (err) {
+        return errorResult(`Error creating snapshot: ${(err as Error).message}`);
+      }
     },
   );
 
-  // --- Tool: restore ---
   server.tool(
     'restore',
-    'Restore the sandbox filesystem to a previously taken snapshot. All changes since the snapshot are discarded.',
-    { id: z.string().describe('Snapshot ID returned by the snapshot tool') },
-    async ({ id }) => {
+    'Restore a sandbox filesystem to a previous in-memory snapshot. All changes since the snapshot are discarded.',
+    {
+      sandbox_id: z.string().describe('ID of the sandbox'),
+      snapshot_id: z.string().describe('Snapshot ID returned by the snapshot tool'),
+    },
+    async ({ sandbox_id, snapshot_id }) => {
       try {
-        sandbox.restore(id);
-        return {
-          content: [{ type: 'text' as const, text: `Restored to snapshot ${id}` }],
-        };
+        const sandbox = getSandbox(sandbox_id);
+        sandbox.restore(snapshot_id);
+        return textResult(`Restored sandbox ${sandbox_id} to snapshot ${snapshot_id}`);
       } catch (err) {
-        return {
-          isError: true,
-          content: [{
-            type: 'text' as const,
-            text: `Error restoring snapshot: ${(err as Error).message}`,
-          }],
-        };
+        return errorResult(`Error restoring snapshot: ${(err as Error).message}`);
       }
     },
   );
