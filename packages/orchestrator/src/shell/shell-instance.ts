@@ -175,6 +175,10 @@ export class ShellInstance implements ShellLike {
       codepodImports.host_network_fetch = new WebAssembly.Suspending(
         kernelImports.host_network_fetch as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
+      // host_sleep: cooperative sleep
+      codepodImports.host_sleep = new WebAssembly.Suspending(
+        kernelImports.host_sleep as (ms: number) => Promise<void>,
+      ) as unknown as WebAssembly.ImportValue;
     }
 
     // WASI P1 stubs (minimal -- shell-exec doesn't use WASI for I/O)
@@ -710,7 +714,7 @@ function spawnAsyncProcess(
 
   const pid = kernel.allocPid();
   kernel.initProcess(pid);
-  kernel.registerPending(pid);
+  kernel.registerPending(pid, `${req.prog} ${req.args.join(' ')}`);
 
   // Check for host commands (TypeScript handlers) first
   const hostCmdEntry = mgr.getHostCommand(req.prog);
@@ -885,6 +889,10 @@ function spawnAsyncProcess(
       // Python uses host_extension_invoke for _codepod.extension_call()
       imports.codepod.host_extension_invoke = new WebAssembly.Suspending(
         childKernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
+      // host_sleep: cooperative sleep
+      imports.codepod.host_sleep = new WebAssembly.Suspending(
+        childKernelImports.host_sleep as (ms: number) => Promise<void>,
       ) as unknown as WebAssembly.ImportValue;
     }
 

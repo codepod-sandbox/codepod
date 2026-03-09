@@ -164,6 +164,27 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       await Promise.resolve();
     },
 
+    // host_waitpid_nohang(pid) -> i32
+    // Non-blocking: returns exit code if process exited, -1 if still running.
+    host_waitpid_nohang(pid: number): number {
+      if (!opts.kernel) return -1;
+      return opts.kernel.waitpidNohang(pid);
+    },
+
+    // host_list_processes(out_ptr, out_cap) -> i32
+    // Returns JSON array of all processes.
+    host_list_processes(outPtr: number, outCap: number): number {
+      if (!opts.kernel) return writeJson(memory, outPtr, outCap, []);
+      const procs = opts.kernel.listProcesses();
+      return writeJson(memory, outPtr, outCap, procs);
+    },
+
+    // host_sleep(ms) -> void
+    // Async — suspends WASM for ms milliseconds.
+    async host_sleep(ms: number): Promise<void> {
+      await new Promise<void>(resolve => setTimeout(resolve, ms));
+    },
+
     // ── Network ──
 
     // host_network_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32

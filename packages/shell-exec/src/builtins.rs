@@ -1261,7 +1261,7 @@ fn builtin_which(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
         } else {
             // Search PATH-like directories for executables
             let mut found = false;
-            for dir in &["/usr/bin", "/bin"] {
+            for dir in &["/bin", "/usr/bin"] {
                 let path = format!("{}/{}", dir, arg);
                 if let Ok(info) = host.stat(&path) {
                     if info.exists && info.is_file {
@@ -3003,6 +3003,17 @@ mod tests {
         let host = MockHost::new();
         let code = run_builtin(&mut state, &host, "which", &["nonexistent"]);
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn which_prefers_bin_over_usr_bin() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new()
+            .with_file("/bin/cat", b"")
+            .with_file("/usr/bin/cat", b"");
+        let (code, stdout, _) = run_capture(&mut state, &host, "which", &["cat"]);
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "/bin/cat\n");
     }
 
     // -- return tests -----------------------------------------------------
