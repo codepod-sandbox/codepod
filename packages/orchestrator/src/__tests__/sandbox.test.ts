@@ -111,6 +111,71 @@ describe('Sandbox', () => {
     expect(result.stdout.trim()).toBe('codepod');
   });
 
+  describe('aliases', () => {
+    it('alias expansion works', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      await sandbox.run('alias greet="echo hello"');
+      const r = await sandbox.run('greet world');
+      expect(r.stdout).toBe('hello world\n');
+    });
+
+    it('alias list and unalias', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      await sandbox.run('alias foo="echo bar"');
+      const r1 = await sandbox.run('alias');
+      expect(r1.stdout).toContain("alias foo='echo bar'");
+      await sandbox.run('unalias foo');
+      const r2 = await sandbox.run('alias');
+      expect(r2.stdout).not.toContain('foo');
+    });
+  });
+
+  describe('arrays', () => {
+    it('indexed array operations', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('arr=(one two three); echo ${arr[1]}');
+      expect(r.stdout).toBe('two\n');
+    });
+
+    it('array all elements', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('arr=(a b c); echo ${arr[@]}');
+      expect(r.stdout).toBe('a b c\n');
+    });
+
+    it('array length', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('arr=(a b c d); echo ${#arr[@]}');
+      expect(r.stdout).toBe('4\n');
+    });
+
+    it('array append', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('arr=(a b); arr+=(c d); echo ${arr[@]}');
+      expect(r.stdout).toBe('a b c d\n');
+    });
+
+    it('associative array', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('declare -A m; m[name]=alice; m[age]=30; echo ${m[name]} is ${m[age]}');
+      expect(r.stdout).toBe('alice is 30\n');
+    });
+  });
+
+  describe('process substitution', () => {
+    it('input process substitution <(cmd)', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('cat <(echo hello)');
+      expect(r.stdout).toBe('hello\n');
+    });
+
+    it('diff with two process substitutions', async () => {
+      sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
+      const r = await sandbox.run('diff <(printf "a\\nb\\n") <(printf "a\\nb\\n")');
+      expect(r.exitCode).toBe(0);
+    });
+  });
+
   describe('snapshot and restore', () => {
     it('snapshot captures VFS + env state', async () => {
       sandbox = await Sandbox.create({ wasmDir: WASM_DIR, adapter: new NodeAdapter() });
