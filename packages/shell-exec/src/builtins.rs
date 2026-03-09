@@ -10,7 +10,7 @@ use crate::arithmetic::eval_arithmetic;
 use crate::control::RunResult;
 use crate::host::HostInterface;
 use crate::state::{ShellFlag, ShellState};
-use crate::{shell_eprint, shell_print, shell_println};
+use crate::{shell_eprint, shell_eprintln, shell_print, shell_println};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -92,6 +92,10 @@ pub fn try_builtin(
         "pushd" => Some(builtin_pushd(state, host, args)),
         "popd" => Some(builtin_popd(state)),
         "dirs" => Some(builtin_dirs(state)),
+        "sleep" => Some(builtin_sleep(host, args)),
+        "wait" => Some(builtin_wait(state, host, args)),
+        "jobs" => Some(builtin_jobs(state, host)),
+        "ps" => Some(builtin_ps(host)),
         _ => None,
     };
 
@@ -145,6 +149,10 @@ pub fn is_builtin(cmd_name: &str) -> bool {
             | "pushd"
             | "popd"
             | "dirs"
+            | "sleep"
+            | "wait"
+            | "jobs"
+            | "ps"
     )
 }
 
@@ -1961,6 +1969,125 @@ fn builtin_readonly(state: &mut ShellState, args: &[String]) -> BuiltinResult {
     }
 
     BuiltinResult::Result(0)
+}
+
+// ---------------------------------------------------------------------------
+// Background-job builtins: sleep, wait, jobs, ps
+// ---------------------------------------------------------------------------
+
+fn builtin_sleep(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
+    if args.is_empty() {
+        shell_eprintln!("sleep: missing operand");
+        return BuiltinResult::Result(1);
+    }
+    let secs: f64 = args[0].parse().unwrap_or(0.0);
+    let ms = (secs * 1000.0) as u32;
+    if ms > 0 {
+        let _ = host.sleep(ms);
+    }
+    BuiltinResult::Result(0)
+}
+
+fn builtin_wait(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    args: &[String],
+) -> BuiltinResult {
+    if args.is_empty() {
+        // Wait for all background jobs
+        for job in &mut state.jobs {
+            if job.done.is_none() {
+                match host.waitpid(job.pid) {
+                    Ok(result) => {
+                        job.done = Some(result.exit_code);
+                    }
+                    Err(_) => {
+                        job.done = Some(-1);
+                    }
+                }
+            }
+        }
+        let last_code = state.jobs.last().and_then(|j| j.done).unwrap_or(0);
+        state.last_exit_code = last_code;
+    } else {
+        // Wait for specific PIDs
+        let mut last_code = 0;
+        for arg in args {
+            if let Ok(pid) = arg.parse::<i32>() {
+                if let Some(job) = state.jobs.iter_mut().find(|j| j.pid == pid) {
+                    if job.done.is_none() {
+                        match host.waitpid(pid) {
+                            Ok(result) => {
+                                job.done = Some(result.exit_code);
+                                last_code = result.exit_code;
+                            }
+                            Err(_) => {
+                                job.done = Some(-1);
+                                last_code = -1;
+                            }
+                        }
+                    } else {
+                        last_code = job.done.unwrap_or(0);
+                    }
+                } else {
+                    match host.waitpid(pid) {
+                        Ok(result) => {
+                            last_code = result.exit_code;
+                        }
+                        Err(_) => {
+                            last_code = 127;
+                        }
+                    }
+                }
+            }
+        }
+        state.last_exit_code = last_code;
+    }
+    BuiltinResult::Result(state.last_exit_code)
+}
+
+fn builtin_jobs(state: &mut ShellState, host: &dyn HostInterface) -> BuiltinResult {
+    // Reap finished jobs first
+    for job in &mut state.jobs {
+        if job.done.is_none() {
+            if let Ok(code) = host.waitpid_nohang(job.pid) {
+                if code >= 0 {
+                    job.done = Some(code);
+                }
+            }
+        }
+    }
+    for job in &state.jobs {
+        let status = match job.done {
+            Some(code) => format!("Done({})", code),
+            None => "Running".to_string(),
+        };
+        shell_println!("[{}] {} {}", job.id, status, job.command);
+    }
+    // Remove completed jobs after display
+    state.jobs.retain(|j| j.done.is_none());
+    BuiltinResult::Result(0)
+}
+
+fn builtin_ps(host: &dyn HostInterface) -> BuiltinResult {
+    match host.list_processes() {
+        Ok(json) => {
+            if let Ok(procs) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                shell_println!("{:<8} {:<10} {}", "PID", "STATE", "COMMAND");
+                for p in &procs {
+                    let pid = p["pid"].as_i64().unwrap_or(0);
+                    let st = p["state"].as_str().unwrap_or("unknown");
+                    let cmd = p["command"].as_str().unwrap_or("");
+                    shell_println!("{:<8} {:<10} {}", pid, st, cmd);
+                }
+            }
+            BuiltinResult::Result(0)
+        }
+        Err(e) => {
+            shell_eprintln!("ps: {}", e);
+            BuiltinResult::Result(1)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
