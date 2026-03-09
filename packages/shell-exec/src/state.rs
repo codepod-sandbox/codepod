@@ -12,6 +12,14 @@ pub enum ShellFlag {
     Pipefail,
 }
 
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub id: usize,
+    pub pid: i32,
+    pub command: String,
+    pub done: Option<i32>, // exit code once reaped, None if running
+}
+
 pub struct ShellState {
     pub env: HashMap<String, String>,
     pub arrays: HashMap<String, Vec<String>>,
@@ -45,6 +53,12 @@ pub struct ShellState {
     pub stdout_fd: i32,
     /// Current stdin fd for the executing context (default: 0).
     pub stdin_fd: i32,
+    /// Background job table.
+    pub jobs: Vec<Job>,
+    /// Next job ID to assign.
+    pub next_job_id: usize,
+    /// PID of most recently backgrounded process ($!).
+    pub last_bg_pid: i32,
 }
 
 impl ShellState {
@@ -80,6 +94,9 @@ impl ShellState {
             proc_sub_counter: 0,
             stdout_fd: 1,
             stdin_fd: 0,
+            jobs: Vec::new(),
+            next_job_id: 1,
+            last_bg_pid: 0,
         }
     }
 
