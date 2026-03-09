@@ -533,7 +533,12 @@ pub fn expand_word_part(state: &mut ShellState, part: &WordPart, exec: Option<Ex
         }
 
         WordPart::ProcessSub(_) => {
-            // Not yet implemented.
+            // Handled by resolve_process_subs before expansion.
+            String::new()
+        }
+
+        WordPart::OutputProcessSub(_) => {
+            // Handled by resolve_process_subs before expansion.
             String::new()
         }
 

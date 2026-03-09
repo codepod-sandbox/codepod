@@ -484,23 +484,36 @@ fn apply_output_redirects(
     Ok(())
 }
 
-/// Resolve process substitution `<(cmd)` parts in words.
+/// Result of resolving process substitutions in words.
+struct ProcessSubResult {
+    /// Words with process substitution parts replaced by temp file paths.
+    words: Vec<Word>,
+    /// Deferred output process substitutions: (temp_path, cmd_str).
+    /// After the main command runs, each temp file is read and fed as stdin to cmd_str.
+    deferred_output_subs: Vec<(String, String)>,
+}
+
+/// Resolve process substitution `<(cmd)` and `>(cmd)` parts in words.
 ///
 /// Each `ProcessSub(cmd_str)` is executed, its stdout is written to a unique
 /// temp file, and the part is replaced with a `Literal` containing the file path.
+///
+/// Each `OutputProcessSub(cmd_str)` creates a temp file path and defers execution:
+/// after the main command writes to the path, the content is fed as stdin to cmd_str.
 fn resolve_process_subs(
     state: &mut ShellState,
     host: &dyn HostInterface,
     words: &[Word],
     exec_fn: &dyn Fn(&mut ShellState, &str) -> String,
-) -> Vec<Word> {
-    words
+) -> ProcessSubResult {
+    let mut deferred_output_subs = Vec::new();
+    let resolved_words = words
         .iter()
         .map(|word| {
             let has_proc_sub = word
                 .parts
                 .iter()
-                .any(|p| matches!(p, WordPart::ProcessSub(_)));
+                .any(|p| matches!(p, WordPart::ProcessSub(_) | WordPart::OutputProcessSub(_)));
             if !has_proc_sub {
                 return word.clone();
             }
@@ -517,12 +530,42 @@ fn resolve_process_subs(
                         let _ = host.write_file(&path, &stdout, WriteMode::Truncate);
                         WordPart::Literal(path)
                     }
+                    WordPart::OutputProcessSub(cmd_str) => {
+                        let path = format!("/tmp/.proc_sub_{}", state.proc_sub_counter);
+                        state.proc_sub_counter += 1;
+                        deferred_output_subs.push((path.clone(), cmd_str.clone()));
+                        WordPart::Literal(path)
+                    }
                     other => other.clone(),
                 })
                 .collect();
             Word { parts: new_parts }
         })
-        .collect()
+        .collect();
+    ProcessSubResult {
+        words: resolved_words,
+        deferred_output_subs,
+    }
+}
+
+/// Run deferred output process substitutions.
+///
+/// For each `>(cmd)`, the main command has already written to the temp file.
+/// We read the file content, feed it as stdin to `cmd`, then remove the temp file.
+fn run_deferred_output_subs(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    deferred: &[(String, String)],
+) {
+    for (path, cmd_str) in deferred {
+        if let Ok(content) = host.read_file(path) {
+            state.pipeline_stdin = Some(content);
+            let inner_cmd = codepod_shell::parser::parse(cmd_str);
+            let _ = exec_command(state, host, &inner_cmd);
+            state.pipeline_stdin = None;
+        }
+        let _ = host.remove(path, false);
+    }
 }
 
 /// Execute a parsed `Command` AST node.
@@ -594,11 +637,14 @@ pub fn exec_command(
                 return Ok(ControlFlow::Normal(RunResult::empty()));
             }
 
-            // Resolve process substitutions <(cmd) before word expansion.
+            // Resolve process substitutions <(cmd) and >(cmd) before word expansion.
             // Each ProcessSub part is replaced with a Literal containing a
             // temp file path whose contents are the command's stdout.
-            let resolved_words = resolve_process_subs(state, host, words, &exec_fn);
-            let expanded = expand_words_with_splitting(state, &resolved_words, Some(&exec_fn));
+            // OutputProcessSub parts are replaced with a temp path; after the
+            // main command runs, the file content is fed as stdin to the sub cmd.
+            let proc_sub_result = resolve_process_subs(state, host, words, &exec_fn);
+            let expanded =
+                expand_words_with_splitting(state, &proc_sub_result.words, Some(&exec_fn));
 
             // Check for ${var:?msg} error during expansion
             if let Some(err_msg) = state.param_error.take() {
@@ -655,6 +701,7 @@ pub fn exec_command(
                 state.function_depth -= 1;
                 state.positional_args = saved_positionals;
 
+                run_deferred_output_subs(state, host, &proc_sub_result.deferred_output_subs);
                 return match result? {
                     ControlFlow::Return(code) => {
                         state.last_exit_code = code;
@@ -811,6 +858,7 @@ pub fn exec_command(
                     let _ = host.dup2(fd, 0);
                     let _ = host.close_fd(fd);
                 }
+                run_deferred_output_subs(state, host, &proc_sub_result.deferred_output_subs);
                 return Ok(ControlFlow::Normal(RunResult::exit(exit_code)));
             }
 
@@ -839,6 +887,7 @@ pub fn exec_command(
                 let mut stdout = String::new();
                 let mut stderr = String::new();
                 apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
+                run_deferred_output_subs(state, host, &proc_sub_result.deferred_output_subs);
                 return Ok(ControlFlow::Normal(RunResult::exit(result.exit_code)));
             }
 
@@ -861,6 +910,11 @@ pub fn exec_command(
                         let mut stderr = String::new();
                         apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
 
+                        run_deferred_output_subs(
+                            state,
+                            host,
+                            &proc_sub_result.deferred_output_subs,
+                        );
                         return Ok(ControlFlow::Normal(RunResult::exit(run.exit_code)));
                     }
                 };
@@ -964,6 +1018,7 @@ pub fn exec_command(
             };
             apply_output_redirects(state, host, redirects, &mut stdout, &mut stderr)?;
 
+            run_deferred_output_subs(state, host, &proc_sub_result.deferred_output_subs);
             Ok(ControlFlow::Normal(RunResult::exit(spawn_result.exit_code)))
         }
 
@@ -6203,6 +6258,52 @@ mod tests {
         let (code, stdout) = exec_capture(&mut state, &host, "a");
         assert_eq!(code, 0);
         assert_eq!(stdout, "chained\n");
+    }
+
+    #[test]
+    fn resolve_process_subs_handles_output_process_sub() {
+        use codepod_shell::ast::{Word, WordPart};
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        let words = vec![Word {
+            parts: vec![WordPart::OutputProcessSub("cat".into())],
+        }];
+        let exec_fn = |_state: &mut ShellState, _cmd_str: &str| -> String { String::new() };
+        let result = resolve_process_subs(&mut state, &host, &words, &exec_fn);
+        // Should have one deferred output sub
+        assert_eq!(result.deferred_output_subs.len(), 1);
+        assert_eq!(result.deferred_output_subs[0].1, "cat");
+        // The word should have been replaced with a Literal path
+        assert_eq!(result.words.len(), 1);
+        match &result.words[0].parts[0] {
+            WordPart::Literal(path) => {
+                assert!(path.starts_with("/tmp/.proc_sub_"));
+            }
+            other => panic!("Expected Literal, got {:?}", other),
+        }
+        // The deferred path should match the literal path
+        assert_eq!(
+            result.deferred_output_subs[0].0,
+            match &result.words[0].parts[0] {
+                WordPart::Literal(p) => p.clone(),
+                _ => unreachable!(),
+            }
+        );
+    }
+
+    #[test]
+    fn output_process_sub_end_to_end() {
+        // echo hello >(cat) — echo writes "hello /tmp/.proc_sub_N",
+        // then cat receives the file content as stdin.
+        let host = MockHost::new();
+        let mut state = ShellState::new_default();
+        // "echo hello >(cat)" — echo is a builtin, so it will print
+        // "hello /tmp/.proc_sub_0\n" and then cat should run with
+        // the file content as stdin.
+        let (code, stdout) = exec_capture(&mut state, &host, "echo hello >(cat)");
+        assert_eq!(code, 0);
+        // echo should output "hello /tmp/.proc_sub_0"
+        assert!(stdout.contains("hello /tmp/.proc_sub_"));
     }
 
     #[test]
