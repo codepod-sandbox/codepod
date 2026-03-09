@@ -21,6 +21,7 @@ export interface ProcessEntry {
   state: 'running' | 'exited';
   wasiHost: WasiHost | null;
   waiters: ((exitCode: number) => void)[];
+  command?: string;
 }
 
 export class ProcessKernel {
@@ -84,10 +85,11 @@ export class ProcessKernel {
   }
 
   /** Pre-register a process entry so waitpid can find it before async instantiation completes. */
-  registerPending(pid: number): void {
+  registerPending(pid: number, command?: string): void {
     if (!this.processTable.has(pid)) {
       this.processTable.set(pid, {
         pid, promise: null, exitCode: -1, state: 'running', wasiHost: null, waiters: [],
+        command,
       });
     }
   }
@@ -148,6 +150,26 @@ export class ProcessKernel {
     if (!entry) return -1;
     if (entry.state === 'exited') return entry.exitCode;
     return new Promise<number>((resolve) => { entry.waiters.push(resolve); });
+  }
+
+  waitpidNohang(pid: number): number {
+    const entry = this.processTable.get(pid);
+    if (!entry) return -1;
+    if (entry.state === 'exited') return entry.exitCode;
+    return -1;
+  }
+
+  listProcesses(): { pid: number; state: string; exit_code: number; command: string }[] {
+    const result: { pid: number; state: string; exit_code: number; command: string }[] = [];
+    for (const [pid, entry] of this.processTable) {
+      result.push({
+        pid,
+        state: entry.state,
+        exit_code: entry.exitCode,
+        command: entry.command ?? '',
+      });
+    }
+    return result;
   }
 
   dup(pid: number, fd: number): number {
