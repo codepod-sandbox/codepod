@@ -159,6 +159,19 @@ echo ${map[name]}       # alice
 echo ${arr[@]:1:2}      # two three
 ```
 
+### Process substitution
+
+```bash
+# Input process substitution: <(cmd) runs cmd, provides output as a file path
+diff <(sort file1.txt) <(sort file2.txt)
+cat <(echo hello)
+
+# Output process substitution: >(cmd) provides a file path that feeds into cmd
+echo hello > >(cat)
+```
+
+`<(cmd)` executes `cmd` and replaces the expression with a temporary file path containing the command's stdout. `>(cmd)` creates a temporary file path; after the main command writes to it, the contents are fed as stdin to `cmd`.
+
 ### Background jobs
 
 The `&` operator runs a command in the background, returning control to the shell immediately:

@@ -139,7 +139,7 @@ codepod occupies a specific point in the design space: a lightweight WASM-based 
 | **Cost per sandbox** | ~64KB initial memory | Container overhead (~10-50MB) |
 | **Filesystem** | In-memory VFS with host mounts | Full Linux FS with bind mounts, volumes |
 | **Python** | RustPython + native numpy | Full CPython + pip install anything |
-| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux (bash, zsh, everything) |
+| **Shell** | POSIX shell, 95+ commands, aliases, arrays, process substitution, background jobs | Full Linux (bash, zsh, everything) |
 | **Networking** | Opt-in domain allowlist | Full network stack (configurable) |
 | **Persistence** | Snapshot/restore/fork/export | Volumes, bind mounts, image layers |
 | **Embeddable** | Yes (library, runs in-process) | No (requires daemon) |
@@ -163,7 +163,7 @@ codepod takes a fundamentally different approach — no VMs, no containers, no k
 | **10 concurrent sandboxes** | ~1x compiled code + 10x heap | 10x full VMs |
 | **Filesystem** | In-memory VFS with host mounts and virtual FS | Ephemeral VM disk (no host mount or virtual FS support) |
 | **Python** | RustPython + native numpy | Full CPython + pip install anything |
-| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux (bash, apt, everything) |
+| **Shell** | POSIX shell, 95+ commands, aliases, arrays, process substitution, background jobs | Full Linux (bash, apt, everything) |
 | **Networking** | Opt-in domain allowlist | Full network stack |
 | **Persistence** | Snapshot/restore/fork/export (in-memory) | VM snapshots |
 | **Open source** | Yes (BSD 3-Clause) | Yes (Apache 2.0) |
@@ -182,7 +182,7 @@ E2B is the right choice when you need full Linux compatibility — C extensions,
 | **Runs in browser** | Yes | No |
 | **Open source** | Yes | No |
 | **Python** | RustPython + numpy | Full CPython |
-| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux |
+| **Shell** | POSIX shell, 95+ commands, aliases, arrays, process substitution, background jobs | Full Linux |
 
 ### vs. RustPython
 
