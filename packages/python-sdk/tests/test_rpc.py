@@ -10,7 +10,7 @@ WASM_DIR = os.path.join(
     os.path.dirname(__file__), "..", "..", "orchestrator", "src", "platform", "__tests__", "fixtures"
 )
 SHELL_WASM = os.path.join(
-    os.path.dirname(__file__), "..", "..", "orchestrator", "src", "shell", "__tests__", "fixtures", "codepod-shell.wasm"
+    os.path.dirname(__file__), "..", "..", "orchestrator", "src", "platform", "__tests__", "fixtures", "codepod-shell-exec.wasm"
 )
 
 
