@@ -219,6 +219,16 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
 
+        // Output process substitution: >(cmd)
+        if chars[pos] == '>' && pos + 1 < len && chars[pos + 1] == '(' {
+            pos += 2;
+            let content = read_balanced_parens(&chars, &mut pos);
+            tokens.push(Token::DoubleQuoted(vec![WordPart::OutputProcessSub(
+                content,
+            )]));
+            continue;
+        }
+
         // > or >> or < redirects
         if chars[pos] == '>' {
             if pos + 1 < len && chars[pos + 1] == '>' {
@@ -1522,5 +1532,27 @@ mod tests {
         let tokens2 = lex("cmd1 && cmd2");
         assert!(tokens2.contains(&Token::And));
         assert!(!tokens2.contains(&Token::Amp));
+    }
+
+    #[test]
+    fn output_process_sub() {
+        let tokens = lex(">(cat)");
+        assert_eq!(
+            tokens,
+            vec![Token::DoubleQuoted(vec![WordPart::OutputProcessSub(
+                "cat".into()
+            )])]
+        );
+    }
+
+    #[test]
+    fn input_process_sub_still_works() {
+        let tokens = lex("<(echo a)");
+        assert_eq!(
+            tokens,
+            vec![Token::DoubleQuoted(vec![WordPart::ProcessSub(
+                "echo a".into()
+            )])]
+        );
     }
 }
