@@ -95,6 +95,8 @@ This prevents sandbox code from forging tool files. Even if a user could write t
 | `wait` | Wait for background jobs (`wait` for all, `wait $pid` for specific) |
 | `jobs` | List background jobs with status |
 | `ps` | List all processes in the sandbox |
+| `alias` | Define or list command aliases |
+| `unalias` | Remove aliases (`-a` removes all) |
 
 ## Virtual commands
 
@@ -109,11 +111,11 @@ This prevents sandbox code from forging tool files. Even if a user could write t
 
 ### Operators and I/O
 
-Pipes (`|`), redirects (`>`, `>>`, `<`, `2>`, `2>&1`), here-documents (`<<EOF`), here-strings (`<<<`), boolean operators (`&&`, `||`), semicolons, subshells (`(...)`), background jobs (`&`)
+Pipes (`|`), redirects (`>`, `>>`, `<`, `2>`, `2>&1`), here-documents (`<<EOF`), here-strings (`<<<`), boolean operators (`&&`, `||`), semicolons, subshells (`(...)`), process substitution (`<(cmd)`, `>(cmd)`), background jobs (`&`)
 
 ### Quoting and expansion
 
-Single/double quotes, escape sequences, tilde expansion (`~`), variable expansion (`$VAR`, `${VAR:-default}`, `${VAR:+alt}`, `${VAR:=val}`, `${VAR:?err}`), string manipulation (`${VAR#prefix}`, `${VAR%suffix}`, `${VAR/old/new}`), command substitution (`$(...)`), arithmetic expansion (`$(( ))`), brace expansion (`{a,b,c}`, `{1..5}`), globbing (`*`, `?`)
+Single/double quotes, escape sequences, tilde expansion (`~`), variable expansion (`$VAR`, `${VAR:-default}`, `${VAR:+alt}`, `${VAR:=val}`, `${VAR:?err}`), string manipulation (`${VAR#prefix}`, `${VAR%suffix}`, `${VAR/old/new}`), command substitution (`$(...)`), process substitution (`<(cmd)`, `>(cmd)`), arithmetic expansion (`$(( ))`), brace expansion (`{a,b,c}`, `{1..5}`), array expansion (`${arr[0]}`, `${arr[@]}`, `${#arr[@]}`), globbing (`*`, `?`)
 
 ### Control flow
 
@@ -122,6 +124,40 @@ Single/double quotes, escape sequences, tilde expansion (`~`), variable expansio
 ### Functions and sourcing
 
 Function definitions (`name() { ...; }`), `source`/`.` for loading files
+
+### Aliases
+
+```bash
+alias ll="ls -la"
+alias gs="git status"
+ll              # expands to: ls -la
+unalias ll      # remove one alias
+unalias -a      # remove all aliases
+alias           # list all aliases
+```
+
+Aliases expand the first word of a command. If the replacement's first word is also an alias, it expands recursively (with loop detection). Aliases do not expand in argument positions.
+
+### Arrays
+
+```bash
+# Indexed arrays
+arr=(one two three)
+echo ${arr[0]}          # one
+echo ${arr[@]}          # one two three
+echo ${#arr[@]}         # 3
+arr+=(four five)        # append
+arr[1]=TWO              # set element
+
+# Associative arrays
+declare -A map
+map[name]=alice
+map[age]=30
+echo ${map[name]}       # alice
+
+# Slicing
+echo ${arr[@]:1:2}      # two three
+```
 
 ### Background jobs
 

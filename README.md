@@ -8,7 +8,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 
 ## What it does
 
-- **Shell execution** — pipes, redirects, variables, globbing, control flow, functions, subshells, background jobs (`&`)
+- **Shell execution** — pipes, redirects, variables, globbing, control flow, functions, subshells, background jobs (`&`), aliases, arrays, process substitution
 - **95+ commands** — cat, grep, sed, awk, find, sort, jq, tar, curl, sqlite3, and more
 - **Python 3** via RustPython compiled to WASI, with **numpy** support (native Rust implementation)
 - **Virtual filesystem** — in-memory POSIX VFS with optional persistence
@@ -106,7 +106,7 @@ All command execution runs inside the WASM sandbox — no host process spawning.
 - **No networking by default.** Must be explicitly enabled with a domain allowlist.
 - **In-memory filesystem.** Default 256 MB, configurable. Use persistence modes to survive restarts.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O.
-- **Bash-compatible, not full POSIX.** Covers most scripting needs. Missing: aliases, arrays, process substitution.
+- **Bash-compatible, not full POSIX.** Covers most scripting needs — aliases, arrays, process substitution, and background jobs are all supported.
 - **No runtime pip install from PyPI.** Python packages are standard library, native Rust implementations (numpy), or provided via extensions.
 - **Not formally audited.** Defense-in-depth security is implemented but not yet pen-tested.
 
