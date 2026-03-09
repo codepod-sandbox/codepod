@@ -17,6 +17,14 @@ jobs:
         with:
           deno-version: v2.x
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
       - run: deno install
 
       - name: Build TypeScript

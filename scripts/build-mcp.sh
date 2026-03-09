@@ -6,8 +6,12 @@ set -euo pipefail
 # Usage:
 #   ./scripts/build-mcp.sh              # build for current platform
 #   ./scripts/build-mcp.sh --target x86_64-unknown-linux-gnu   # cross-compile
+#   ./scripts/build-mcp.sh --rebuild-python   # force rebuild python3.wasm
 #
 # Output: dist/codepod-mcp (or dist/codepod-mcp.exe on Windows targets)
+#
+# The script automatically builds python3.wasm with numpy support if it
+# doesn't exist in the fixtures directory.
 
 cd "$(dirname "$0")/.."
 
@@ -24,13 +28,25 @@ else
 fi
 OUT_DIR="${OUT_DIR:-dist}"
 TARGET_FLAG=""
+REBUILD_PYTHON=false
+PYTHON_FEATURES="${PYTHON_FEATURES:-numpy}"
 
 for arg in "$@"; do
   case "$arg" in
     --target=*) TARGET_FLAG="--target ${arg#--target=}" ;;
     --target)   shift; TARGET_FLAG="--target $1" ;;
+    --rebuild-python) REBUILD_PYTHON=true ;;
   esac
 done
+
+# Build python3.wasm with native packages if needed
+WASM_FIXTURES="packages/orchestrator/src/platform/__tests__/fixtures"
+if [ "$REBUILD_PYTHON" = true ] || [ ! -f "$WASM_FIXTURES/python3.wasm" ]; then
+  echo "==> Building python3.wasm (features: $PYTHON_FEATURES)..."
+  bash packages/python/build.sh "$PYTHON_FEATURES"
+else
+  echo "==> python3.wasm exists ($(du -h "$WASM_FIXTURES/python3.wasm" | cut -f1)), skipping (use --rebuild-python to force)"
+fi
 
 mkdir -p "$OUT_DIR"
 
@@ -71,15 +87,47 @@ echo "==> Embedding python-shims..."
 # right relative path.
 cp -R packages/orchestrator/src/network/python-shims "$OUT_DIR/python-shims"
 
+echo "==> Embedding package python files..."
+# The PackageRegistry resolves pythonDir relative to PACKAGES_ROOT, which is
+# 3 levels up from packages/orchestrator/src/packages/ in the source tree.
+# In the bundle (dist/.codepod-mcp-bundle.mjs), import.meta.dirname is dist/,
+# so PACKAGES_ROOT = dist/../../../ which won't exist. We mirror the expected
+# relative structure so the embedded FS works: packages/{name}/python/
+INCLUDE_FLAGS="--include $OUT_DIR/python-shims"
+for pkg_dir in numpy-rust pillow-rust matplotlib-py; do
+  src="packages/$pkg_dir/python"
+  if [ -d "$src" ]; then
+    # Registry resolves: PACKAGES_ROOT + "numpy-rust/python" etc.
+    # PACKAGES_ROOT = resolve(import.meta.dirname, '..', '..', '..')
+    # With import.meta.dirname = embedded root, we need the files at
+    # ../../../{pkg_dir}/python relative to where the code thinks it is.
+    # Simpler: copy into dist/ and patch PACKAGES_ROOT after bundling.
+    dest="$OUT_DIR/packages/$pkg_dir/python"
+    mkdir -p "$dest"
+    cp -R "$src"/* "$dest/"
+    INCLUDE_FLAGS="$INCLUDE_FLAGS --include $OUT_DIR/packages/$pkg_dir"
+  fi
+done
+
+# Patch PACKAGES_ROOT in the bundle to resolve relative to the dist/ directory
+# instead of 3 levels up from the source packages/ path.
+echo "==> Patching PACKAGES_ROOT for compiled binary..."
+# In the esbuild bundle, import.meta.dirname resolves to the dist/ directory.
+# We need PACKAGES_ROOT to point to dist/packages/ (where we copied the files).
+# The original code: resolve(import.meta.dirname, '..', '..', '..')
+# Replace with: resolve(import.meta.dirname, 'packages')
+sed -i.bak 's|import\.meta\.dirname, "\.\.", "\.\.", "\.\."|import.meta.dirname, "packages"|g' "$BUNDLE"
+rm -f "$BUNDLE.bak"
+
 echo "==> Compiling with deno..."
 # shellcheck disable=SC2086
 "$DENO" compile -A --no-check \
   $TARGET_FLAG \
-  --include "$OUT_DIR/python-shims" \
+  $INCLUDE_FLAGS \
   -o "$OUT_DIR/codepod-mcp" \
   "$BUNDLE"
 
-rm -rf "$OUT_DIR/python-shims"
+rm -rf "$OUT_DIR/python-shims" "$OUT_DIR/packages"
 
 rm -f "$BUNDLE"
 
