@@ -25,6 +25,8 @@ pub struct ShellState {
     pub arrays: HashMap<String, Vec<String>>,
     pub assoc_arrays: HashMap<String, HashMap<String, String>>,
     pub functions: HashMap<String, Command>,
+    /// Alias table: name → replacement text.
+    pub aliases: HashMap<String, String>,
     pub flags: HashSet<ShellFlag>,
     pub positional_args: Vec<String>,
     pub last_exit_code: i32,
@@ -76,6 +78,7 @@ impl ShellState {
             arrays: HashMap::new(),
             assoc_arrays: HashMap::new(),
             functions: HashMap::new(),
+            aliases: HashMap::new(),
             flags: HashSet::new(),
             positional_args: Vec::new(),
             last_exit_code: 0,

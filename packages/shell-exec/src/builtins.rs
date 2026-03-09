@@ -96,6 +96,8 @@ pub fn try_builtin(
         "wait" => Some(builtin_wait(state, host, args)),
         "jobs" => Some(builtin_jobs(state, host)),
         "ps" => Some(builtin_ps(host)),
+        "alias" => Some(builtin_alias(state, args)),
+        "unalias" => Some(builtin_unalias(state, args)),
         _ => None,
     };
 
@@ -153,6 +155,8 @@ pub fn is_builtin(cmd_name: &str) -> bool {
             | "wait"
             | "jobs"
             | "ps"
+            | "alias"
+            | "unalias"
     )
 }
 
@@ -2090,6 +2094,59 @@ fn builtin_ps(host: &dyn HostInterface) -> BuiltinResult {
     }
 }
 
+// -- alias / unalias ------------------------------------------------------
+
+fn builtin_alias(state: &mut ShellState, args: &[String]) -> BuiltinResult {
+    if args.is_empty() {
+        // List all aliases sorted
+        let mut aliases: Vec<(&String, &String)> = state.aliases.iter().collect();
+        aliases.sort_by_key(|(k, _)| (*k).clone());
+        let mut output = String::new();
+        for (name, value) in aliases {
+            output.push_str(&format!("alias {}='{}'\n", name, value));
+        }
+        shell_print!("{}", output);
+        return BuiltinResult::Result(0);
+    }
+
+    let mut code = 0;
+    for arg in args {
+        if let Some(eq_pos) = arg.find('=') {
+            // Define alias: name=value
+            let name = &arg[..eq_pos];
+            let value = &arg[eq_pos + 1..];
+            state.aliases.insert(name.to_string(), value.to_string());
+        } else {
+            // Print single alias
+            if let Some(value) = state.aliases.get(arg) {
+                shell_print!("alias {}='{}'\n", arg, value);
+            } else {
+                shell_eprint!("alias: {}: not found\n", arg);
+                code = 1;
+            }
+        }
+    }
+    BuiltinResult::Result(code)
+}
+
+fn builtin_unalias(state: &mut ShellState, args: &[String]) -> BuiltinResult {
+    if args.is_empty() {
+        shell_eprint!("unalias: usage: unalias [-a] name [name ...]\n");
+        return BuiltinResult::Result(2);
+    }
+
+    let mut code = 0;
+    for arg in args {
+        if arg == "-a" {
+            state.aliases.clear();
+        } else if state.aliases.remove(arg).is_none() {
+            shell_eprint!("unalias: {}: not found\n", arg);
+            code = 1;
+        }
+    }
+    BuiltinResult::Result(code)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -3174,5 +3231,89 @@ mod tests {
         let code = run_builtin(&mut state, &host, "readonly", &["X=42"]);
         assert_eq!(code, 0);
         assert_eq!(state.env.get("X").unwrap(), "42");
+    }
+
+    // -- alias tests ------------------------------------------------------
+
+    #[test]
+    fn alias_no_args_lists_all() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        state.aliases.insert("ll".to_string(), "ls -la".to_string());
+        state
+            .aliases
+            .insert("gs".to_string(), "git status".to_string());
+        let (code, stdout, _) = run_capture(&mut state, &host, "alias", &[]);
+        assert_eq!(code, 0);
+        // Should be sorted
+        assert_eq!(stdout, "alias gs='git status'\nalias ll='ls -la'\n");
+    }
+
+    #[test]
+    fn alias_define_single() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        let code = run_builtin(&mut state, &host, "alias", &["ll=ls -la"]);
+        assert_eq!(code, 0);
+        assert_eq!(state.aliases.get("ll").unwrap(), "ls -la");
+    }
+
+    #[test]
+    fn alias_define_multiple() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        let code = run_builtin(&mut state, &host, "alias", &["ll=ls -la", "gs=git status"]);
+        assert_eq!(code, 0);
+        assert_eq!(state.aliases.get("ll").unwrap(), "ls -la");
+        assert_eq!(state.aliases.get("gs").unwrap(), "git status");
+    }
+
+    #[test]
+    fn alias_print_single() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        state.aliases.insert("ll".to_string(), "ls -la".to_string());
+        let (code, stdout, _) = run_capture(&mut state, &host, "alias", &["ll"]);
+        assert_eq!(code, 0);
+        assert_eq!(stdout, "alias ll='ls -la'\n");
+    }
+
+    #[test]
+    fn alias_print_not_found() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        let code = run_builtin(&mut state, &host, "alias", &["nope"]);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn unalias_removes() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        state.aliases.insert("ll".to_string(), "ls -la".to_string());
+        let code = run_builtin(&mut state, &host, "unalias", &["ll"]);
+        assert_eq!(code, 0);
+        assert!(state.aliases.get("ll").is_none());
+    }
+
+    #[test]
+    fn unalias_dash_a_removes_all() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        state.aliases.insert("ll".to_string(), "ls -la".to_string());
+        state
+            .aliases
+            .insert("gs".to_string(), "git status".to_string());
+        let code = run_builtin(&mut state, &host, "unalias", &["-a"]);
+        assert_eq!(code, 0);
+        assert!(state.aliases.is_empty());
+    }
+
+    #[test]
+    fn unalias_not_found() {
+        let mut state = ShellState::new_default();
+        let host = MockHost::new();
+        let code = run_builtin(&mut state, &host, "unalias", &["nope"]);
+        assert_eq!(code, 1);
     }
 }
