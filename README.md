@@ -8,7 +8,7 @@ LLMs are trained on enormous amounts of shell and Python usage. Rather than inve
 
 ## What it does
 
-- **Shell execution** — pipes, redirects, variables, globbing, control flow, functions, subshells
+- **Shell execution** — pipes, redirects, variables, globbing, control flow, functions, subshells, background jobs (`&`)
 - **95+ commands** — cat, grep, sed, awk, find, sort, jq, tar, curl, sqlite3, and more
 - **Python 3** via RustPython compiled to WASI, with **numpy** support (native Rust implementation)
 - **Virtual filesystem** — in-memory POSIX VFS with optional persistence
@@ -106,7 +106,7 @@ All command execution runs inside the WASM sandbox — no host process spawning.
 - **No networking by default.** Must be explicitly enabled with a domain allowlist.
 - **In-memory filesystem.** Default 256 MB, configurable. Use persistence modes to survive restarts.
 - **Sequential pipeline execution.** Pipeline stages run one at a time with buffered I/O.
-- **Bash-compatible, not full POSIX.** Covers most scripting needs. Missing: aliases, `trap`, job control, arrays, process substitution.
+- **Bash-compatible, not full POSIX.** Covers most scripting needs. Missing: aliases, arrays, process substitution.
 - **No runtime pip install from PyPI.** Python packages are standard library, native Rust implementations (numpy), or provided via extensions.
 - **Not formally audited.** Defense-in-depth security is implemented but not yet pen-tested.
 
@@ -126,6 +126,26 @@ make wheel         # package Python wheel (current platform)
 
 codepod occupies a specific point in the design space: a lightweight WASM-based sandbox with real POSIX semantics, designed for LLM code execution on both server and browser.
 
+### vs. Docker
+
+[Docker](https://www.docker.com/) is the industry standard for containerized execution. It uses Linux kernel namespaces and cgroups to isolate processes, giving you a full Linux userspace with any language, any binary, and full filesystem access.
+
+| | codepod | Docker |
+|---|---|---|
+| **Isolation** | WASM linear memory sandbox | Linux kernel namespaces + cgroups |
+| **Startup** | Instant (cached WASM instantiation) | ~500ms-2s (container start) |
+| **Runs in browser** | Yes | No |
+| **Infrastructure** | None — single process, in-memory | Docker daemon + Linux kernel |
+| **Cost per sandbox** | ~64KB initial memory | Container overhead (~10-50MB) |
+| **Filesystem** | In-memory VFS with host mounts | Full Linux FS with bind mounts, volumes |
+| **Python** | RustPython + native numpy | Full CPython + pip install anything |
+| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux (bash, zsh, everything) |
+| **Networking** | Opt-in domain allowlist | Full network stack (configurable) |
+| **Persistence** | Snapshot/restore/fork/export | Volumes, bind mounts, image layers |
+| **Embeddable** | Yes (library, runs in-process) | No (requires daemon) |
+
+Docker is the right choice when you need full Linux compatibility, package managers, and production-grade container orchestration. codepod is for when you need lightweight, embeddable sandboxes that run anywhere (including the browser) without a daemon or kernel dependency.
+
 ### vs. E2B
 
 [E2B](https://e2b.dev) (~11k stars) runs Firecracker microVMs in the cloud. Each sandbox is a full Linux VM with its own kernel, filesystem, and network stack. This gives you maximum compatibility (any language, any binary, full networking) but at a cost: cloud-only, per-second billing, and ~150-200ms cold starts.
@@ -141,8 +161,9 @@ codepod takes a fundamentally different approach — no VMs, no containers, no k
 | **Infrastructure** | None — single process, in-memory | Cloud service or self-hosted Terraform + KVM |
 | **Cost per sandbox** | ~64KB initial memory | Full VM (default 512MB+ RAM) |
 | **10 concurrent sandboxes** | ~1x compiled code + 10x heap | 10x full VMs |
+| **Filesystem** | In-memory VFS with host mounts and virtual FS | Ephemeral VM disk (no host mount or virtual FS support) |
 | **Python** | RustPython + native numpy | Full CPython + pip install anything |
-| **Shell** | POSIX shell, 95+ commands | Full Linux (bash, apt, everything) |
+| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux (bash, apt, everything) |
 | **Networking** | Opt-in domain allowlist | Full network stack |
 | **Persistence** | Snapshot/restore/fork/export (in-memory) | VM snapshots |
 | **Open source** | Yes (BSD 3-Clause) | Yes (Apache 2.0) |
@@ -161,7 +182,7 @@ E2B is the right choice when you need full Linux compatibility — C extensions,
 | **Runs in browser** | Yes | No |
 | **Open source** | Yes | No |
 | **Python** | RustPython + numpy | Full CPython |
-| **Shell** | POSIX shell, 95+ commands | Full Linux |
+| **Shell** | POSIX shell, 95+ commands, background jobs | Full Linux |
 
 ### vs. RustPython
 

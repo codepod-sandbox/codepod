@@ -35,7 +35,7 @@ Executables are compiled to `wasm32-wasip1` and live in `packages/coreutils/src/
 
 `python` is a symlink to `python3` — both work interchangeably.
 
-Note: `echo`, `printf`, and `test` exist as both executables and shell builtins. The shell builtin takes precedence; the executable is used when invoked via `command echo` or `/usr/bin/echo`.
+Note: `echo`, `printf`, `test`, and `sleep` exist as both executables and shell builtins. The shell builtin takes precedence; the executable is used when invoked via `command echo` or `/usr/bin/echo`.
 
 ### Tool files and command aliasing
 
@@ -91,6 +91,10 @@ This prevents sandbox code from forging tool files. Even if a user could write t
 | `chmod` | Change file permissions |
 | `pushd` / `popd` / `dirs` | Directory stack |
 | `break` / `continue` | Loop control |
+| `sleep` | Suspend execution for N seconds (supports decimals: `sleep 0.5`) |
+| `wait` | Wait for background jobs (`wait` for all, `wait $pid` for specific) |
+| `jobs` | List background jobs with status |
+| `ps` | List all processes in the sandbox |
 
 ## Virtual commands
 
@@ -105,7 +109,7 @@ This prevents sandbox code from forging tool files. Even if a user could write t
 
 ### Operators and I/O
 
-Pipes (`|`), redirects (`>`, `>>`, `<`, `2>`, `2>&1`), here-documents (`<<EOF`), here-strings (`<<<`), boolean operators (`&&`, `||`), semicolons, subshells (`(...)`)
+Pipes (`|`), redirects (`>`, `>>`, `<`, `2>`, `2>&1`), here-documents (`<<EOF`), here-strings (`<<<`), boolean operators (`&&`, `||`), semicolons, subshells (`(...)`), background jobs (`&`)
 
 ### Quoting and expansion
 
@@ -119,9 +123,29 @@ Single/double quotes, escape sequences, tilde expansion (`~`), variable expansio
 
 Function definitions (`name() { ...; }`), `source`/`.` for loading files
 
+### Background jobs
+
+The `&` operator runs a command in the background, returning control to the shell immediately:
+
+```bash
+# Run two commands in parallel
+echo a > /tmp/out1 & echo b > /tmp/out2 & wait
+
+# Background a long-running process
+sleep 10 &
+jobs          # [1] Running sleep 10 &
+wait          # blocks until all background jobs finish
+
+# Wait for a specific job
+cmd1 & cmd2 &
+wait $!       # wait for cmd2 (most recent background PID)
+```
+
+Background jobs use cooperative multitasking via JSPI — multiple WASM instances run concurrently within the same process, yielding at I/O boundaries. This enables parallel tool execution (e.g., an LLM running `tool1 & tool2 & wait`).
+
 ### Special variables
 
-`$?` (last exit code), `$@` and `$*` (all positional parameters), `$#` (argument count), `$1`-`$9` (positional parameters)
+`$?` (last exit code), `$!` (PID of most recent background job), `$@` and `$*` (all positional parameters), `$#` (argument count), `$1`-`$9` (positional parameters)
 
 ## I/O model
 
