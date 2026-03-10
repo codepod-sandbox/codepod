@@ -96,6 +96,7 @@ pub fn try_builtin(
         "wait" => Some(builtin_wait(state, host, args)),
         "jobs" => Some(builtin_jobs(state, host)),
         "ps" => Some(builtin_ps(host)),
+        "kill" => Some(builtin_kill(state, host, args)),
         "alias" => Some(builtin_alias(state, args)),
         "unalias" => Some(builtin_unalias(state, args)),
         _ => None,
@@ -155,6 +156,7 @@ pub fn is_builtin(cmd_name: &str) -> bool {
             | "wait"
             | "jobs"
             | "ps"
+            | "kill"
             | "alias"
             | "unalias"
     )
@@ -2092,6 +2094,163 @@ fn builtin_ps(host: &dyn HostInterface) -> BuiltinResult {
             BuiltinResult::Result(1)
         }
     }
+}
+
+// -- kill -----------------------------------------------------------------
+
+/// Map a signal name to its conventional number.
+fn signal_number(name: &str) -> Option<i32> {
+    let name = name.strip_prefix("SIG").unwrap_or(name);
+    match name {
+        "HUP" => Some(1),
+        "INT" => Some(2),
+        "QUIT" => Some(3),
+        "KILL" => Some(9),
+        "USR1" => Some(10),
+        "USR2" => Some(12),
+        "TERM" => Some(15),
+        "STOP" => Some(17),
+        "CONT" => Some(19),
+        _ => None,
+    }
+}
+
+/// All signal names we advertise, in numeric order.
+const SIGNAL_NAMES: &[&str] = &[
+    "HUP", "INT", "QUIT", "KILL", "USR1", "USR2", "TERM", "STOP", "CONT",
+];
+
+fn builtin_kill(
+    state: &mut ShellState,
+    host: &dyn HostInterface,
+    args: &[String],
+) -> BuiltinResult {
+    // Parse options: kill [-s SIGNAL | -SIGNAL] PID... | kill -l
+    let mut signal = 15_i32; // default: TERM
+    let mut pids: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-l" {
+            // List signals
+            let mut out = String::new();
+            for (idx, name) in SIGNAL_NAMES.iter().enumerate() {
+                if idx > 0 {
+                    out.push(' ');
+                }
+                out.push_str(name);
+            }
+            out.push('\n');
+            shell_print!("{}", out);
+            return BuiltinResult::Result(0);
+        } else if arg == "-s" {
+            i += 1;
+            if i >= args.len() {
+                shell_eprintln!("kill: -s requires a signal name");
+                return BuiltinResult::Result(1);
+            }
+            let name = args[i].to_uppercase();
+            match signal_number(&name) {
+                Some(n) => signal = n,
+                None => {
+                    // Try numeric
+                    if let Ok(n) = name.parse::<i32>() {
+                        signal = n;
+                    } else {
+                        shell_eprintln!("kill: unknown signal: {}", args[i]);
+                        return BuiltinResult::Result(1);
+                    }
+                }
+            }
+        } else if let Some(signame) = arg.strip_prefix('-') {
+            // -SIGNAL (e.g. -TERM, -9, -KILL)
+            if pids.is_empty() {
+                let signame_upper = signame.to_uppercase();
+                if let Some(n) = signal_number(&signame_upper) {
+                    signal = n;
+                } else if let Ok(n) = signame.parse::<i32>() {
+                    signal = n;
+                } else {
+                    shell_eprintln!("kill: unknown signal: {}", signame);
+                    return BuiltinResult::Result(1);
+                }
+            } else {
+                // Negative number as PID? Not valid.
+                shell_eprintln!("kill: invalid pid: {}", arg);
+                return BuiltinResult::Result(1);
+            }
+        } else {
+            pids.push(arg.clone());
+        }
+        i += 1;
+    }
+
+    if pids.is_empty() {
+        shell_eprintln!("kill: usage: kill [-s signal | -signal] pid ...");
+        return BuiltinResult::Result(1);
+    }
+
+    let exit_code = 128 + signal;
+    let mut errors = 0;
+
+    for pid_str in &pids {
+        if let Some(job_spec) = pid_str.strip_prefix('%') {
+            // Job reference: %N
+            if let Ok(job_id) = job_spec.parse::<usize>() {
+                if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
+                    if job.done.is_some() {
+                        shell_eprintln!("kill: %{}: job has already terminated", job_id);
+                        errors += 1;
+                    } else {
+                        job.done = Some(exit_code);
+                        // Also reap via waitpid_nohang so the kernel knows
+                        let _ = host.waitpid_nohang(job.pid);
+                    }
+                } else {
+                    shell_eprintln!("kill: %{}: no such job", job_id);
+                    errors += 1;
+                }
+            } else {
+                shell_eprintln!("kill: %{}: invalid job spec", job_spec);
+                errors += 1;
+            }
+        } else if let Ok(pid) = pid_str.parse::<i32>() {
+            // Direct PID
+            // Check if it's in our job table first
+            if let Some(job) = state.jobs.iter_mut().find(|j| j.pid == pid) {
+                if job.done.is_some() {
+                    shell_eprintln!("kill: ({}): process already terminated", pid);
+                    errors += 1;
+                } else {
+                    job.done = Some(exit_code);
+                    let _ = host.waitpid_nohang(pid);
+                }
+            } else {
+                // Not in job table — try waitpid_nohang to see if it exists
+                match host.waitpid_nohang(pid) {
+                    Ok(code) if code >= 0 => {
+                        // Already exited
+                        shell_eprintln!("kill: ({}): process already terminated", pid);
+                        errors += 1;
+                    }
+                    Ok(_) => {
+                        // Still running but not in our job table; nothing more
+                        // we can do without a host kill syscall.
+                    }
+                    Err(_) => {
+                        shell_eprintln!("kill: ({}): no such process", pid);
+                        errors += 1;
+                    }
+                }
+            }
+        } else {
+            shell_eprintln!("kill: {}: invalid pid", pid_str);
+            errors += 1;
+        }
+    }
+
+    BuiltinResult::Result(if errors > 0 { 1 } else { 0 })
 }
 
 // -- alias / unalias ------------------------------------------------------
