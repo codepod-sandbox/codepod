@@ -200,8 +200,24 @@ name = "base64"
 path = "src/bin/base64.rs"
 
 [[bin]]
+name = "sha1sum"
+path = "src/bin/sha1sum.rs"
+
+[[bin]]
+name = "sha224sum"
+path = "src/bin/sha224sum.rs"
+
+[[bin]]
 name = "sha256sum"
 path = "src/bin/sha256sum.rs"
+
+[[bin]]
+name = "sha384sum"
+path = "src/bin/sha384sum.rs"
+
+[[bin]]
+name = "sha512sum"
+path = "src/bin/sha512sum.rs"
 
 [[bin]]
 name = "md5sum"
@@ -350,6 +366,62 @@ path = "src/bin/shuf.rs"
 [[bin]]
 name = "sum"
 path = "src/bin/sum.rs"
+
+[[bin]]
+name = "base32"
+path = "src/bin/base32.rs"
+
+[[bin]]
+name = "nice"
+path = "src/bin/nice.rs"
+
+[[bin]]
+name = "nohup"
+path = "src/bin/nohup.rs"
+
+[[bin]]
+name = "hostid"
+path = "src/bin/hostid.rs"
+
+[[bin]]
+name = "uptime"
+path = "src/bin/uptime.rs"
+
+[[bin]]
+name = "chown"
+path = "src/bin/chown.rs"
+
+[[bin]]
+name = "chgrp"
+path = "src/bin/chgrp.rs"
+
+[[bin]]
+name = "sudo"
+path = "src/bin/sudo.rs"
+
+[[bin]]
+name = "groups"
+path = "src/bin/groups.rs"
+
+[[bin]]
+name = "logname"
+path = "src/bin/logname.rs"
+
+[[bin]]
+name = "users"
+path = "src/bin/users.rs"
+
+[[bin]]
+name = "who"
+path = "src/bin/who.rs"
+
+[[bin]]
+name = "dd"
+path = "src/bin/dd.rs"
+
+[[bin]]
+name = "tsort"
+path = "src/bin/tsort.rs"
 
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
