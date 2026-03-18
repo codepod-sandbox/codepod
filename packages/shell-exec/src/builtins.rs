@@ -1981,15 +1981,15 @@ fn builtin_readonly(state: &mut ShellState, args: &[String]) -> BuiltinResult {
 // Background-job builtins: sleep, wait, jobs, ps
 // ---------------------------------------------------------------------------
 
-fn builtin_sleep(host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
+fn builtin_sleep(_host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
     if args.is_empty() {
         shell_eprintln!("sleep: missing operand");
         return BuiltinResult::Result(1);
     }
     let secs: f64 = args[0].parse().unwrap_or(0.0);
-    let ms = (secs * 1000.0) as u32;
+    let ms = (secs * 1000.0) as u64;
     if ms > 0 {
-        let _ = host.sleep(ms);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     BuiltinResult::Result(0)
 }

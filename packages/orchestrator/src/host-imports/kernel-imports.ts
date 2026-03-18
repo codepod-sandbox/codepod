@@ -179,12 +179,6 @@ export function createKernelImports(opts: KernelImportsOptions): Record<string, 
       return writeJson(memory, outPtr, outCap, procs);
     },
 
-    // host_sleep(ms) -> void
-    // Async — suspends WASM for ms milliseconds.
-    async host_sleep(ms: number): Promise<void> {
-      await new Promise<void>(resolve => setTimeout(resolve, ms));
-    },
-
     // ── Network ──
 
     // host_network_fetch(req_ptr, req_len, out_ptr, out_cap) -> i32
