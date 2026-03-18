@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import shutil
+from typing import Callable
 from codepod._rpc import RpcClient
 from codepod.commands import Commands
 from codepod.extension import Extension
@@ -73,6 +74,7 @@ class Sandbox:
         mounts: list[tuple[str, MountSpec | VirtualFileSystem]] | None = None,
         python_path: list[str] | None = None,
         extensions: list[Extension] | None = None,
+        storage: "dict[str, Callable] | None" = None,
         _sandbox_id: str | None = None,
         _client: RpcClient | None = None,
     ):
@@ -94,6 +96,12 @@ class Sandbox:
         self._client.start()
         self._sandbox_id = None
 
+        if storage:
+            self._client.register_storage_handlers(
+                save=storage.get("save"),
+                load=storage.get("load"),
+            )
+
         create_params: dict = {
             "wasmDir": wasm_dir,
             "shellWasmPath": shell_wasm,
@@ -106,6 +114,9 @@ class Sandbox:
             create_params["mounts"] = [
                 _serialize_mount(path, files) for path, files in mounts
             ]
+
+        if storage:
+            create_params["storage"] = True
 
         if python_path:
             create_params["pythonPath"] = python_path
@@ -185,6 +196,14 @@ class Sandbox:
         """Import a previously exported sandbox state, replacing current state."""
         data = base64.b64encode(blob).decode("ascii")
         self._client.call("persistence.import", self._with_id({"data": data}))
+
+    def offload(self) -> None:
+        """Offload sandbox state to external storage, freeing memory."""
+        self._client.call("offload", self._with_id({}))
+
+    def rehydrate(self) -> None:
+        """Restore sandbox state from external storage."""
+        self._client.call("rehydrate", self._with_id({}))
 
     def fork(self) -> "Sandbox":
         """Create an independent forked sandbox."""

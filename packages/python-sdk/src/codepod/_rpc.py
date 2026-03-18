@@ -17,6 +17,7 @@ class RpcClient:
         self._proc: subprocess.Popen | None = None
         self._next_id = 1
         self._extension_handlers: dict[str, Callable] = {}
+        self._storage_handlers: dict[str, Callable] = {}
         self._output_handlers: dict[int | str, dict[str, Callable]] = {}
 
     def start(self) -> None:
@@ -44,6 +45,12 @@ class RpcClient:
     def register_extension_handler(self, name: str, handler: Callable) -> None:
         """Register a handler for extension callback requests from the server."""
         self._extension_handlers[name] = handler
+
+    def register_storage_handlers(self, save: "Callable | None", load: "Callable | None") -> None:
+        if save:
+            self._storage_handlers["storage.save"] = save
+        if load:
+            self._storage_handlers["storage.load"] = load
 
     def call(self, method: str, params: dict | None = None) -> Any:
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
@@ -108,6 +115,23 @@ class RpcClient:
                     cwd=params.get("cwd", "/"),
                 )
                 self._send_callback_result(cb_id, result)
+            elif method in ("storage.save", "storage.load"):
+                handler = self._storage_handlers.get(method)
+                if handler is None:
+                    self._send_callback_error(cb_id, f"No handler for: {method}")
+                    return
+                if method == "storage.save":
+                    import base64
+                    state = base64.b64decode(params.get("state", ""))
+                    sandbox_id = params.get("sandbox_id", "")
+                    handler(sandbox_id, state)
+                    self._send_callback_result(cb_id, None)
+                elif method == "storage.load":
+                    import base64
+                    sandbox_id = params.get("sandbox_id", "")
+                    result = handler(sandbox_id)
+                    data = base64.b64encode(result).decode("ascii")
+                    self._send_callback_result(cb_id, data)
             else:
                 self._send_callback_error(cb_id, f"Unknown callback method: {method}")
         except Exception as e:
