@@ -28,4 +28,21 @@ describe('SandboxPool', () => {
     pool = new SandboxPool(config, testSandboxOptions());
     expect(pool.stats).toEqual({ idle: 0, creating: 0, checkedOut: 0 });
   });
+
+  it('fills to minSize after init()', async () => {
+    const config: PoolConfig = { minSize: 2, maxSize: 5 };
+    pool = new SandboxPool(config, testSandboxOptions());
+    await pool.init();
+    expect(pool.stats.idle).toBe(2);
+    expect(pool.stats.creating).toBe(0);
+  });
+
+  it('drain() destroys all idle sandboxes', async () => {
+    const config: PoolConfig = { minSize: 3, maxSize: 5 };
+    pool = new SandboxPool(config, testSandboxOptions());
+    await pool.init();
+    expect(pool.stats.idle).toBe(3);
+    await pool.drain();
+    expect(pool.stats.idle).toBe(0);
+  });
 });
