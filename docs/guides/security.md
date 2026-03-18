@@ -119,8 +119,11 @@ The WASI P1 host implementation selectively provides syscalls:
 | **Sync/timestamps** | `fd_advise`, `fd_allocate`, `fd_datasync`, `fd_sync`, `fd_fdstat_set_flags`, `fd_filestat_set_size`, `fd_filestat_set_times` | No-op (returns success) — safe to skip in single-threaded sandbox |
 | **Sockets** | `sock_recv`, `sock_send`, `sock_accept`, `sock_shutdown` | **Blocked** — returns `ENOSYS` |
 | **Signals** | `proc_raise` | **Blocked** — returns `ENOSYS` |
-| **Polling** | `poll_oneoff` | **Blocked** — returns `ENOSYS` |
-| **Advanced I/O** | `fd_pread`, `fd_pwrite`, `fd_renumber`, `path_link` | **Blocked** — returns `ENOSYS` |
+| **Polling** | `poll_oneoff` | Implemented — clock subscriptions (enables `std::thread::sleep`), fd readiness checks |
+| **Clock resolution** | `clock_res_get` | Implemented — returns 1ms resolution for realtime/monotonic |
+| **Fd renumber** | `fd_renumber` | Implemented — moves fd entries (WASI equivalent of `dup2`) |
+| **Positional I/O** | `fd_pread`, `fd_pwrite` | Implemented — positional read/write without changing offset |
+| **Hard links** | `path_link` | Returns `ENOTSUP` — VFS is tree-based, no inode refcounting |
 
 ## Tool file integrity
 

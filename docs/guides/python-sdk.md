@@ -46,6 +46,19 @@ result.exit_code     # 0
 result.execution_time_ms  # e.g. 12.5
 ```
 
+### Streaming output
+
+For long-running commands, stream stdout/stderr as it arrives:
+
+```python
+result = sb.commands.run("make build", stream=True,
+    on_stdout=lambda chunk: print(chunk, end=""),
+    on_stderr=lambda chunk: print(chunk, end="", file=sys.stderr))
+# result.stdout/stderr still contain the full output
+```
+
+Callbacks fire as output arrives over JSON-RPC notifications. The full `CommandResult` is still returned at the end.
+
 ## File operations
 
 ```python
@@ -164,7 +177,7 @@ See [Mounting Files](mounting-files.md) for detailed examples and patterns.
 | Method / Property | Description |
 |---|---|
 | `Sandbox(*, timeout_ms, fs_limit_bytes, mounts, python_path, extensions)` | Create a new sandbox. Use as a context manager. |
-| `sb.commands.run(command) -> CommandResult` | Execute a shell command. |
+| `sb.commands.run(command, *, stream=False, on_stdout=None, on_stderr=None) -> CommandResult` | Execute a shell command. Set `stream=True` with callbacks for streaming output. |
 | `sb.files.read(path) -> bytes` | Read file contents. |
 | `sb.files.write(path, data)` | Write `bytes` or `str` to a file. |
 | `sb.files.list(path) -> list[FileInfo]` | List directory entries. |

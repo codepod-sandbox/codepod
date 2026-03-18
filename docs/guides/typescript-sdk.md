@@ -111,6 +111,20 @@ if (result.exitCode !== 0) {
 }
 ```
 
+### Streaming output
+
+For long-running commands, stream stdout/stderr as it arrives instead of waiting for completion:
+
+```typescript
+const result = await sandbox.run('make build', {
+  onStdout: (chunk) => process.stdout.write(chunk),
+  onStderr: (chunk) => process.stderr.write(chunk),
+});
+// result.stdout/stderr still contain the full output
+```
+
+Callbacks fire synchronously on each `fd_write` — chunks arrive in execution order with no buffering. The full `RunResult` is still returned at the end. If no callbacks are provided, behavior is unchanged.
+
 ### Cancellation
 
 Cancel a running command from another async context:
@@ -501,7 +515,7 @@ sandbox.destroy();
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `Sandbox.create(options)` | `Promise<Sandbox>` | Create a new sandbox |
-| `run(command)` | `Promise<RunResult>` | Execute a shell command |
+| `run(command, callbacks?)` | `Promise<RunResult>` | Execute a shell command. Optional `{ onStdout, onStderr }` for streaming. |
 | `cancel()` | `void` | Cancel the running command |
 | `readFile(path)` | `Uint8Array` | Read a file from the VFS |
 | `writeFile(path, data)` | `void` | Write a file to the VFS |
