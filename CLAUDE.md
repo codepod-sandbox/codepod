@@ -17,7 +17,7 @@ This adds `~/.deno/bin` and `~/.cargo/bin` to PATH and verifies tools are availa
 deno check packages/mcp-server/src/index.ts
 
 # Run all unit tests (pre-push hook runs these)
-deno test -A --no-check packages/orchestrator/src/**/*.test.ts packages/sdk-server/src/*.test.ts
+deno test -A --no-check packages/orchestrator/src/**/*.test.ts packages/orchestrator/src/pool/__tests__/*.test.ts packages/sdk-server/src/*.test.ts
 
 # Run Python SDK tests
 cd packages/python-sdk && pip install -e . && pytest
@@ -31,7 +31,7 @@ bash scripts/build-wheel.sh
 
 ## Architecture
 
-- **`packages/orchestrator/`** — Core sandbox: VFS, shell executor, process manager, networking
+- **`packages/orchestrator/`** — Core sandbox: VFS, shell executor, process manager, networking, sandbox pool
 - **`packages/shell-exec/`** — Rust POSIX shell compiled to WASM (`codepod-shell-exec.wasm`)
 - **`packages/coreutils/`** — Rust coreutils compiled to WASM
 - **`packages/mcp-server/`** — MCP server exposing sandboxes via Model Context Protocol
@@ -54,6 +54,22 @@ Multi-sandbox server with lifecycle management. Tools:
 - `snapshot` / `restore` — in-memory CoW snapshots (fast, ephemeral)
 
 Config: `.mcp.json` at repo root. Build: `bash scripts/build-mcp.sh` → `dist/codepod-mcp`.
+
+Pool support: `--pool-min N --pool-max M` CLI args or `"pool": { "minSize": N, "maxSize": M }` in `.mcp.json`.
+
+## SDK Server
+
+JSON-RPC server for the Python SDK. Supports multi-sandbox management:
+- `sandbox.create` / `sandbox.list` / `sandbox.remove` — create/list/remove top-level sandboxes
+- `sandbox.fork` / `sandbox.destroy` — fork and destroy child sandboxes
+- Pool support: pass `pool: { minSize, maxSize }` in the `create` RPC params.
+
+## Python SDK
+
+Multi-sandbox via `sb.sandboxes`:
+- `sb.sandboxes.create(label=...)` → `SandboxRef` with `.commands` and `.files`
+- `sb.sandboxes.list()` → `list[SandboxInfo]`
+- `sb.sandboxes.remove(sandbox_id)` — release a sandbox
 
 ## Conventions
 

@@ -1,7 +1,7 @@
 # Sandbox Pooling & Multi-Sandbox SDK Server
 
 **Date:** 2026-03-18
-**Status:** Draft
+**Status:** Implemented
 **Scope:** `packages/orchestrator`, `packages/mcp-server`, `packages/sdk-server`, `packages/python-sdk`
 
 ## Motivation
