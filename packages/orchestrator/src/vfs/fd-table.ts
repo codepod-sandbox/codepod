@@ -194,6 +194,28 @@ export class FdTable {
     return this.entries.has(fd);
   }
 
+  /** Move an fd entry from one number to another. Closes toFd if open. */
+  renumber(fromFd: number, toFd: number): void {
+    const entry = this.entries.get(fromFd);
+    if (entry === undefined) {
+      throw new Error(`EBADF: bad file descriptor ${fromFd}`);
+    }
+
+    // Close target fd if it's open (flushes writes)
+    if (this.entries.has(toFd)) {
+      this.close(toFd);
+    }
+
+    // Move entry
+    this.entries.set(toFd, entry);
+    this.entries.delete(fromFd);
+
+    // Prevent future open() from reusing toFd
+    if (toFd >= this.nextFd) {
+      this.nextFd = toFd + 1;
+    }
+  }
+
   /** Return the VFS path for an open fd, or undefined if not open. */
   getPath(fd: number): string | undefined {
     return this.entries.get(fd)?.path;

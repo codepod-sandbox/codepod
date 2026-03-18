@@ -118,3 +118,14 @@ export const WASI_WHENCE_END = 2;
 
 // Rights — we grant all rights (no capability enforcement inside the sandbox)
 export const WASI_RIGHTS_ALL = BigInt(0x1fffffff);
+
+// Event types (for poll_oneoff subscriptions and events)
+export const WASI_EVENTTYPE_CLOCK = 0;
+export const WASI_EVENTTYPE_FD_READ = 1;
+export const WASI_EVENTTYPE_FD_WRITE = 2;
+
+// Subscription clock flags
+export const WASI_SUBCLOCKFLAGS_SUBSCRIPTION_CLOCK_ABSTIME = 1;
+
+// Event read/write flags
+export const WASI_EVENTRWFLAGS_FD_READWRITE_HANGUP = 1;

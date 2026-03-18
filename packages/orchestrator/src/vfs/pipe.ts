@@ -109,6 +109,8 @@ export interface AsyncPipeReadEnd {
   /** Increment reference count (for sharing across fd tables). */
   addRef(): void;
   readonly closed: boolean;
+  /** Whether the pipe has buffered data available for a non-blocking read. */
+  readonly hasData: boolean;
 }
 
 export interface AsyncPipeWriteEnd {
@@ -120,6 +122,8 @@ export interface AsyncPipeWriteEnd {
   /** Increment reference count (for sharing across fd tables). */
   addRef(): void;
   readonly closed: boolean;
+  /** Whether the pipe has space for a non-blocking write. */
+  readonly hasCapacity: boolean;
 }
 
 interface AsyncPipeBuffer {
@@ -210,6 +214,10 @@ export function createAsyncPipe(
       return shared.readClosed;
     },
 
+    get hasData() {
+      return shared.totalBytes > 0 || shared.writeClosed;
+    },
+
     async read(buf: Uint8Array): Promise<number> {
       if (shared.pendingReader) {
         throw new Error('concurrent read on async pipe');
@@ -257,6 +265,10 @@ export function createAsyncPipe(
   const writeEnd: AsyncPipeWriteEnd = {
     get closed() {
       return shared.writeClosed;
+    },
+
+    get hasCapacity() {
+      return shared.totalBytes < shared.capacity || shared.readClosed;
     },
 
     write(data: Uint8Array): number {
