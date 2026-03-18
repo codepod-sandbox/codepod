@@ -7,6 +7,7 @@ from codepod._rpc import RpcClient
 from codepod.commands import Commands
 from codepod.extension import Extension
 from codepod.files import Files
+from codepod.sandbox_manager import SandboxManager
 from codepod.vfs import VirtualFileSystem, _encode_files_for_rpc
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,6 +82,7 @@ class Sandbox:
             self._sandbox_id = _sandbox_id
             self.commands = Commands(self._client, self._sandbox_id)
             self.files = Files(self._client, self._sandbox_id)
+            self.sandboxes = SandboxManager(self._client)
             return
 
         if _is_bundled():
@@ -135,6 +137,7 @@ class Sandbox:
 
         self.commands = Commands(self._client)
         self.files = Files(self._client)
+        self.sandboxes = SandboxManager(self._client)
 
     def _with_id(self, params: dict) -> dict:
         if self._sandbox_id is not None:

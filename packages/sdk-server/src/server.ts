@@ -215,9 +215,10 @@ async function main(): Promise<void> {
           await pool.init();
           dispatcher = new Dispatcher(null, { pool, sandboxOptions });
         } else {
-          // Legacy mode: create a root sandbox immediately
+          // Legacy mode: create a root sandbox immediately, but also pass
+          // sandboxOptions so sandbox.create can create additional sandboxes
           const sandbox = await Sandbox.create(sandboxOptions);
-          dispatcher = new Dispatcher(sandbox);
+          dispatcher = new Dispatcher(sandbox, { sandboxOptions });
         }
 
         respond({ jsonrpc: '2.0', id, result: { ok: true } });
