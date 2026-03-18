@@ -2,14 +2,14 @@ import type { AsyncPipeReadEnd, AsyncPipeWriteEnd } from '../vfs/pipe.js';
 
 /** Target for a file descriptor in a process's fd table. */
 export type FdTarget =
-  | { type: 'buffer'; buf: Uint8Array[]; total: number; limit: number; truncated: boolean }
+  | { type: 'buffer'; buf: Uint8Array[]; total: number; limit: number; truncated: boolean; onChunk?: (data: Uint8Array) => void }
   | { type: 'pipe_read'; pipe: AsyncPipeReadEnd }
   | { type: 'pipe_write'; pipe: AsyncPipeWriteEnd }
   | { type: 'static'; data: Uint8Array; offset: number }
   | { type: 'null' };
 
-export function createBufferTarget(limit = Infinity): FdTarget & { type: 'buffer' } {
-  return { type: 'buffer', buf: [], total: 0, limit, truncated: false };
+export function createBufferTarget(limit = Infinity, onChunk?: (data: Uint8Array) => void): FdTarget & { type: 'buffer' } {
+  return { type: 'buffer', buf: [], total: 0, limit, truncated: false, onChunk };
 }
 
 export function createStaticTarget(data: Uint8Array): FdTarget & { type: 'static' } {
