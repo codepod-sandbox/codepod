@@ -9,7 +9,7 @@
  */
 
 import { createInterface } from 'node:readline';
-import { Sandbox } from '@codepod/sandbox';
+import { Sandbox, SandboxPool } from '@codepod/sandbox';
 import type { ExtensionConfig, ExtensionInvokeArgs, ExtensionInvokeResult } from '@codepod/sandbox';
 import { NodeAdapter } from '@codepod/sandbox/node';
 import { Dispatcher } from './dispatcher.js';
@@ -118,6 +118,7 @@ async function main(): Promise<void> {
           mounts,
           pythonPath,
           extensions: extensionSpecs,
+          pool: poolConfig,
         } = params as {
           wasmDir?: string;
           timeoutMs?: number;
@@ -138,6 +139,11 @@ async function main(): Promise<void> {
             hasCommand?: boolean;
             pythonPackage?: { version: string; summary?: string; files: Record<string, string> };
           }>;
+          pool?: {
+            minSize?: number;
+            maxSize?: number;
+            replenishIntervalMs?: number;
+          };
         };
 
         if (!wasmDir || typeof wasmDir !== 'string') {
@@ -179,7 +185,8 @@ async function main(): Promise<void> {
           pythonPackage: ext.pythonPackage,
         }));
 
-        const sandbox = await Sandbox.create({
+        // Common sandbox options used for both direct and pool creation
+        const sandboxOptions = {
           wasmDir: normalizedWasmDir,
           adapter: new NodeAdapter(),
           timeoutMs,
@@ -189,13 +196,30 @@ async function main(): Promise<void> {
           mounts: mountConfigs,
           pythonPath,
           extensions: extensionConfigs,
-        });
+        };
 
         if (limits?.rpcBytes !== undefined) {
           maxLineBytes = Math.max(1024, Math.min(limits.rpcBytes, 128 * 1024 * 1024));
         }
 
-        dispatcher = new Dispatcher(sandbox);
+        if (poolConfig) {
+          // Pool mode: clients use sandbox.create to get sandboxes
+          const pool = new SandboxPool(
+            {
+              minSize: poolConfig.minSize ?? 1,
+              maxSize: poolConfig.maxSize ?? 8,
+              replenishIntervalMs: poolConfig.replenishIntervalMs,
+            },
+            sandboxOptions,
+          );
+          await pool.init();
+          dispatcher = new Dispatcher(null, { pool, sandboxOptions });
+        } else {
+          // Legacy mode: create a root sandbox immediately
+          const sandbox = await Sandbox.create(sandboxOptions);
+          dispatcher = new Dispatcher(sandbox);
+        }
+
         respond({ jsonrpc: '2.0', id, result: { ok: true } });
       } catch (err) {
         log(`create failed: ${err}`);
