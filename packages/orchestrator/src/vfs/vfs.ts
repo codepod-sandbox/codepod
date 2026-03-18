@@ -662,6 +662,21 @@ export class VFS {
     };
   }
 
+  /** Clear all file content buffers to free memory. Directory structure and metadata are preserved. */
+  clearFileContents(): void {
+    const walk = (node: DirInode): void => {
+      for (const child of node.children.values()) {
+        if (child.type === 'file') {
+          this.totalBytes -= child.content.byteLength;
+          child.content = new Uint8Array(0);
+        } else if (child.type === 'dir') {
+          walk(child);
+        }
+      }
+    };
+    walk(this.root);
+  }
+
   cowClone(): VFS {
     return VFS.fromRoot(deepCloneRoot(this.root), {
       fsLimitBytes: this.fsLimitBytes,
