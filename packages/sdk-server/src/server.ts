@@ -10,7 +10,7 @@
 
 import { createInterface } from 'node:readline';
 import { Sandbox, SandboxPool } from '@codepod/sandbox';
-import type { ExtensionConfig, ExtensionInvokeArgs, ExtensionInvokeResult } from '@codepod/sandbox';
+import type { ExtensionConfig, ExtensionInvokeArgs, ExtensionInvokeResult, StorageCallbacks } from '@codepod/sandbox';
 import { NodeAdapter } from '@codepod/sandbox/node';
 import { Dispatcher } from './dispatcher.js';
 
@@ -123,6 +123,7 @@ async function main(): Promise<void> {
           pythonPath,
           extensions: extensionSpecs,
           pool: poolConfig,
+          storage: storageRequested,
         } = params as {
           wasmDir?: string;
           timeoutMs?: number;
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
             maxSize?: number;
             replenishIntervalMs?: number;
           };
+          storage?: boolean;
         };
 
         if (!wasmDir || typeof wasmDir !== 'string') {
@@ -189,6 +191,18 @@ async function main(): Promise<void> {
           pythonPackage: ext.pythonPackage,
         }));
 
+        // Build storage callbacks if requested — bridge save/load to Python via JSON-RPC callbacks
+        const storageCallbacks: StorageCallbacks | undefined = storageRequested ? {
+          save: async (sandboxId: string, state: Uint8Array) => {
+            const data = Buffer.from(state).toString('base64');
+            await sendCallback('storage.save', { sandbox_id: sandboxId, state: data });
+          },
+          load: async (sandboxId: string) => {
+            const result = await sendCallback('storage.load', { sandbox_id: sandboxId });
+            return new Uint8Array(Buffer.from(result as string, 'base64'));
+          },
+        } : undefined;
+
         // Common sandbox options used for both direct and pool creation
         const sandboxOptions = {
           wasmDir: normalizedWasmDir,
@@ -200,6 +214,7 @@ async function main(): Promise<void> {
           mounts: mountConfigs,
           pythonPath,
           extensions: extensionConfigs,
+          storage: storageCallbacks,
         };
 
         if (limits?.rpcBytes !== undefined) {

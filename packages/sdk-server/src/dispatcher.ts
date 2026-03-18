@@ -43,6 +43,9 @@ export interface SandboxLike {
   getHistory(): Array<{ index: number; command: string; timestamp: number }>;
   clearHistory(): void;
   mount(path: string, filesOrProvider: Record<string, Uint8Array>): void;
+  offload(): Promise<void>;
+  rehydrate(): Promise<void>;
+  readonly sessionId: string;
 }
 
 export interface RpcError {
@@ -131,6 +134,10 @@ export class Dispatcher {
           return this.shellHistoryList(params);
         case 'shell.history.clear':
           return this.shellHistoryClear(params);
+        case 'offload':
+          return await this.offload(params);
+        case 'rehydrate':
+          return await this.rehydrate(params);
         default:
           throw this.rpcError(-32601, `Method not found: ${method}`);
       }
@@ -439,5 +446,17 @@ export class Dispatcher {
     const sb = this.resolveSandbox(params);
     sb.clearHistory();
     return { ok: true };
+  }
+
+  private async offload(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
+    await sb.offload();
+    return null;
+  }
+
+  private async rehydrate(params: Record<string, unknown>) {
+    const sb = this.resolveSandbox(params);
+    await sb.rehydrate();
+    return null;
   }
 }
