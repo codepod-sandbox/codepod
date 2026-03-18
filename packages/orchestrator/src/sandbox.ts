@@ -14,6 +14,12 @@ export interface StreamCallbacks {
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
 }
+
+/** Callbacks for offloading sandbox state to external storage. */
+export interface StorageCallbacks {
+  save: (sandboxId: string, state: Uint8Array) => Promise<void>;
+  load: (sandboxId: string) => Promise<Uint8Array>;
+}
 import type { RunResult } from './shell/shell-types.js';
 import type { HistoryEntry } from './shell/history.js';
 import type { PlatformAdapter } from './platform/adapter.js';
@@ -71,6 +77,8 @@ export interface SandboxOptions {
   extensions?: ExtensionConfig[];
   /** Sandbox-native packages to install from PackageRegistry (e.g. ['requests', 'pandas']). */
   packages?: string[];
+  /** Callbacks for offloading sandbox state to external storage. */
+  storage?: StorageCallbacks;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -90,6 +98,7 @@ interface SandboxParts {
   security?: SecurityOptions;
   workerExecutor?: WorkerExecutor;
   extensionRegistry?: ExtensionRegistry;
+  storage?: StorageCallbacks;
 }
 
 export class Sandbox {
@@ -97,6 +106,9 @@ export class Sandbox {
   private runner: ShellLike;
   private timeoutMs: number;
   private destroyed = false;
+  private offloaded = false;
+  private storage: StorageCallbacks | null = null;
+  private running = false;
   private adapter: PlatformAdapter;
   private wasmDir: string;
   private shellExecWasmPath: string;
@@ -128,6 +140,7 @@ export class Sandbox {
     this.auditHandler = parts.security?.onAuditEvent;
     this.workerExecutor = parts.workerExecutor ?? null;
     this.extensionRegistry = parts.extensionRegistry ?? null;
+    this.storage = parts.storage ?? null;
   }
 
   private audit(type: string, data?: Record<string, unknown>): void {
@@ -319,7 +332,7 @@ export class Sandbox {
       wasmDir: options.wasmDir, shellExecWasmPath,
       mgr, bridge, networkPolicy: options.network,
       security: options.security, workerExecutor,
-      extensionRegistry,
+      extensionRegistry, storage: options.storage,
     });
 
     // Wire persistence if configured
@@ -443,6 +456,8 @@ export class Sandbox {
       };
     }
 
+    this.running = true;
+    try {
     this.audit('command.start', { command });
 
     // Emit pkg audit events before execution
@@ -543,6 +558,9 @@ export class Sandbox {
     }
 
     return result;
+    } finally {
+      this.running = false;
+    }
   }
 
   readFile(path: string): Uint8Array {
@@ -640,6 +658,33 @@ export class Sandbox {
   /** Import a previously exported state blob, restoring files and env vars. */
   importState(blob: Uint8Array): void {
     this.assertAlive();
+    const { env } = serializerImportState(this.vfs, blob);
+    if (env) {
+      this.runner.setEnvMap(env);
+    }
+  }
+
+  /** Offload sandbox state to external storage, freeing VFS file content memory. */
+  async offload(): Promise<void> {
+    if (this.offloaded) return; // idempotent
+    if (this.destroyed) throw new Error('Sandbox has been destroyed');
+    if (!this.storage) throw new Error('No storage callbacks configured');
+    if (this.running) throw new Error('Cannot offload while a command is running');
+
+    const blob = serializerExportState(this.vfs, this.runner.getEnvMap(), this.vfs.getProviderPaths());
+    await this.storage.save(this.sessionId, blob);
+    this.vfs.clearFileContents();
+    this.offloaded = true;
+  }
+
+  /** Restore sandbox state from external storage. */
+  async rehydrate(): Promise<void> {
+    if (!this.offloaded) return; // idempotent
+    if (this.destroyed) throw new Error('Sandbox has been destroyed');
+    if (!this.storage) throw new Error('No storage callbacks configured');
+
+    const blob = await this.storage.load(this.sessionId);
+    this.offloaded = false; // clear before importState so assertAlive passes
     const { env } = serializerImportState(this.vfs, blob);
     if (env) {
       this.runner.setEnvMap(env);
@@ -744,6 +789,9 @@ export class Sandbox {
   private assertAlive(): void {
     if (this.destroyed) {
       throw new Error('Sandbox has been destroyed');
+    }
+    if (this.offloaded) {
+      throw new Error('Sandbox is offloaded — call rehydrate() first');
     }
   }
 }
