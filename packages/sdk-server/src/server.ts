@@ -32,6 +32,10 @@ function respond(res: JsonRpcResponse): void {
   process.stdout.write(JSON.stringify(res) + '\n');
 }
 
+function notify(method: string, params: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
+}
+
 function errorResponse(
   id: number | string,
   code: number,
@@ -213,12 +217,12 @@ async function main(): Promise<void> {
             sandboxOptions,
           );
           await pool.init();
-          dispatcher = new Dispatcher(null, { pool, sandboxOptions });
+          dispatcher = new Dispatcher(null, { pool, sandboxOptions }, notify);
         } else {
           // Legacy mode: create a root sandbox immediately, but also pass
           // sandboxOptions so sandbox.create can create additional sandboxes
           const sandbox = await Sandbox.create(sandboxOptions);
-          dispatcher = new Dispatcher(sandbox, { sandboxOptions });
+          dispatcher = new Dispatcher(sandbox, { sandboxOptions }, notify);
         }
 
         respond({ jsonrpc: '2.0', id, result: { ok: true } });
@@ -236,7 +240,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      const result = await dispatcher.dispatch(method, params as Record<string, unknown>);
+      const result = await dispatcher.dispatch(method, params as Record<string, unknown>, id);
       respond({ jsonrpc: '2.0', id, result });
 
       // After kill, exit the process

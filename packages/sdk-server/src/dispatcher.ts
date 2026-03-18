@@ -8,7 +8,10 @@
 
 /** Minimal interface for a sandbox, matching the methods we call. */
 export interface SandboxLike {
-  run(command: string): Promise<{
+  run(command: string, callbacks?: {
+    onStdout?: (chunk: string) => void;
+    onStderr?: (chunk: string) => void;
+  }): Promise<{
     exitCode: number;
     stdout: string;
     stderr: string;
@@ -68,21 +71,24 @@ export class Dispatcher {
   private nextSandboxId = 1;
   private pool?: { checkout(opts?: { label?: string }): Promise<SandboxLike>; release(sb: SandboxLike): void; drain(): Promise<void> };
   private sandboxOptions?: unknown;
+  private notify: (method: string, params: Record<string, unknown>) => void;
 
   constructor(
     sandbox: SandboxLike | null,
     options?: { pool?: any; sandboxOptions?: any },
+    notify?: (method: string, params: Record<string, unknown>) => void,
   ) {
     this.sandbox = sandbox;
     this.pool = options?.pool;
     this.sandboxOptions = options?.sandboxOptions;
+    this.notify = notify ?? (() => {});
   }
 
-  async dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
+  async dispatch(method: string, params: Record<string, unknown>, requestId?: number | string): Promise<unknown> {
     try {
       switch (method) {
         case 'run':
-          return await this.run(params);
+          return await this.run(params, requestId);
         case 'files.write':
           return this.filesWrite(params);
         case 'files.read':
@@ -183,13 +189,24 @@ export class Dispatcher {
 
   // ── RPC method implementations ───────────────────────────────────
 
-  private async run(params: Record<string, unknown>) {
+  private async run(params: Record<string, unknown>, requestId?: number | string) {
     const command = this.requireString(params, 'command');
     if (command.length > 65536) {
       throw this.rpcError(-32602, 'Command too large');
     }
     const sb = this.resolveSandbox(params);
-    const result = await sb.run(command);
+    const stream = params.stream === true;
+
+    const callbacks = stream && requestId !== undefined ? {
+      onStdout: (chunk: string) => {
+        this.notify('output', { request_id: requestId, stream: 'stdout', data: chunk });
+      },
+      onStderr: (chunk: string) => {
+        this.notify('output', { request_id: requestId, stream: 'stderr', data: chunk });
+      },
+    } : undefined;
+
+    const result = await sb.run(command, callbacks);
     const response: Record<string, unknown> = {
       exitCode: result.exitCode,
       stdout: result.stdout,
