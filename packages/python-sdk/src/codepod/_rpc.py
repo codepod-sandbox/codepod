@@ -1,5 +1,8 @@
+import asyncio
+import inspect
 import json
 import subprocess
+import threading
 from typing import Any, Callable
 
 
@@ -19,6 +22,10 @@ class RpcClient:
         self._extension_handlers: dict[str, Callable] = {}
         self._storage_handlers: dict[str, Callable] = {}
         self._output_handlers: dict[int | str, dict[str, Callable]] = {}
+        # Persistent event loop for async extension handlers.
+        # Created lazily on the first async handler registration.
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_thread: threading.Thread | None = None
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
@@ -42,8 +49,27 @@ class RpcClient:
     def unregister_output_handler(self, request_id: int) -> None:
         self._output_handlers.pop(request_id, None)
 
+    def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
+        """Start a persistent background event loop for async handlers, if needed."""
+        if self._async_loop is None:
+            self._async_loop = asyncio.new_event_loop()
+            self._async_thread = threading.Thread(
+                target=self._async_loop.run_forever,
+                daemon=True,
+                name="codepod-async",
+            )
+            self._async_thread.start()
+        return self._async_loop
+
     def register_extension_handler(self, name: str, handler: Callable) -> None:
-        """Register a handler for extension callback requests from the server."""
+        """Register a handler for extension callback requests from the server.
+
+        The handler can be either a regular function or an async coroutine function.
+        Async handlers are dispatched on a persistent background event loop so they
+        can reuse connection pools and other async resources.
+        """
+        if inspect.iscoroutinefunction(handler):
+            self._ensure_async_loop()
         self._extension_handlers[name] = handler
 
     def register_storage_handlers(self, save: "Callable | None", load: "Callable | None") -> None:
@@ -108,12 +134,20 @@ class RpcClient:
                 if handler is None:
                     self._send_callback_error(cb_id, f"No handler for extension: {name}")
                     return
-                result = handler(
+                kwargs = dict(
                     args=params.get("args", []),
                     stdin=params.get("stdin", ""),
                     env=params.get("env", {}),
                     cwd=params.get("cwd", "/"),
                 )
+                if inspect.iscoroutinefunction(handler):
+                    assert self._async_loop is not None
+                    future = asyncio.run_coroutine_threadsafe(
+                        handler(**kwargs), self._async_loop,
+                    )
+                    result = future.result(timeout=30)
+                else:
+                    result = handler(**kwargs)
                 self._send_callback_result(cb_id, result)
             elif method in ("storage.save", "storage.load"):
                 handler = self._storage_handlers.get(method)
@@ -150,6 +184,12 @@ class RpcClient:
         self._proc.stdin.flush()  # type: ignore[union-attr]
 
     def stop(self) -> None:
+        if self._async_loop is not None:
+            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+            if self._async_thread is not None:
+                self._async_thread.join(timeout=2)
+            self._async_loop = None
+            self._async_thread = None
         if self._proc is not None:
             proc, self._proc = self._proc, None
             proc.terminate()

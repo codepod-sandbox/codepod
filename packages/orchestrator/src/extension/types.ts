@@ -12,7 +12,7 @@ export interface ExtensionInvokeResult {
 }
 
 export type ExtensionHandler =
-  (input: ExtensionInvokeArgs) => Promise<ExtensionInvokeResult>;
+  (input: ExtensionInvokeArgs) => ExtensionInvokeResult | Promise<ExtensionInvokeResult>;
 
 export interface PythonPackageSpec {
   version: string;

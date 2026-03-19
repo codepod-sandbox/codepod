@@ -125,10 +125,11 @@ class Sandbox:
         if extensions:
             ext_specs = []
             for ext in extensions:
+                has_handler = ext.async_command is not None or ext.command is not None
                 spec: dict = {
                     "name": ext.name,
                     "description": ext.description,
-                    "hasCommand": ext.command is not None,
+                    "hasCommand": has_handler,
                 }
                 if ext.python_package is not None:
                     spec["pythonPackage"] = {
@@ -138,8 +139,11 @@ class Sandbox:
                     }
                 ext_specs.append(spec)
 
-                # Register the command handler for bidirectional callbacks
-                if ext.command is not None:
+                # Register the command handler for bidirectional callbacks.
+                # async_command takes priority over command.
+                if ext.async_command is not None:
+                    self._client.register_extension_handler(ext.name, ext.async_command)
+                elif ext.command is not None:
                     self._client.register_extension_handler(ext.name, ext.command)
 
             create_params["extensions"] = ext_specs
