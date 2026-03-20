@@ -6,9 +6,14 @@ Extensions let hosts expose custom capabilities to sandbox code — shell comman
 
 An extension consists of:
 - A **name** — becomes a shell command in `/bin/<name>`
-- A **description** — shown when the user runs `<name> --help`
+- A **description** — one-liner shown by `extensions list`
 - A **command handler** — a host-side async function that receives args/stdin and returns stdout/exitCode
 - An optional **Python package** — files installed in the VFS at `/usr/lib/python/<name>/`, importable from sandbox Python scripts
+
+Optional discovery metadata:
+- **`usage`** — usage string shown by `extensions info <name>` (e.g. `"search <query> [--k N]"`)
+- **`examples`** — list of concrete invocations shown by `extensions info <name>`
+- **`category`** — free-form grouping label used by `extensions list --category <cat>` (e.g. `"search"`, `"files"`)
 
 ## TypeScript
 
@@ -19,7 +24,10 @@ const sandbox = await Sandbox.create({
   extensions: [
     {
       name: 'llm',
-      description: 'Query an LLM. Usage: llm <prompt>',
+      description: 'Query an LLM',
+      usage: 'llm <prompt>',
+      examples: ['llm "summarize this document"', 'echo data | llm "what is this?"'],
+      category: 'ai',
       command: async ({ args, stdin }) => {
         const prompt = args.join(' ') || stdin;
         const answer = await myLlmApi(prompt);
@@ -28,7 +36,10 @@ const sandbox = await Sandbox.create({
     },
     {
       name: 'vecdb',
-      description: 'Search a vector database. Usage: vecdb <query>',
+      description: 'Search a vector database',
+      usage: 'vecdb <query> [--k N]',
+      examples: ['vecdb "similar documents"', 'vecdb "foo" --k 20'],
+      category: 'search',
       command: async ({ args }) => {
         const results = await myVecSearch(args.join(' '));
         return { stdout: JSON.stringify(results) + '\n', exitCode: 0 };
@@ -52,30 +63,36 @@ await sandbox.run('vecdb "similar documents" | jq .results');
 await sandbox.run('python3 -c "import vecdb; print(vecdb.search(\'test\'))"');
 
 // Discoverable via standard tools
-await sandbox.run('which llm');        // /bin/llm
+await sandbox.run('which llm');        // /usr/bin/llm
 await sandbox.run('pip list');         // shows vecdb 1.0.0
 await sandbox.run('pip show vecdb');   // metadata + file list
 ```
 
 ## Python
 
+Async handlers are supported — see [Async handlers](#async-handlers).
+
 ```python
 from codepod import Sandbox, Extension, PythonPackage
-
-def my_llm_handler(args, stdin, env, cwd):
-    prompt = " ".join(args) or stdin
-    answer = call_my_llm(prompt)
-    return {"stdout": answer + "\n", "exitCode": 0}
 
 with Sandbox(extensions=[
     Extension(
         name="llm",
         description="Query an LLM",
-        command=my_llm_handler,
+        usage="llm <prompt>",
+        examples=['llm "summarize this"', 'echo data | llm "what is this?"'],
+        category="ai",
+        command=lambda args, stdin, **_: {
+            "stdout": call_my_llm(" ".join(args) or stdin) + "\n",
+            "exitCode": 0,
+        },
     ),
     Extension(
         name="vecdb",
         description="Vector database search",
+        usage="vecdb <query> [--k N]",
+        examples=['vecdb "similar documents"', 'vecdb "foo" --k 20'],
+        category="search",
         command=lambda args, **_: {"stdout": do_search(args), "exitCode": 0},
         python_package=PythonPackage(
             version="1.0.0",
@@ -91,6 +108,59 @@ with Sandbox(extensions=[
 ]) as sb:
     sb.commands.run("echo hello | llm")
     sb.commands.run("pip list")
+```
+
+## Built-in discovery command
+
+When any extensions are registered, a built-in `extensions` command is automatically available in the sandbox. Agents can use it to discover available tools without out-of-band documentation.
+
+```bash
+# List all extensions
+extensions list
+
+# Filter by category
+extensions list --category search
+
+# Output as JSON (for programmatic use)
+extensions list --json
+
+# Show full details for one extension
+extensions info vecdb
+
+# Show help
+extensions --help
+```
+
+Example output of `extensions list`:
+
+```
+NAME    CATEGORY  DESCRIPTION
+──────────────────────────────────────────────────────
+llm     ai        Query an LLM
+vecdb   search    Vector database search
+```
+
+Example output of `extensions info vecdb`:
+
+```
+Name:        vecdb
+Category:    search
+Description: Vector database search
+Usage:       vecdb <query> [--k N]
+Examples:
+  vecdb "similar documents"
+  vecdb "foo" --k 20
+```
+
+The `extensions` command itself does not appear in `extensions list`.
+
+### Suggested system prompt
+
+Applications can collapse their sandbox system prompt to a single line:
+
+```
+Available tools are registered as shell commands.
+Run `extensions list` to see them, `extensions info <name>` for details.
 ```
 
 ## Handler interface
@@ -112,6 +182,39 @@ Handlers return:
 | `stderr` | `string` (optional) | Standard error |
 | `exitCode` | `number` | Exit code (0 = success) |
 
+## Async handlers
+
+### TypeScript
+
+All TypeScript extension handlers are async by default — just return a `Promise`.
+
+### Python
+
+The Python SDK supports both sync and async handlers. Use `async_command` for handlers that need async I/O (e.g. aiohttp connection pools):
+
+```python
+import aiohttp
+
+async def async_search(args, stdin, env, cwd):
+    async with aiohttp.ClientSession() as session:
+        resp = await session.get(f"https://api.example.com/search?q={args[0]}")
+        data = await resp.json()
+    return {"stdout": str(data) + "\n", "exitCode": 0}
+
+with Sandbox(extensions=[
+    Extension(
+        name="search",
+        description="Search the index",
+        async_command=async_search,
+    )
+]) as sb:
+    sb.commands.run("search 'my query'")
+```
+
+When both `command` and `async_command` are set, `async_command` takes priority.
+
+Async handlers run on a persistent background event loop, so they can safely reuse async resources (connection pools, sessions) across calls.
+
 ## Shell integration
 
 Extension commands behave like any other shell command:
@@ -120,7 +223,7 @@ Extension commands behave like any other shell command:
 - **Redirects** — `myext > output.txt 2> errors.txt`
 - **Chaining** — `myext && echo ok || echo fail`
 - **Help** — `myext --help` returns the description
-- **Discoverability** — `which myext` shows `/bin/myext`
+- **Discoverability** — `which myext` shows `/usr/bin/myext`
 
 ## Python packages
 
