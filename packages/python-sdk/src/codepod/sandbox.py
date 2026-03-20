@@ -129,6 +129,9 @@ class Sandbox:
                 spec: dict = {
                     "name": ext.name,
                     "description": ext.description,
+                    "usage": ext.usage,
+                    "examples": ext.examples,
+                    "category": ext.category,
                     "hasCommand": has_handler,
                 }
                 if ext.python_package is not None:
