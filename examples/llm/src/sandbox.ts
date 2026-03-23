@@ -36,7 +36,7 @@ export async function initSandbox(): Promise<Sandbox> {
 
   const enc = new TextEncoder();
   for (const [path, content] of Object.entries(vfsPaths)) {
-    // Sandbox.writeFile requires Uint8Array
+    // writeFile is synchronous (in-memory VFS mutation) — no await needed
     sandbox.writeFile(path, enc.encode(content));
   }
 
