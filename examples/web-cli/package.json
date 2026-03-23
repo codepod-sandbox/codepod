@@ -1,5 +1,5 @@
 {
-  "name": "@codepod/web",
+  "name": "@codepod/example-web-cli",
   "version": "0.0.1",
   "private": true,
   "type": "module",
