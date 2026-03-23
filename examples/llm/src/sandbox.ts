@@ -27,30 +27,21 @@ export async function initSandbox(): Promise<Sandbox> {
     eager: true,
   }) as Record<string, string>;
 
-  const vfsPaths = buildVfsPaths(sources);
+  // Build mount files: relative path → Uint8Array (e.g. 'App.tsx', 'components/Chat.tsx')
+  const enc = new TextEncoder();
+  const mountFiles: Record<string, Uint8Array> = {};
+  for (const [key, content] of Object.entries(sources)) {
+    const rel = key.startsWith('./') ? key.slice(2) : key;
+    mountFiles[rel] = enc.encode(content);
+  }
 
+  // Mount at /src/ via Sandbox.create() — HostMount builds the directory structure
+  // automatically, bypassing VFS mode-bit restrictions on top-level directories.
   const sandbox = await Sandbox.create({
     adapter,
     wasmDir: WASM_BASE,
+    mounts: [{ path: '/src', files: mountFiles }],
   });
-
-  // Create directories needed for VFS paths (Sandbox.create() only provides /tmp, /etc, etc.)
-  const dirs = new Set<string>();
-  for (const path of Object.keys(vfsPaths)) {
-    const parts = path.split('/').filter(Boolean);
-    for (let i = 1; i < parts.length; i++) {
-      dirs.add('/' + parts.slice(0, i).join('/'));
-    }
-  }
-  for (const dir of [...dirs].sort()) {
-    try { sandbox.mkdir(dir); } catch { /* already exists */ }
-  }
-
-  const enc = new TextEncoder();
-  for (const [path, content] of Object.entries(vfsPaths)) {
-    // writeFile is synchronous (in-memory VFS mutation) — no await needed
-    sandbox.writeFile(path, enc.encode(content));
-  }
 
   return sandbox;
 }
