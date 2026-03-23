@@ -1,10 +1,10 @@
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig } from 'vite';
 import { resolve } from 'node:path';
 
 // Stub Node builtins that get pulled into the browser bundle via Node-only
 // code paths (PackageRegistry, FsBackend, HostFsProvider) that are never
 // called in the browser.
-function nodeStubs(): Plugin {
+function nodeStubs() {
   const stubs: Record<string, string> = {
     'node:fs': 'export function readFileSync(){} export function readdirSync(){return []} export function statSync(){} export function readdir(){} export function readFile(){} export function writeFileSync(){} export function mkdirSync(){} export function rmSync(){} export function mkdtemp(){} export function rm(){} export function existsSync(){return false} export default {}',
     'node:fs/promises': 'export function readFile(){} export function writeFile(){} export function mkdir(){} export function unlink(){} export function readdir(){} export default {}',
@@ -17,11 +17,11 @@ function nodeStubs(): Plugin {
   };
   return {
     name: 'node-stubs',
-    enforce: 'pre',
-    resolveId(id) {
+    enforce: 'pre' as const,
+    resolveId(id: string) {
       if (stubs[id]) return `\0node-stub:${id}`;
     },
-    load(id) {
+    load(id: string) {
       if (id.startsWith('\0node-stub:')) return stubs[id.slice('\0node-stub:'.length)];
     },
   };
