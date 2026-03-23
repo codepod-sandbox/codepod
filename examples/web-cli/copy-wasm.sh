@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-FIXTURES="../orchestrator/src/platform/__tests__/fixtures"
-SHELL_FIXTURES="../orchestrator/src/shell/__tests__/fixtures"
+FIXTURES="../../packages/orchestrator/src/platform/__tests__/fixtures"
+SHELL_FIXTURES="../../packages/orchestrator/src/shell/__tests__/fixtures"
 OUT="public/wasm"
 
 mkdir -p "$OUT"

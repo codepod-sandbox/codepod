@@ -32,7 +32,7 @@ export default defineConfig({
   plugins: [nodeStubs()],
   resolve: {
     alias: {
-      '@codepod/sandbox': resolve(__dirname, '../orchestrator/src/index.ts'),
+      '@codepod/sandbox': resolve(__dirname, '../../packages/orchestrator/src/index.ts'),
     },
   },
   server: {
