@@ -41,6 +41,7 @@ export async function initSandbox(): Promise<Sandbox> {
     adapter,
     wasmDir: WASM_BASE,
     mounts: [{ path: '/src', files: mountFiles }],
+    packages: ['numpy'],
   });
 
   return sandbox;
