@@ -18,14 +18,23 @@ type LLMMessage =
   | { role: 'user'; content: string }
   | { role: 'assistant'; content: string };
 
-/** Extract all bash code block bodies from a model response. */
-function extractBashBlocks(text: string): string[] {
+/** Extract executable code blocks from a model response.
+ *  bash blocks → run as-is
+ *  python blocks → wrapped in a bash heredoc so python3 executes them
+ */
+function extractCodeBlocks(text: string): string[] {
   const blocks: string[] = [];
-  const re = /```bash\n([\s\S]*?)```/g;
+  const re = /```(bash|python)\n([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
-    const cmd = m[1].trim();
-    if (cmd) blocks.push(cmd);
+    const lang = m[1];
+    const code = m[2].trim();
+    if (!code) continue;
+    if (lang === 'python') {
+      blocks.push(`python3 << 'PYEOF'\n${code}\nPYEOF`);
+    } else {
+      blocks.push(code);
+    }
   }
   return blocks;
 }
@@ -58,7 +67,7 @@ export async function runChat(
       }
     }
 
-    const commands = extractBashBlocks(fullText);
+    const commands = extractCodeBlocks(fullText);
     if (commands.length === 0) break;
 
     const resultLines: string[] = [];
