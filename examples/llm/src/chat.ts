@@ -47,23 +47,36 @@ export async function runChat(
     let toolCallArgs = '';
     let finishReason: string | null = null;
 
-    for await (const chunk of stream) {
-      const choice = chunk.choices[0];
-      finishReason = choice.finish_reason ?? finishReason;
-      const delta = choice.delta;
+    try {
+      for await (const chunk of stream) {
+        const choice = chunk.choices[0];
+        finishReason = choice.finish_reason ?? finishReason;
+        const delta = choice.delta;
 
-      if (delta.content) {
-        textBuffer += delta.content;
-        onPart({ kind: 'text', text: delta.content });
-      }
+        if (delta.content) {
+          textBuffer += delta.content;
+          onPart({ kind: 'text', text: delta.content });
+        }
 
-      if (delta.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          if (tc.id) toolCallId = tc.id;
-          if (tc.function?.name) toolCallName = tc.function.name;
-          if (tc.function?.arguments) toolCallArgs += tc.function.arguments;
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.id) toolCallId = tc.id;
+            if (tc.function?.name) toolCallName = tc.function.name;
+            if (tc.function?.arguments) toolCallArgs += tc.function.arguments;
+          }
         }
       }
+    } catch (e: unknown) {
+      // WebLLM throws ToolCallOutputParseError when the model outputs plain text
+      // while tools are registered. Extract the text from the error message and
+      // treat it as a normal text response.
+      const msg = e instanceof Error ? e.message : String(e);
+      const match = msg.match(/Got outputMessage: ([\s\S]*?)(?:\nGot error:|$)/);
+      if (match) {
+        onPart({ kind: 'text', text: match[1].trim() });
+        break;
+      }
+      throw e;
     }
 
     if (finishReason === 'tool_calls' && toolCallName === 'bash') {
