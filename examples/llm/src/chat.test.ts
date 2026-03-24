@@ -37,7 +37,7 @@ async function collect(
   question: string,
 ): Promise<Part[]> {
   const parts: Part[] = [];
-  await runChat(engine, bash, [{ role: 'user', content: question }], (p) => parts.push(p));
+  await runChat(engine, bash, question, (p) => parts.push(p));
   return parts;
 }
 
@@ -169,7 +169,7 @@ Deno.test('llm "query" triggers recursive sub-agent', async () => {
   };
 
   const parts: Part[] = [];
-  await runChat(engine, noBash, [{ role: 'user', content: 'Delegate' }], (p) => parts.push(p));
+  await runChat(engine, noBash, 'Delegate', (p) => parts.push(p));
 
   assertEquals(callIdx, 3);
   const llmCall = parts.find(
@@ -210,7 +210,7 @@ Deno.test('sub-agent recursion depth limit blocks third level', async () => {
   };
 
   const parts: Part[] = [];
-  await runChat(engine, noBash, [{ role: 'user', content: 'Start' }], (p) => parts.push(p));
+  await runChat(engine, noBash, 'Start', (p) => parts.push(p));
 
   const depthError = parts.find(
     (p) =>
@@ -244,7 +244,7 @@ Deno.test('tool output included in next turn user message', async () => {
   await runChat(
     engine,
     async () => ({ stdout: 'hi\n', stderr: '', exitCode: 0 }),
-    [{ role: 'user', content: 'Say hi' }],
+    'Say hi',
     () => {},
   );
 

@@ -222,7 +222,7 @@ console.error(`${BOLD}${YELLOW}[${label}]${RESET} ${question}\n`);
 await runChat(
   engine,
   runBash,
-  [{ role: 'user', content: question }],
+  question,
   renderPart,
 );
 

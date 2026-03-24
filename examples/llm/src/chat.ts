@@ -26,13 +26,13 @@ type LLMMessage =
 export async function runChat(
   engine: Engine,
   runBash: RunBash,
-  displayMessages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  query: string,
   onPart: (part: Part) => void,
   depth = 0,
 ): Promise<void> {
   const history: LLMMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
-    ...displayMessages.map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: query },
   ];
 
   let toolCallCount = 0;
@@ -81,7 +81,7 @@ export async function runChat(
           await runChat(
             engine,
             runBash,
-            [{ role: 'user', content: subQuery }],
+            subQuery,
             (part) => {
               if (part.kind === 'text') {
                 subText += part.text;

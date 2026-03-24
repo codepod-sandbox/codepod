@@ -56,12 +56,26 @@ export function Chat({ engine, sandbox, sandboxReady }: ChatProps) {
     setInput('');
     setGenerating(true);
 
-    const history = [...messages, userMsg].map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }));
+    const execBash = (cmd: string) =>
+      sandbox ? runBash(sandbox, cmd) : Promise.resolve({ stdout: '', stderr: 'Sandbox not ready yet — please wait and retry.', exitCode: 1 });
+
+    // Write conversation history to /session.txt so the agent can read it if needed.
+    if (messages.length > 0) {
+      const historyText = messages
+        .map(m => `${m.role === 'user' ? 'USER' : 'ASSISTANT'}: ${m.content}`)
+        .join('\n\n---\n\n');
+      // Base64-encode to avoid shell quoting issues with arbitrary content.
+      const bytes = new TextEncoder().encode(historyText);
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      const encoded = btoa(binary);
+      await execBash(`python3 -c "import base64; open('~/session.txt','w').write(base64.b64decode('${encoded}').decode())"`);
+    }
 
     await runChat(
       engine as never,
-      (cmd) => sandbox ? runBash(sandbox, cmd) : Promise.resolve({ stdout: '', stderr: 'Sandbox not ready yet — please wait and retry.', exitCode: 1 }),
-      history,
+      execBash,
+      input,
       (part) => {
         setMessages(prev => prev.map(m => {
           if (m.id !== assistantId) return m;
@@ -78,7 +92,7 @@ export function Chat({ engine, sandbox, sandboxReady }: ChatProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#1e1e2e', color: '#cdd6f4', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid #313244', color: '#cba6f7', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span>codepod — LLM demo <span style={{ fontSize: '0.75rem', color: '#6c7086', fontWeight: 400 }}>(Hermes-3 8B · WebGPU)</span></span>
+        <span>codepod — RLM demo <span style={{ fontSize: '0.75rem', color: '#6c7086', fontWeight: 400 }}>(Hermes-3 8B · WebGPU)</span></span>
         {!sandboxReady && <span style={{ fontSize: '0.72rem', color: '#f9e2af', fontWeight: 400 }}>sandbox loading…</span>}
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
