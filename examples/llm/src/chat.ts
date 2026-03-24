@@ -1,5 +1,6 @@
 import type { Part } from './types.js';
 import { SYSTEM_PROMPT } from './llm.js';
+import { extractCodeBlocks, parseLlmCommand } from './parse.js';
 
 export const MAX_TOOL_CALLS = 15;
 export const MAX_DEPTH = 2;
@@ -19,33 +20,6 @@ type LLMMessage =
   | { role: 'user'; content: string }
   | { role: 'assistant'; content: string };
 
-/** Extract executable code blocks from a model response.
- *  bash / python / python3 → run (python wrapped in heredoc)
- */
-function extractCodeBlocks(text: string): string[] {
-  const blocks: string[] = [];
-  const re = /```(bash|python3?)\n([\s\S]*?)```/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const lang = m[1];
-    const code = m[2].trim();
-    if (!code) continue;
-    if (lang.startsWith('python')) {
-      blocks.push(`python3 << 'PYEOF'\n${code}\nPYEOF`);
-    } else {
-      blocks.push(code);
-    }
-  }
-  return blocks;
-}
-
-/** If cmd is `llm "query"` or `llm 'query'`, return the query string; else null. */
-function parseLlmCommand(cmd: string): string | null {
-  const trimmed = cmd.trim();
-  // Match: llm "..." or llm '...' (single-line, whole command)
-  const m = trimmed.match(/^llm\s+["']([^"']+)["']\s*$/s);
-  return m ? m[1].trim() : null;
-}
 
 export async function runChat(
   engine: Engine,
@@ -67,12 +41,14 @@ export async function runChat(
       stream: true,
     });
 
+    // Stream and break as soon as a complete code block closes — execute immediately.
     let fullText = '';
     for await (const chunk of stream) {
       const content = (chunk as { choices: Array<{ delta: { content?: string | null } }> }).choices[0].delta.content;
       if (content) {
         fullText += content;
         onPart({ kind: 'text', text: content });
+        if (extractCodeBlocks(fullText).length > 0) break;
       }
     }
 
