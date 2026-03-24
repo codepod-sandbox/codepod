@@ -24,7 +24,7 @@ type LLMMessage =
  */
 function extractCodeBlocks(text: string): string[] {
   const blocks: string[] = [];
-  const re = /```(bash|python)\n([\s\S]*?)```/g;
+  const re = /```(bash|python3?)\n([\s\S]*?)```/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const lang = m[1];
