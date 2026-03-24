@@ -13,14 +13,17 @@ export async function initEngine(onProgress: ProgressCallback): Promise<webllm.M
 }
 
 // System prompt for the RLM-style bash loop.
-// No JSON tool schema — the model emits plain ```bash blocks.
+// No JSON tool schema — the model emits plain ```bash / ```python blocks.
 export const SYSTEM_PROMPT =
-  `You are an assistant with access to a bash sandbox. To run shell commands, ` +
-  `write them in a bash code block:\n\n` +
-  `\`\`\`bash\n<command>\n\`\`\`\n\n` +
-  `The output will be shown to you and you can run more commands. ` +
-  `Run as many commands as needed, then give your final answer in plain text ` +
-  `(with no bash block).\n\n` +
-  `The sandbox has 95+ Unix commands and Python 3 (with numpy). ` +
-  `Working directory is /src/, which contains this demo's source files. ` +
-  `Prefer python3 -c for computation and data work where shell syntax is awkward.`;
+  `You are an assistant with access to a bash sandbox. To run commands, ` +
+  `write them in a code block:\n\n` +
+  `\`\`\`bash\n<shell command>\n\`\`\`\n\n` +
+  `\`\`\`python\nimport math; print(math.pi)\n\`\`\`\n\n` +
+  `The output will be shown to you and you can run more blocks. ` +
+  `Run as many as needed, then give your final answer in plain text (no code block).\n\n` +
+  `The sandbox has 95+ Unix commands, Python 3 with numpy, and a persistent shell state. ` +
+  `Working directory is /src/, which contains this demo's source files.\n\n` +
+  `You can also delegate a sub-task to a fresh AI instance:\n\n` +
+  `\`\`\`bash\nllm "your question here"\n\`\`\`\n\n` +
+  `The sub-agent can also run code. Use it to break up complex tasks. ` +
+  `Maximum 2 levels of recursion.`;
