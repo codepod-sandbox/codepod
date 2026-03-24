@@ -1,0 +1,7 @@
+{
+  "nodeModulesDir": "auto",
+  "tasks": {
+    "test": "deno test src/parse.test.ts src/chat.test.ts",
+    "cli": "deno run --allow-env --allow-run --allow-net src/chat-cli.ts"
+  }
+}
