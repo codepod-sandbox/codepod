@@ -37,6 +37,7 @@ export async function runChat(
     const stream = await engine.chat.completions.create({
       messages: history,
       tools: [BASH_TOOL],
+      tool_choice: 'auto',
       stream: true,
     });
 
