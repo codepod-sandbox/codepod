@@ -100,20 +100,20 @@ Deno.test('multiple sequential bash turns', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Python blocks (heredoc wrapping)
+// Python blocks (base64-encoded python3 -c)
 // ---------------------------------------------------------------------------
 
-Deno.test('python3 block — wrapped in heredoc', async () => {
+Deno.test('python3 block — run via python3 -c', async () => {
   const called: string[] = [];
   const parts = await collect(
     mockEngine(['```python3\nimport math\nprint(math.pi)\n```', 'Pi is ~3.14.']),
     async (cmd) => { called.push(cmd); return { stdout: '3.14\n', stderr: '', exitCode: 0 }; },
     'What is pi?',
   );
-  assertStringIncludes(called[0], "python3 << 'PYEOF'");
-  assertStringIncludes(called[0], 'import math');
+  assertStringIncludes(called[0], 'python3 -c');
+  assertStringIncludes(called[0], 'base64');
   const tc = parts.find((p) => p.kind === 'tool-call') as Extract<Part, { kind: 'tool-call' }>;
-  assertStringIncludes(tc.command, "python3 << 'PYEOF'");
+  assertStringIncludes(tc.command, 'python3 -c');
 });
 
 Deno.test('Python3 (mixed case) also wrapped', async () => {
@@ -123,7 +123,7 @@ Deno.test('Python3 (mixed case) also wrapped', async () => {
     async (cmd) => { called.push(cmd); return { stdout: '42\n', stderr: '', exitCode: 0 }; },
     'Print 42',
   );
-  assertStringIncludes(called[0], "python3 << 'PYEOF'");
+  assertStringIncludes(called[0], 'python3 -c');
 });
 
 // ---------------------------------------------------------------------------

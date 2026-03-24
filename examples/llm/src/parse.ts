@@ -3,9 +3,20 @@
  * No browser or sandbox dependencies — easily testable with Deno.
  */
 
+/** Encode Python code as a self-contained `python3 -c` command.
+ *  Base64 encoding avoids heredoc stdin redirection, which hangs in WASM shells.
+ */
+function pythonCmd(code: string): string {
+  const bytes = new TextEncoder().encode(code);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  const encoded = btoa(binary);
+  return `python3 -c "import base64; exec(base64.b64decode('${encoded}').decode())"`;
+}
+
 /** Extract executable code blocks from a model response.
  *  bash / sh / shell / zsh → run as-is
- *  python / python3 / py (any case) → wrapped in heredoc so python3 runs it
+ *  python / python3 / py (any case) → base64-encoded python3 -c command
  */
 export function extractCodeBlocks(text: string): string[] {
   const blocks: string[] = [];
@@ -21,7 +32,7 @@ export function extractCodeBlocks(text: string): string[] {
     const isBash = lang === 'bash' || lang === 'sh' || lang === 'shell' || lang === 'zsh';
 
     if (isPython) {
-      blocks.push(`python3 << 'PYEOF'\n${code}\nPYEOF`);
+      blocks.push(pythonCmd(code));
     } else if (isBash) {
       blocks.push(code);
     }
