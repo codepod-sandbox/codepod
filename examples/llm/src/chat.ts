@@ -1,19 +1,21 @@
 import type { Part } from './types.js';
-import { SYSTEM_PROMPT } from './llm.js';
+import { SYSTEM_PROMPT } from './prompts.js';
 import { extractCodeBlocks, parseLlmCommand } from './parse.js';
 
 export const MAX_TOOL_CALLS = 15;
 export const MAX_DEPTH = 2;
 
-type Engine = {
+export type LLMChunk = { choices: Array<{ delta: { content: string | null }; finish_reason: string | null }> };
+
+export type Engine = {
   chat: {
     completions: {
-      create: (opts: object) => Promise<AsyncIterable<{ choices: Array<{ delta: { content: string | null }; finish_reason: string | null }> }>>;
+      create: (opts: object) => Promise<AsyncIterable<LLMChunk>>;
     };
   };
 };
 
-type RunBash = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+export type RunBash = (command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
 type LLMMessage =
   | { role: 'system'; content: string }
