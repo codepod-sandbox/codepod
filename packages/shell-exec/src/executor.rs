@@ -637,12 +637,15 @@ pub fn exec_command(
 
             if words.is_empty() {
                 // Assignment-only command; nothing to spawn.
+                // In bash, $? reflects the exit code of the last command
+                // substitution that ran during the assignment (e.g. x=$(false) → $?=1).
                 if let Some(err) = assign_err {
                     state.last_exit_code = 1;
                     crate::shell_eprint!("{}", err);
                     return Ok(ControlFlow::Normal(RunResult::exit(1)));
                 }
-                return Ok(ControlFlow::Normal(RunResult::empty()));
+                let code = state.last_exit_code;
+                return Ok(ControlFlow::Normal(RunResult::exit(code)));
             }
 
             // Resolve process substitutions <(cmd) and >(cmd) before word expansion.

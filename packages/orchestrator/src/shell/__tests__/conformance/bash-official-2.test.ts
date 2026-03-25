@@ -8,11 +8,8 @@
  * Known gaps (tests removed, to be fixed later):
  * - Custom IFS in for-loop splitting (ifs.tests)
  * - IFS with read (read.tests) — read in pipe subshell doesn't propagate vars
- * - declare -a converting existing var (array.tests)
- * - $? after $(false) assignment (comsub.tests)
  * - Recursive function with arithmetic in condition (func.tests)
  * - 2>&1 fd duplication in subshell pipe (redir.tests)
- * - trap - (clear) and trap -p (print) (trap.tests)
  */
 import { describe, it, beforeEach } from '@std/testing/bdd';
 import { expect } from '@std/expect';
@@ -83,6 +80,11 @@ describe('bash official test suite (part 2)', () => {
   // array.tests — Array operations
   // ---------------------------------------------------------------------------
   describe('array operations (array.tests)', () => {
+    it('declare -a converts scalar to array', async () => {
+      const r = await runner.run('a=abcde; declare -a a; echo ${a[0]}');
+      expect(r.stdout).toBe('abcde\n');
+    });
+
     it('empty array expansion', async () => {
       const r = await runner.run('x=(); echo ${x[@]}');
       expect(r.exitCode).toBe(0);
@@ -157,6 +159,11 @@ describe('bash official test suite (part 2)', () => {
     it('command sub strips trailing newlines', async () => {
       const r = await runner.run("x=$(printf 'hello\\n\\n\\n'); echo \"$x\"");
       expect(r.stdout).toBe('hello\n');
+    });
+
+    it('$? after $(false) in assignment', async () => {
+      const r = await runner.run('x=$(false); echo $?');
+      expect(r.stdout).toBe('1\n');
     });
 
     it('backtick substitution', async () => {
@@ -297,6 +304,17 @@ describe('bash official test suite (part 2)', () => {
     it('trap EXIT runs on exit', async () => {
       const r = await runner.run("trap 'echo goodbye' EXIT; echo hello");
       expect(r.stdout).toBe('hello\ngoodbye\n');
+    });
+
+    it('trap - clears trap', async () => {
+      const r = await runner.run("trap 'echo BYE' EXIT; echo MID; trap - EXIT; echo DONE");
+      expect(r.stdout).toBe('MID\nDONE\n');
+    });
+
+    it('trap -p prints trap', async () => {
+      const r = await runner.run("trap 'echo bye' EXIT; trap -p EXIT");
+      expect(r.stdout).toContain('EXIT');
+      expect(r.stdout).toContain('echo bye');
     });
   });
 

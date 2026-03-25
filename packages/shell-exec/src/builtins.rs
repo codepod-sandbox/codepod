@@ -830,7 +830,14 @@ fn builtin_declare(state: &mut ShellState, args: &[String]) -> BuiltinResult {
             if is_assoc {
                 state.assoc_arrays.entry(arg.clone()).or_default();
             } else if is_array {
-                state.arrays.entry(arg.clone()).or_default();
+                // Convert existing scalar to array[0] if not already an array
+                if !state.arrays.contains_key(arg) {
+                    if let Some(val) = state.env.remove(arg) {
+                        state.arrays.insert(arg.clone(), vec![val]);
+                    } else {
+                        state.arrays.entry(arg.clone()).or_default();
+                    }
+                }
             } else {
                 state.env.entry(arg.clone()).or_default();
             }
