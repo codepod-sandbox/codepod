@@ -229,13 +229,28 @@ pub fn lex(input: &str) -> Vec<Token> {
             continue;
         }
 
-        // > or >> or < redirects
+        // > or >> or >&N or < redirects
         if chars[pos] == '>' {
             if pos + 1 < len && chars[pos + 1] == '>' {
                 pos += 2;
                 skip_whitespace(&chars, &mut pos);
                 let target = read_redirect_target(&chars, &mut pos);
                 tokens.push(Token::Redirect(RedirectType::StdoutAppend(target)));
+            } else if pos + 1 < len && chars[pos + 1] == '&' {
+                // >&N — redirect stdout to fd N
+                pos += 2; // skip >&
+                let mut fd = String::new();
+                while pos < len && chars[pos].is_ascii_digit() {
+                    fd.push(chars[pos]);
+                    pos += 1;
+                }
+                if fd == "1" {
+                    // >&1 is a no-op
+                    tokens.push(Token::Redirect(RedirectType::StdoutOverwrite(format!("&{fd}"))));
+                } else {
+                    // >&2 etc — encode as StdoutOverwrite("&N")
+                    tokens.push(Token::Redirect(RedirectType::StdoutOverwrite(format!("&{fd}"))));
+                }
             } else {
                 pos += 1;
                 skip_whitespace(&chars, &mut pos);

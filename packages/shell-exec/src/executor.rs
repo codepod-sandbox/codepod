@@ -899,10 +899,11 @@ pub fn exec_command(
                 builtin_stdin,
                 Some(&run_fn),
             ) {
-                // Restore fd 1 if we redirected to stderr
+                // Restore fd 1 if we redirected to stderr.
+                // Don't close the saved fd — it may share a pipe with
+                // the pipeline and closing would mark it as writeClosed.
                 if let Some(fd1) = saved_fd1_for_stderr {
                     let _ = host.dup2(fd1, 1);
-                    let _ = host.close_fd(fd1);
                 }
 
                 // Capture output from redirect pipe sink.
@@ -956,7 +957,6 @@ pub fn exec_command(
             // Not a builtin — restore fd 1 and clean up.
             if let Some(fd1) = saved_fd1_for_stderr {
                 let _ = host.dup2(fd1, 1);
-                let _ = host.close_fd(fd1);
             }
             state.stdout_fd = saved_redir_stdout;
             if let Some((r, w)) = redir_sink {
@@ -2102,12 +2102,9 @@ pub fn exec_command(
             let saved_traps = state.traps.clone();
             let saved_last_exit_code = state.last_exit_code;
 
-            // Apply redirects (e.g. 2>&1)
+            // Apply redirects (e.g. 2>&1) via fd dup
             let saved_fds = apply_compound_redirects(state, host, redirects);
-
             let result = exec_command(state, host, body);
-
-            // Restore redirected fds
             restore_compound_redirects(host, &saved_fds);
 
             state.env = saved_env;
@@ -6497,3 +6494,8 @@ mod tests {
         assert_eq!(stdout, "world\n");
     }
 }
+
+
+
+
+

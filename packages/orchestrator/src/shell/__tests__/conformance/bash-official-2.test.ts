@@ -5,9 +5,7 @@
  * Part 2: IFS splitting, array edge cases, command substitution,
  * function scoping, glob patterns, redirections, trap, type, varenv.
  *
- * Known gaps (tests removed, to be fixed later):
- * - 2>&1 fd duplication in subshell pipe — requires AST support for
- *   redirects on compound commands (Subshell, Group, etc.)
+ * All gaps from the official bash test suite are now closed.
  */
 import { describe, it, beforeEach } from '@std/testing/bdd';
 import { expect } from '@std/expect';
@@ -312,6 +310,21 @@ describe('bash official test suite (part 2)', () => {
       await runner.run('echo output > /tmp/out.txt 2> /tmp/err.txt');
       const r = await runner.run('cat /tmp/out.txt');
       expect(r.stdout).toBe('output\n');
+    });
+
+    it('2>&1 merges stderr to stdout', async () => {
+      const r = await runner.run('(echo OUT; echo ERR >&2) 2>&1');
+      expect(r.stdout).toBe('OUT\nERR\n');
+    });
+
+    it('2>&1 through pipe', async () => {
+      const r = await runner.run('(echo OUT; echo ERR >&2) 2>&1 | sort');
+      expect(r.stdout).toBe('ERR\nOUT\n');
+    });
+
+    it('brace group 2>&1 through pipe', async () => {
+      const r = await runner.run('{ echo A; echo B >&2; } 2>&1 | sort');
+      expect(r.stdout).toBe('A\nB\n');
     });
   });
 

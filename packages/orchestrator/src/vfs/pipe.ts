@@ -10,11 +10,13 @@
 export interface PipeReadEnd {
   read(buf: Uint8Array): number;
   close(): void;
+  addRef?(): void;
 }
 
 export interface PipeWriteEnd {
-  write(data: Uint8Array): void;
+  write(data: Uint8Array): number;
   close(): void;
+  addRef?(): void;
 }
 
 interface PipeBuffer {
@@ -71,23 +73,32 @@ export function createPipe(): [PipeReadEnd, PipeWriteEnd] {
     close(): void {
       shared.readClosed = true;
     },
+
+    addRef(): void {
+      // No-op for sync pipe (no refcount)
+    },
   };
 
   const writeEnd: PipeWriteEnd = {
-    write(data: Uint8Array): void {
+    write(data: Uint8Array): number {
       if (shared.writeClosed) {
         throw new Error('write to closed pipe');
       }
       if (data.byteLength === 0) {
-        return;
+        return 0;
       }
       const copy = new Uint8Array(data);
       shared.chunks.push(copy);
       shared.totalBytes += copy.byteLength;
+      return copy.byteLength;
     },
 
     close(): void {
       shared.writeClosed = true;
+    },
+
+    addRef(): void {
+      // No-op for sync pipe (no refcount)
     },
   };
 
