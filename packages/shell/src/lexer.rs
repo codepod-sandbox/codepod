@@ -1082,13 +1082,17 @@ fn classify_word(word: String) -> Token {
 /// Detects parameter expansion operators like `:-`, `:=`, `:+`, `:?`,
 /// case modification (`^^`, `,,`, `^`, `,`), and substring (`:N` or `:N:M`).
 fn parse_braced_var(content: &str) -> WordPart {
-    // Indirect expansion: ${!var} — look up variable named by var's value
+    // Indirect expansion: ${!var} or ${!arr[@]} / ${!arr[*]}
     if let Some(var_name) = content.strip_prefix('!') {
-        if !var_name.is_empty() && is_valid_var_name(var_name) {
+        if !var_name.is_empty()
+            && (is_valid_var_name(var_name)
+                || var_name.ends_with("[@]")
+                || var_name.ends_with("[*]"))
+        {
             return WordPart::ParamExpansion {
-                var: var_name.to_string(),
+                var: String::new(),
                 op: "!".to_string(),
-                default: String::new(),
+                default: var_name.to_string(),
             };
         }
     }

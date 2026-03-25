@@ -545,7 +545,9 @@ pub fn expand_word_part(state: &mut ShellState, part: &WordPart, exec: Option<Ex
         WordPart::ParamExpansion { var, op, default } => expand_param(state, var, op, default),
 
         WordPart::ArithmeticExpansion(expr) => {
-            crate::arithmetic::eval_arithmetic(state, expr).to_string()
+            // Pre-expand $(cmd) command substitutions inside the arithmetic expression
+            let expanded_expr = expand_command_subs_in_string(state, expr, exec);
+            crate::arithmetic::eval_arithmetic(state, &expanded_expr).to_string()
         }
     }
 }
@@ -734,7 +736,7 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
             // ${#VAR} — string length
             // When var is empty and operand is set, it's ${#operand}
             if var.is_empty() && !operand.is_empty() {
-                // Array length: ${#arr[@]}
+                // Array length: ${#arr[@]} or element length: ${#arr[N]}
                 if let Some((arr_name, sub)) = parse_array_access(operand) {
                     if sub == "@" || sub == "*" {
                         if let Some(assoc) = state.assoc_arrays.get(&arr_name) {
@@ -745,9 +747,33 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
                         }
                         return "0".to_string();
                     }
+                    // ${#arr[N]} — length of element N
+                    if let Ok(idx) = sub.parse::<i64>() {
+                        if let Some(arr) = state.arrays.get(&arr_name) {
+                            let real_idx = if idx < 0 {
+                                (arr.len() as i64 + idx) as usize
+                            } else {
+                                idx as usize
+                            };
+                            if let Some(val) = arr.get(real_idx) {
+                                return val.chars().count().to_string();
+                            }
+                        }
+                        return "0".to_string();
+                    }
+                    // ${#assoc[key]}
+                    if let Some(assoc) = state.assoc_arrays.get(&arr_name) {
+                        if let Some(val) = assoc.get(&sub) {
+                            return val.chars().count().to_string();
+                        }
+                        return "0".to_string();
+                    }
                 }
                 // String length of variable value: ${#VAR}
-                let v = state.env.get(operand).cloned().unwrap_or_default();
+                let v = state.env.get(operand)
+                    .or_else(|| state.env.get(operand))
+                    .cloned()
+                    .unwrap_or_default();
                 return v.chars().count().to_string();
             }
             // ${VAR#pattern} — trim shortest prefix
@@ -836,8 +862,33 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
         }
 
         // Indirect expansion: ${!var} — the value of var names another variable
+        // or ${!arr[@]} — array indices
         "!" => {
-            let indirect_name = val.unwrap_or_default();
+            // Check if operand is an array subscript like arr[@] or arr[*]
+            if let Some((arr_name, sub)) = parse_array_access(operand) {
+                if sub == "@" || sub == "*" {
+                    if let Some(arr) = state.arrays.get(&arr_name) {
+                        let indices: Vec<String> = (0..arr.len())
+                            .filter(|i| !arr[*i].is_empty() || *i == 0)
+                            .map(|i| i.to_string())
+                            .collect();
+                        return indices.join(" ");
+                    }
+                    if let Some(assoc) = state.assoc_arrays.get(&arr_name) {
+                        let mut keys: Vec<&String> = assoc.keys().collect();
+                        keys.sort();
+                        return keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(" ");
+                    }
+                    return String::new();
+                }
+            }
+            // Simple indirect: ${!var} — operand holds the variable name
+            let indirect_name = if operand.is_empty() {
+                val.unwrap_or_default()
+            } else {
+                // Look up operand as a variable to get the indirect name
+                state.env.get(operand).cloned().unwrap_or_default()
+            };
             if indirect_name.is_empty() {
                 String::new()
             } else {
@@ -855,6 +906,59 @@ fn expand_param(state: &mut ShellState, var: &str, op: &str, operand: &str) -> S
 // ---------------------------------------------------------------------------
 
 /// Collect char boundary positions for safe slicing.
+/// Expand `$(cmd)` command substitutions in a raw string (e.g. inside arithmetic).
+fn expand_command_subs_in_string(
+    state: &mut ShellState,
+    s: &str,
+    exec: Option<&dyn Fn(&mut ShellState, &str) -> String>,
+) -> String {
+    let exec_fn = match exec {
+        Some(f) => f,
+        None => return s.to_string(),
+    };
+    let bytes = s.as_bytes();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            // Check it's not $(( which is arithmetic
+            if i + 2 < bytes.len() && bytes[i + 2] == b'(' {
+                result.push(bytes[i] as char);
+                i += 1;
+                continue;
+            }
+            // Find matching closing paren
+            i += 2; // skip $(
+            let start = i;
+            let mut depth = 1;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'(' {
+                    depth += 1;
+                } else if bytes[i] == b')' {
+                    depth -= 1;
+                }
+                if depth > 0 {
+                    i += 1;
+                }
+            }
+            let cmd = &s[start..i];
+            if i < bytes.len() {
+                i += 1; // skip )
+            }
+            if state.substitution_depth < crate::state::MAX_SUBSTITUTION_DEPTH {
+                state.substitution_depth += 1;
+                let output = exec_fn(state, cmd);
+                state.substitution_depth -= 1;
+                result.push_str(output.trim_end_matches('\n'));
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
 fn char_boundaries(s: &str) -> Vec<usize> {
     s.char_indices()
         .map(|(i, _)| i)

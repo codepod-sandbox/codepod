@@ -9,16 +9,10 @@
  * - Custom IFS in for-loop splitting (ifs.tests)
  * - IFS with read (read.tests) — read in pipe subshell doesn't propagate vars
  * - declare -a converting existing var (array.tests)
- * - ${!a[@]} array key expansion (array.tests)
- * - ${#a[0]} element length (array.tests)
- * - $(cmd) in $(()) arithmetic context (comsub.tests)
- * - $? after $(false) (comsub.tests)
+ * - $? after $(false) assignment (comsub.tests)
  * - Recursive function with arithmetic in condition (func.tests)
  * - 2>&1 fd duplication in subshell pipe (redir.tests)
  * - trap - (clear) and trap -p (print) (trap.tests)
- * - type -t (type.tests)
- * - ENV=val cmd prefix (varenv.tests)
- * - export -n (varenv.tests)
  */
 import { describe, it, beforeEach } from '@std/testing/bdd';
 import { expect } from '@std/expect';
@@ -125,6 +119,16 @@ describe('bash official test suite (part 2)', () => {
       expect(r.stdout).toBe('x\ny\nz\n');
     });
 
+    it('${!a[@]} returns indices', async () => {
+      const r = await runner.run('a=(x y z); echo ${!a[@]}');
+      expect(r.stdout).toBe('0 1 2\n');
+    });
+
+    it('${#a[0]} returns element length', async () => {
+      const r = await runner.run('a=(hello world); echo ${#a[0]}');
+      expect(r.stdout).toBe('5\n');
+    });
+
     it('negative index a[-1]', async () => {
       const r = await runner.run('a=(a b c); echo ${a[-1]}');
       expect(r.stdout).toBe('c\n');
@@ -163,6 +167,11 @@ describe('bash official test suite (part 2)', () => {
     it('command sub in array', async () => {
       const r = await runner.run('a=($(seq 3)); echo ${a[@]}');
       expect(r.stdout).toBe('1 2 3\n');
+    });
+
+    it('$(cmd) inside $(()) arithmetic', async () => {
+      const r = await runner.run('echo $(( $(echo 5) + $(echo 3) ))');
+      expect(r.stdout).toBe('8\n');
     });
   });
 
@@ -301,6 +310,11 @@ describe('bash official test suite (part 2)', () => {
       expect(r.stdout).toContain('echo');
     });
 
+    it('type -t returns type keyword', async () => {
+      const r = await runner.run('type -t echo');
+      expect(r.stdout).toBe('builtin\n');
+    });
+
     it('command -v finds command', async () => {
       const r = await runner.run('command -v echo');
       expect(r.exitCode).toBe(0);
@@ -329,6 +343,11 @@ describe('bash official test suite (part 2)', () => {
     it('variable in subshell does not leak', async () => {
       const r = await runner.run('(X=sub); echo ${X:-unset}');
       expect(r.stdout).toBe('unset\n');
+    });
+
+    it('export -n removes from env', async () => {
+      const r = await runner.run('export X=hello; export -n X; (echo ${X:-gone})');
+      expect(r.stdout).toBe('gone\n');
     });
   });
 });

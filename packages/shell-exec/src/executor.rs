@@ -610,7 +610,15 @@ pub fn exec_command(
         let saved_stdout_fd = state.stdout_fd;
         state.stdout_fd = write_fd;
         let inner_cmd = codepod_shell::parser::parse(cmd_str);
-        let _ = exec_command(state, host, &inner_cmd);
+        match exec_command(state, host, &inner_cmd) {
+            Ok(ControlFlow::Normal(r)) => {
+                state.last_exit_code = r.exit_code;
+            }
+            Ok(ControlFlow::Return(code)) => {
+                state.last_exit_code = code;
+            }
+            _ => {}
+        }
         state.stdout_fd = saved_stdout_fd;
         let _ = host.close_fd(write_fd);
         let captured = host.read_fd(read_fd).unwrap_or_default();

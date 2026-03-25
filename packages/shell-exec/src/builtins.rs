@@ -553,17 +553,34 @@ fn builtin_export(state: &mut ShellState, args: &[String]) -> BuiltinResult {
         return BuiltinResult::Result(0);
     }
 
+    // Check for -n flag (unexport)
+    let mut unexport = false;
+    let mut real_args: Vec<&str> = Vec::new();
     for arg in args {
         if arg == "-p" {
             continue;
+        } else if arg == "-n" {
+            unexport = true;
+        } else {
+            real_args.push(arg);
         }
-        if let Some(eq_pos) = arg.find('=') {
+    }
+
+    for arg in &real_args {
+        if unexport {
+            // Remove from env (unexport) — variable value is lost to subshells
+            state.env.remove(*arg);
+        } else if let Some(eq_pos) = arg.find('=') {
             let name = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];
             state.env.insert(name.to_string(), value.to_string());
         } else {
-            // export NAME without value: mark it (already in env if set)
-            state.env.entry(arg.clone()).or_default();
+            // export NAME without value: promote from variables to env
+            if state.env.contains_key(*arg) {
+                // Already exported, nothing to do
+            } else {
+                state.env.entry(arg.to_string()).or_default();
+            }
         }
     }
 
@@ -1191,16 +1208,42 @@ fn builtin_shift(state: &mut ShellState, args: &[String]) -> BuiltinResult {
 fn builtin_type(state: &ShellState, host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
     let mut output = String::new();
     let mut code = 0;
+    let mut type_only = false;
 
+    let mut real_args: Vec<&str> = Vec::new();
     for arg in args {
-        if is_builtin(arg) {
-            output.push_str(&format!("{} is a shell builtin\n", arg));
-        } else if state.functions.contains_key(arg) {
-            output.push_str(&format!("{} is a function\n", arg));
-        } else if crate::virtual_commands::is_virtual_command(arg) || host.has_tool(arg) {
-            output.push_str(&format!("{} is /usr/bin/{}\n", arg, arg));
+        if arg == "-t" {
+            type_only = true;
+        } else if arg == "-a" || arg == "-p" || arg == "-f" {
+            // Ignore other flags for now
         } else {
-            output.push_str(&format!("{}: not found\n", arg));
+            real_args.push(arg);
+        }
+    }
+
+    for arg in &real_args {
+        if is_builtin(arg) {
+            if type_only {
+                output.push_str("builtin\n");
+            } else {
+                output.push_str(&format!("{} is a shell builtin\n", arg));
+            }
+        } else if state.functions.contains_key(*arg) {
+            if type_only {
+                output.push_str("function\n");
+            } else {
+                output.push_str(&format!("{} is a function\n", arg));
+            }
+        } else if crate::virtual_commands::is_virtual_command(arg) || host.has_tool(arg) {
+            if type_only {
+                output.push_str("file\n");
+            } else {
+                output.push_str(&format!("{} is /usr/bin/{}\n", arg, arg));
+            }
+        } else {
+            if !type_only {
+                output.push_str(&format!("{}: not found\n", arg));
+            }
             code = 1;
         }
     }
@@ -1414,6 +1457,26 @@ fn builtin_trap(state: &mut ShellState, args: &[String]) -> BuiltinResult {
         return BuiltinResult::Result(0);
     }
 
+    // trap -p [SIGNAL...] — print traps
+    if args[0] == "-p" {
+        let mut output = String::new();
+        if args.len() > 1 {
+            for signal in &args[1..] {
+                if let Some(action) = state.traps.get(signal) {
+                    output.push_str(&format!("trap -- '{}' {}\n", action, signal));
+                }
+            }
+        } else {
+            let mut traps: Vec<(&String, &String)> = state.traps.iter().collect();
+            traps.sort_by_key(|(k, _)| (*k).clone());
+            for (signal, action) in traps {
+                output.push_str(&format!("trap -- '{}' {}\n", action, signal));
+            }
+        }
+        shell_print!("{}", output);
+        return BuiltinResult::Result(0);
+    }
+
     if args.len() < 2 {
         shell_eprint!("{}", "trap: usage: trap action signal...\n");
         return BuiltinResult::Result(1);
@@ -1421,7 +1484,8 @@ fn builtin_trap(state: &mut ShellState, args: &[String]) -> BuiltinResult {
 
     let action = &args[0];
     for signal in &args[1..] {
-        if action.is_empty() {
+        if action == "-" || action.is_empty() {
+            // trap - SIGNAL or trap '' SIGNAL — clear the trap
             state.traps.remove(signal);
         } else {
             state.traps.insert(signal.clone(), action.clone());
