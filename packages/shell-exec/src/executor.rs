@@ -434,7 +434,7 @@ fn apply_output_redirects(
         match &redir.redirect_type {
             RedirectType::StdoutOverwrite(path) => {
                 if path == "&2" {
-                    // >&2: redirect stdout to stderr
+                    // >&2: merge stdout into stderr (string-level redirect)
                     stderr.push_str(stdout);
                     *stdout = String::new();
                 } else if path == "&1" {
@@ -848,12 +848,28 @@ pub fn exec_command(
 
             // If there are stdout redirects, pipe-sink stdout_fd so shell_print!()
             // output is captured for writing to the redirect target file.
+            // Check for >&2 (stdout to stderr) fd redirect
+            let has_fd_redirect_to_stderr = redirects
+                .iter()
+                .any(|r| matches!(&r.redirect_type, RedirectType::StdoutOverwrite(p) if p == "&2"));
+
+            // For >&2: dup fd 2 to fd 1 so builtin's print!() goes to stderr.
+            // When 2>&1 compound redirect is active, fd 2 = stdout, so this works.
+            let saved_fd1_for_stderr = if has_fd_redirect_to_stderr {
+                let saved = host.dup(1).ok();
+                let _ = host.dup2(2, 1); // fd 1 now points to fd 2's target
+                saved
+            } else {
+                None
+            };
+
             let has_stdout_redir = redirects.iter().any(|r| {
                 matches!(
                     &r.redirect_type,
-                    RedirectType::StdoutOverwrite(_)
-                        | RedirectType::StdoutAppend(_)
-                        | RedirectType::BothOverwrite(_)
+                    RedirectType::StdoutOverwrite(p) if p != "&2" && p != "&1"
+                ) || matches!(
+                    &r.redirect_type,
+                    RedirectType::StdoutAppend(_) | RedirectType::BothOverwrite(_)
                 )
             });
             let saved_redir_stdout = state.stdout_fd;
@@ -883,6 +899,12 @@ pub fn exec_command(
                 builtin_stdin,
                 Some(&run_fn),
             ) {
+                // Restore fd 1 if we redirected to stderr
+                if let Some(fd1) = saved_fd1_for_stderr {
+                    let _ = host.dup2(fd1, 1);
+                    let _ = host.close_fd(fd1);
+                }
+
                 // Capture output from redirect pipe sink.
                 state.stdout_fd = saved_redir_stdout;
                 let captured_stdout = if let Some((r, w)) = redir_sink {
@@ -931,7 +953,11 @@ pub fn exec_command(
                 let _ = host.close_fd(fd);
             }
 
-            // Not a builtin — clean up redirect pipe sink if set.
+            // Not a builtin — restore fd 1 and clean up.
+            if let Some(fd1) = saved_fd1_for_stderr {
+                let _ = host.dup2(fd1, 1);
+                let _ = host.close_fd(fd1);
+            }
             state.stdout_fd = saved_redir_stdout;
             if let Some((r, w)) = redir_sink {
                 let _ = host.close_fd(w);
@@ -1483,6 +1509,13 @@ pub fn exec_command(
                 // compound commands use normal fd 0/1/2 conventions.
                 let saved_fd0 = host.dup(0).ok();
                 let _ = host.dup2(stage_stdin_fd, 0);
+                let saved_fd1 = if stage_stdout_fd != saved_stdout_fd {
+                    let fd = host.dup(1).ok();
+                    let _ = host.dup2(stage_stdout_fd, 1);
+                    fd
+                } else {
+                    None
+                };
 
                 match cmd {
                     Command::Simple {
@@ -1721,6 +1754,10 @@ pub fn exec_command(
                                     let _ = host.dup2(fd, 0);
                                     let _ = host.close_fd(fd);
                                 }
+                                if let Some(fd) = saved_fd1 {
+                                    let _ = host.dup2(fd, 1);
+                                    let _ = host.close_fd(fd);
+                                }
                                 for (read_fd, write_fd) in &pipes {
                                     let _ = host.close_fd(*read_fd);
                                     let _ = host.close_fd(*write_fd);
@@ -1733,6 +1770,10 @@ pub fn exec_command(
                                 // Break, Continue, Return, Cancelled — propagate
                                 if let Some(fd) = saved_fd0 {
                                     let _ = host.dup2(fd, 0);
+                                    let _ = host.close_fd(fd);
+                                }
+                                if let Some(fd) = saved_fd1 {
+                                    let _ = host.dup2(fd, 1);
                                     let _ = host.close_fd(fd);
                                 }
                                 for (read_fd, write_fd) in &pipes {
@@ -1751,9 +1792,13 @@ pub fn exec_command(
                     }
                 }
 
-                // Restore fd 0 after the stage.
+                // Restore fd 0 and fd 1 after the stage.
                 if let Some(fd) = saved_fd0 {
                     let _ = host.dup2(fd, 0);
+                    let _ = host.close_fd(fd);
+                }
+                if let Some(fd) = saved_fd1 {
+                    let _ = host.dup2(fd, 1);
                     let _ = host.close_fd(fd);
                 }
 
