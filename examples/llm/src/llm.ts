@@ -1,7 +1,7 @@
 import * as webllm from '@mlc-ai/web-llm';
 export { SYSTEM_PROMPT } from './prompts.js';
 
-export const MODEL_ID = 'Qwen3-4B-q4f16_1-MLC';
+export const MODEL_ID = 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC';
 
 export type ProgressCallback = (progress: number, text: string) => void;
 

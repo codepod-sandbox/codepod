@@ -43,8 +43,6 @@ export async function runChat(
     const stream = await engine.chat.completions.create({
       messages: history,
       stream: true,
-      // Disable Qwen3 thinking mode — we want direct answers, not <think> blocks
-      enable_thinking: false,
     });
 
     // Stream tokens. Once a complete code block closes, stop emitting to the UI
@@ -52,33 +50,18 @@ export async function runChat(
     // for-await leaves the worker busy and blocks the next create() call).
     let fullText = '';
     let blockDetected = false;
-    let inThink = false;
     for await (const chunk of stream) {
       const content = (chunk as { choices: Array<{ delta: { content?: string | null } }> }).choices[0].delta.content;
       if (content) {
         fullText += content;
-        // Skip <think>...</think> blocks (Qwen3 reasoning tokens)
-        if (fullText.includes('<think>') && !fullText.includes('</think>')) {
-          inThink = true;
-          continue;
-        }
-        if (inThink && fullText.includes('</think>')) {
-          inThink = false;
-          continue;
-        }
-        if (inThink) continue;
         if (!blockDetected) {
-          // Strip any think block prefix from emitted text
-          const clean = content.replace(/<\/?think>/g, '');
-          if (clean) onPart({ kind: 'text', text: clean });
+          onPart({ kind: 'text', text: content });
           if (extractCodeBlocks(fullText).length > 0) blockDetected = true;
         }
       }
     }
-    // Strip <think>...</think> blocks before extracting code
-    const cleanText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '');
 
-    const blocks = extractCodeBlocks(cleanText);
+    const blocks = extractCodeBlocks(fullText);
     if (blocks.length === 0) break;
 
     const resultLines: string[] = [];
@@ -136,8 +119,10 @@ export async function runChat(
     }
 
     // Feed only the portion up to the first code block (what we actually executed)
-    const firstBlockText = cleanText.slice(0, cleanText.indexOf('```') + cleanText.slice(cleanText.indexOf('```')).indexOf('\n```') + 4);
-    history.push({ role: 'assistant', content: firstBlockText || cleanText });
+    const idx = fullText.indexOf('```');
+    const endIdx = idx >= 0 ? fullText.indexOf('\n```', idx + 3) : -1;
+    const firstBlockText = endIdx >= 0 ? fullText.slice(0, endIdx + 4) : fullText;
+    history.push({ role: 'assistant', content: firstBlockText });
     history.push({ role: 'user', content: `[RESULT]\n${resultLines.join('\n\n')}\n[/RESULT]\n\nNow answer based on the output above. Do NOT run the same command again.` });
   }
 }
