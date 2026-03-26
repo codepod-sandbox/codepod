@@ -43,6 +43,8 @@ export async function runChat(
     const stream = await engine.chat.completions.create({
       messages: history,
       stream: true,
+      // Disable Qwen3 thinking mode — we want direct answers, not <think> blocks
+      enable_thinking: false,
     });
 
     // Stream tokens. Once a complete code block closes, stop emitting to the UI
@@ -117,7 +119,9 @@ export async function runChat(
       toolCallCount++;
     }
 
-    history.push({ role: 'assistant', content: fullText });
-    history.push({ role: 'user', content: resultLines.join('\n\n') });
+    // Feed only the portion up to the first code block (what we actually executed)
+    const firstBlockText = fullText.slice(0, fullText.indexOf('```') + fullText.slice(fullText.indexOf('```')).indexOf('\n```') + 4);
+    history.push({ role: 'assistant', content: firstBlockText || fullText });
+    history.push({ role: 'user', content: `[RESULT]\n${resultLines.join('\n\n')}\n[/RESULT]\n\nNow answer based on the output above. Do NOT run the same command again.` });
   }
 }
