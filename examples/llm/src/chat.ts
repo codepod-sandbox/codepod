@@ -41,10 +41,12 @@ export async function runChat(
   let toolCallCount = 0;
 
   while (true) {
+    console.log('[chat] creating stream, history length:', history.length);
     const stream = await engine.chat.completions.create({
       messages: history,
       stream: true,
     });
+    console.log('[chat] stream created');
 
     // Stream and break as soon as a complete code block closes — execute immediately.
     let fullText = '';
@@ -57,12 +59,18 @@ export async function runChat(
         if (extractCodeBlocks(fullText).length > 0) { didBreak = true; break; }
       }
     }
+    console.log('[chat] stream done, didBreak:', didBreak, 'fullText length:', fullText.length);
 
     // If we broke out early (code block detected), interrupt the WebLLM worker
     // so the engine is free for the next create() call.
-    if (didBreak) engine.interruptGenerate();
+    if (didBreak) {
+      console.log('[chat] calling interruptGenerate');
+      engine.interruptGenerate();
+      console.log('[chat] interruptGenerate returned');
+    }
 
     const blocks = extractCodeBlocks(fullText);
+    console.log('[chat] extracted blocks:', blocks.length);
     if (blocks.length === 0) break;
 
     const resultLines: string[] = [];
@@ -106,8 +114,10 @@ export async function runChat(
         }
       } else {
         // Bash or Python block — execute via the runBlock callback.
+        console.log('[chat] executing block:', block.lang, block.code.slice(0, 50));
         onPart({ kind: 'tool-call', callId, command: block.code });
         const result = await runBlock(block);
+        console.log('[chat] block result:', result.exitCode, 'stdout:', result.stdout.slice(0, 100));
         onPart({ kind: 'tool-result', callId, ...result });
 
         const output = [result.stdout, result.stderr ? `stderr: ${result.stderr}` : '']
@@ -119,6 +129,7 @@ export async function runChat(
       toolCallCount++;
     }
 
+    console.log('[chat] turn done, feeding result back');
     history.push({ role: 'assistant', content: fullText });
     history.push({ role: 'user', content: resultLines.join('\n\n') });
   }
