@@ -54,7 +54,7 @@ if (typeof window === 'undefined') {
                         headers: newHeaders,
                     });
                 })
-                .catch((e) => { console.error(e); return new Response(null, { status: 0 }); })
+                .catch((e) => { console.error(e); return new Response("Service Worker fetch failed", { status: 502 }); })
         );
     });
 
