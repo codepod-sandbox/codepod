@@ -40,12 +40,10 @@ export async function runChat(
   let toolCallCount = 0;
 
   while (true) {
-    console.log('[chat] creating stream, history length:', history.length);
     const stream = await engine.chat.completions.create({
       messages: history,
       stream: true,
     });
-    console.log('[chat] stream created');
 
     // Stream tokens. Once a complete code block closes, stop emitting to the UI
     // but keep consuming so the WebLLM worker finishes naturally (breaking from
@@ -62,10 +60,7 @@ export async function runChat(
         }
       }
     }
-    console.log('[chat] stream done, blockDetected:', blockDetected, 'fullText length:', fullText.length);
-
     const blocks = extractCodeBlocks(fullText);
-    console.log('[chat] extracted blocks:', blocks.length);
     if (blocks.length === 0) break;
 
     const resultLines: string[] = [];
@@ -109,10 +104,8 @@ export async function runChat(
         }
       } else {
         // Bash or Python block — execute via the runBlock callback.
-        console.log('[chat] executing block:', block.lang, block.code.slice(0, 50));
         onPart({ kind: 'tool-call', callId, command: block.code });
         const result = await runBlock(block);
-        console.log('[chat] block result:', result.exitCode, 'stdout:', result.stdout.slice(0, 100));
         onPart({ kind: 'tool-result', callId, ...result });
 
         const output = [result.stdout, result.stderr ? `stderr: ${result.stderr}` : '']
@@ -124,7 +117,6 @@ export async function runChat(
       toolCallCount++;
     }
 
-    console.log('[chat] turn done, feeding result back');
     history.push({ role: 'assistant', content: fullText });
     history.push({ role: 'user', content: resultLines.join('\n\n') });
   }
