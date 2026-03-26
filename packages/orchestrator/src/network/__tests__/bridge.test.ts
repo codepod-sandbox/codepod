@@ -42,6 +42,15 @@ describe('NetworkBridge', { sanitizeOps: false, sanitizeResources: false }, () =
         return;
       }
 
+      if (url.pathname === '/binary') {
+        // Return known binary data (bytes 0-255) that would be corrupted by UTF-8 lossy
+        const buf = Buffer.alloc(256);
+        for (let i = 0; i < 256; i++) buf[i] = i;
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        res.end(buf);
+        return;
+      }
+
       if (url.pathname === '/error') {
         req.socket.destroy();
         return;
@@ -109,6 +118,39 @@ describe('NetworkBridge', { sanitizeOps: false, sanitizeResources: false }, () =
     const result = bridge.fetchSync(`${baseUrl}/data`, 'GET', {});
     expect(result.status).toBe(200);
     expect(result.body).toBe('bridge response');
+  });
+
+  it('returns body_base64 for lossless binary transfer', async () => {
+    const gateway = new NetworkGateway({ allowedHosts: ['127.0.0.1'] });
+    bridge = new NetworkBridge(gateway);
+    await bridge.start();
+
+    const result = bridge.fetchSync(`${baseUrl}/binary`, 'GET', {});
+    expect(result.status).toBe(200);
+    expect(result.body_base64).toBeTruthy();
+
+    // Decode base64 and verify all 256 bytes survived
+    const binary = atob(result.body_base64!);
+    expect(binary.length).toBe(256);
+    for (let i = 0; i < 256; i++) {
+      expect(binary.charCodeAt(i)).toBe(i);
+    }
+  });
+
+  it('text body still works for UTF-8 content', async () => {
+    const gateway = new NetworkGateway({ allowedHosts: ['127.0.0.1'] });
+    bridge = new NetworkBridge(gateway);
+    await bridge.start();
+
+    const result = bridge.fetchSync(`${baseUrl}/data`, 'GET', {});
+    expect(result.status).toBe(200);
+    expect(result.body).toBe('bridge response');
+    // body_base64 should also be present and decode to the same text
+    expect(result.body_base64).toBeTruthy();
+    const decoded = new TextDecoder().decode(
+      Uint8Array.from(atob(result.body_base64!), c => c.charCodeAt(0))
+    );
+    expect(decoded).toBe('bridge response');
   });
 
   it('returns error for blocked hosts', async () => {
