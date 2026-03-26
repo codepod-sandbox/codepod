@@ -375,7 +375,8 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
           await mgr.registerNativeModule(moduleName, wasmBytes);
           return 0;
         }
-        mgr.registerTool(name, path);
+        // Async register + preload so dynamically installed tools are immediately usable
+        await mgr.registerAndLoadTool(name, path);
         return 0;
       } catch {
         return ERR_IO;

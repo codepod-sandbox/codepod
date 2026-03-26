@@ -65,6 +65,12 @@ export class ProcessManager {
     }
   }
 
+  /** Register and preload a tool — async version for runtime-installed packages. */
+  async registerAndLoadTool(name: string, wasmPath: string): Promise<void> {
+    this.registerTool(name, wasmPath);
+    await this.loadModule(wasmPath);
+  }
+
   /** Register a host command (TypeScript handler) that looks like an executable.
    *  Also creates a tool stub in /usr/bin so the shell can discover it. */
   registerHostCommand(name: string, handler: ExtensionHandler, description?: string): void {
