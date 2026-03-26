@@ -244,11 +244,11 @@ pub fn lex(input: &str) -> Vec<Token> {
                     fd.push(chars[pos]);
                     pos += 1;
                 }
-                if fd == "1" {
-                    // >&1 is a no-op
-                    tokens.push(Token::Redirect(RedirectType::StdoutOverwrite(format!("&{fd}"))));
+                if fd.is_empty() || fd == "-" {
+                    // >& with no fd number — treat as close (>&-) or error
+                    // Just skip; no redirect token emitted
                 } else {
-                    // >&2 etc — encode as StdoutOverwrite("&N")
+                    // >&1, >&2, etc — encode as StdoutOverwrite("&N")
                     tokens.push(Token::Redirect(RedirectType::StdoutOverwrite(format!("&{fd}"))));
                 }
             } else {

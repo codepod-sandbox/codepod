@@ -50,7 +50,9 @@ fn eval_arith_inner(state: &mut ShellState, expr: &str) -> i64 {
         let op = &caps.1;
         let cur = parse_env_int(state, var);
         let new_val = if op == "++" { cur + 1 } else { cur - 1 };
-        state.env.insert(var.clone(), new_val.to_string());
+        if !state.readonly_vars.contains(var) {
+            state.env.insert(var.clone(), new_val.to_string());
+        }
         return cur;
     }
 
@@ -60,7 +62,9 @@ fn eval_arith_inner(state: &mut ShellState, expr: &str) -> i64 {
         let var = &caps.1;
         let cur = parse_env_int(state, var);
         let new_val = if op == "++" { cur + 1 } else { cur - 1 };
-        state.env.insert(var.clone(), new_val.to_string());
+        if !state.readonly_vars.contains(var) {
+            state.env.insert(var.clone(), new_val.to_string());
+        }
         return new_val;
     }
 
@@ -97,7 +101,9 @@ fn eval_arith_inner(state: &mut ShellState, expr: &str) -> i64 {
             "**" => pow_i64(cur, rhs),
             _ => rhs,
         };
-        state.env.insert(var, result.to_string());
+        if !state.readonly_vars.contains(&var) {
+            state.env.insert(var, result.to_string());
+        }
         return result;
     }
 
@@ -107,7 +113,9 @@ fn eval_arith_inner(state: &mut ShellState, expr: &str) -> i64 {
         let var = caps.0;
         let rhs_expr = caps.1;
         let value = eval_arith_inner(state, &rhs_expr);
-        state.env.insert(var, value.to_string());
+        if !state.readonly_vars.contains(&var) {
+            state.env.insert(var, value.to_string());
+        }
         return value;
     }
 

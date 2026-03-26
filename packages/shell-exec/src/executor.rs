@@ -433,12 +433,22 @@ fn apply_output_redirects(
     for redir in redirects {
         match &redir.redirect_type {
             RedirectType::StdoutOverwrite(path) => {
-                if path == "&2" {
-                    // >&2: merge stdout into stderr (string-level redirect)
-                    stderr.push_str(stdout);
-                    *stdout = String::new();
-                } else if path == "&1" {
-                    // >&1: no-op (stdout already goes to stdout)
+                if path.starts_with('&') {
+                    // >&N fd redirect
+                    match path.as_str() {
+                        "&2" => {
+                            // >&2: merge stdout into stderr
+                            stderr.push_str(stdout);
+                            *stdout = String::new();
+                        }
+                        "&1" => {
+                            // >&1: no-op
+                        }
+                        _ => {
+                            // >&N for unsupported N — discard output (like /dev/null)
+                            *stdout = String::new();
+                        }
+                    }
                 } else {
                     let resolved = state.resolve_path(path);
                     host.write_file(&resolved, stdout, WriteMode::Truncate)
@@ -6494,6 +6504,7 @@ mod tests {
         assert_eq!(stdout, "world\n");
     }
 }
+
 
 
 
