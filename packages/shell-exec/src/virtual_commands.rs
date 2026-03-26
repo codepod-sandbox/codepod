@@ -15,6 +15,15 @@ use serde::{Deserialize, Serialize};
 
 pub const VIRTUAL_COMMANDS: &[&str] = &["curl", "wget", "pkg", "pip"];
 
+/// Packages built into the sandbox runtime (compiled in or pre-installed as shims).
+/// These are always available regardless of pip install state.
+const BUILTIN_PACKAGES: &[(&str, &str)] = &[
+    ("numpy", "1.26.4"),
+    ("matplotlib", "3.8.0"),
+    ("Pillow", "10.4.0"),
+    ("requests", "2.32.0"),
+];
+
 pub fn is_virtual_command(name: &str) -> bool {
     VIRTUAL_COMMANDS.contains(&name)
 }
@@ -758,6 +767,13 @@ fn pip_install(state: &mut ShellState, host: &dyn HostInterface, args: &[String]
 
     let mut all_to_install = Vec::new();
     for name in &names {
+        // Check built-in packages first
+        let name_lower = name.to_lowercase();
+        if BUILTIN_PACKAGES.iter().any(|(n, _)| n.to_lowercase() == name_lower) {
+            shell_print!("Requirement already satisfied: {name}\n");
+            continue;
+        }
+
         // Check registry
         if !registry.iter().any(|p| p.name == *name) {
             // Check extensions
@@ -879,16 +895,20 @@ fn pip_list(host: &dyn HostInterface) -> RunResult {
     let installed = read_pip_installed(host);
     let extensions = read_extension_meta(host);
 
-    if installed.is_empty() && extensions.is_empty() {
-        shell_print!("{}", "Package    Version\n---------- -------\n");
-        return RunResult::empty();
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    // Built-in packages (compiled into the binary or pre-installed as shims)
+    for &(name, version) in BUILTIN_PACKAGES {
+        entries.push((name.to_string(), version.to_string()));
     }
 
-    let mut entries: Vec<(String, String)> = Vec::new();
+    // Pip-installed packages
     for pkg in &installed {
-        entries.push((pkg.name.clone(), pkg.version.clone()));
+        if !entries.iter().any(|(n, _)| n == &pkg.name) {
+            entries.push((pkg.name.clone(), pkg.version.clone()));
+        }
     }
-    // Add extension-provided packages
+    // Extension-provided packages
     for ext in &extensions {
         if let Some(ref py) = ext.python_package {
             if !entries.iter().any(|(n, _)| n == &ext.name) {
@@ -972,6 +992,18 @@ fn pip_show(host: &dyn HostInterface, args: &[String]) -> RunResult {
         }
     }
 
+    // Check built-in packages
+    let name_lower = name.to_lowercase();
+    if let Some((bname, bver)) = BUILTIN_PACKAGES.iter().find(|(n, _)| n.to_lowercase() == name_lower) {
+        shell_print!(
+            "Name: {}\nVersion: {}\nSummary: Built-in sandbox package\nLocation: (compiled-in)\n",
+            bname,
+            bver
+        );
+        return RunResult::empty();
+    }
+
     shell_eprint!("pip show: package '{name}' not found\n");
     RunResult::exit(1)
 }
+
