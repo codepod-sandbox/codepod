@@ -87,6 +87,7 @@ function buildSandboxOptions() {
         stderrBytes: 1 * 1024 * 1024,
         commandBytes: 65536,
       },
+      packagePolicy: hasNetwork ? { enabled: true } : { enabled: false },
       pipPolicy: {
         enabled: config.pip.enabled,
         allowedPackages: config.pip.allow.length > 0 ? config.pip.allow : undefined,
