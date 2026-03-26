@@ -52,10 +52,8 @@ mkdir -p "$OUT_DIR"
 
 BUNDLE="$OUT_DIR/.codepod-mcp-bundle.mjs"
 
-if [ ! -f "packages/orchestrator/dist/index.js" ] || [ ! -f "packages/orchestrator/dist/node-adapter.js" ]; then
-  echo "==> Building orchestrator TypeScript..."
-  (cd packages/orchestrator && "$DENO" task build)
-fi
+echo "==> Building orchestrator TypeScript..."
+(cd packages/orchestrator && "$DENO" task build)
 
 echo "==> Bundling with esbuild..."
 npx esbuild packages/mcp-server/src/index.ts \
