@@ -45,3 +45,8 @@ export function getSslShimSource(): string {
 export function getSiteCustomizeSource(): string {
   return readShim('sitecustomize.py');
 }
+
+/** Get the requests module shim (lightweight requests-compatible HTTP library). */
+export function getRequestsShimSource(): string {
+  return readShim('requests.py');
+}

@@ -27,7 +27,7 @@ import type { DirEntry, StatResult } from './vfs/inode.js';
 import { NetworkGateway } from './network/gateway.js';
 import type { NetworkPolicy } from './network/gateway.js';
 import { NetworkBridge } from './network/bridge.js';
-import { getSocketShimSource, getSslShimSource, getSiteCustomizeSource } from './network/socket-shim.js';
+import { getSocketShimSource, getSslShimSource, getSiteCustomizeSource, getRequestsShimSource } from './network/socket-shim.js';
 import type { SecurityOptions, AuditEventHandler } from './security.js';
 import { CancelledError } from './security.js';
 import type { WorkerExecutor } from './execution/worker-executor.js';
@@ -243,6 +243,9 @@ export class Sandbox {
         // interpreter startup, bypassing RustPython's frozen modules which would
         // otherwise take priority over PYTHONPATH files.
         vfs.writeFile('/usr/lib/python/sitecustomize.py', new TextEncoder().encode(getSiteCustomizeSource()));
+        // requests module shim — lightweight requests-compatible API that
+        // routes through _codepod.fetch() / http.client via the socket shim
+        vfs.writeFile('/usr/lib/python/requests.py', new TextEncoder().encode(getRequestsShimSource()));
       });
     }
 
