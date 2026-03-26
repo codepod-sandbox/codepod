@@ -361,10 +361,10 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
 
     // host_register_tool(name_ptr, name_len, path_ptr, path_len) -> i32
     // Register a pkg-installed tool with the process manager.
-    host_register_tool(
+    async host_register_tool(
       namePtr: number, nameLen: number,
       pathPtr: number, pathLen: number,
-    ): number {
+    ): Promise<number> {
       const name = readString(memory, namePtr, nameLen);
       const path = readString(memory, pathPtr, pathLen);
       try {
@@ -372,9 +372,7 @@ export function createShellImports(opts: ShellImportsOptions): Record<string, We
         if (name.startsWith('__native__')) {
           const moduleName = name.slice('__native__'.length);
           const wasmBytes = vfs.readFile(path);
-          // loadModule is async — fire and forget (module will be available
-          // by the time Python imports it, since import happens in a later command)
-          mgr.registerNativeModule(moduleName, wasmBytes).catch(() => {});
+          await mgr.registerNativeModule(moduleName, wasmBytes);
           return 0;
         }
         mgr.registerTool(name, path);
