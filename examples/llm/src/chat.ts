@@ -52,17 +52,33 @@ export async function runChat(
     // for-await leaves the worker busy and blocks the next create() call).
     let fullText = '';
     let blockDetected = false;
+    let inThink = false;
     for await (const chunk of stream) {
       const content = (chunk as { choices: Array<{ delta: { content?: string | null } }> }).choices[0].delta.content;
       if (content) {
         fullText += content;
+        // Skip <think>...</think> blocks (Qwen3 reasoning tokens)
+        if (fullText.includes('<think>') && !fullText.includes('</think>')) {
+          inThink = true;
+          continue;
+        }
+        if (inThink && fullText.includes('</think>')) {
+          inThink = false;
+          continue;
+        }
+        if (inThink) continue;
         if (!blockDetected) {
-          onPart({ kind: 'text', text: content });
+          // Strip any think block prefix from emitted text
+          const clean = content.replace(/<\/?think>/g, '');
+          if (clean) onPart({ kind: 'text', text: clean });
           if (extractCodeBlocks(fullText).length > 0) blockDetected = true;
         }
       }
     }
-    const blocks = extractCodeBlocks(fullText);
+    // Strip <think>...</think> blocks before extracting code
+    const cleanText = fullText.replace(/<think>[\s\S]*?<\/think>\s*/g, '');
+
+    const blocks = extractCodeBlocks(cleanText);
     if (blocks.length === 0) break;
 
     const resultLines: string[] = [];
@@ -120,8 +136,8 @@ export async function runChat(
     }
 
     // Feed only the portion up to the first code block (what we actually executed)
-    const firstBlockText = fullText.slice(0, fullText.indexOf('```') + fullText.slice(fullText.indexOf('```')).indexOf('\n```') + 4);
-    history.push({ role: 'assistant', content: firstBlockText || fullText });
+    const firstBlockText = cleanText.slice(0, cleanText.indexOf('```') + cleanText.slice(cleanText.indexOf('```')).indexOf('\n```') + 4);
+    history.push({ role: 'assistant', content: firstBlockText || cleanText });
     history.push({ role: 'user', content: `[RESULT]\n${resultLines.join('\n\n')}\n[/RESULT]\n\nNow answer based on the output above. Do NOT run the same command again.` });
   }
 }
