@@ -65,10 +65,13 @@ export class ProcessManager {
     }
   }
 
-  /** Register and preload a tool — async version for runtime-installed packages. */
+  /** Register and preload a tool from VFS — for runtime-installed packages. */
   async registerAndLoadTool(name: string, wasmPath: string): Promise<void> {
     this.registerTool(name, wasmPath);
-    await this.loadModule(wasmPath);
+    // Load WASM bytes from VFS and compile directly (not from host filesystem)
+    const wasmBytes = this.vfs.readFile(wasmPath);
+    const module = await WebAssembly.compile(wasmBytes as BufferSource);
+    this.moduleCache.set(wasmPath, module);
   }
 
   /** Register a host command (TypeScript handler) that looks like an executable.
