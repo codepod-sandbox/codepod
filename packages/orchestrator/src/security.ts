@@ -12,6 +12,18 @@ export interface PackagePolicy {
   requireIntegrity?: boolean;
 }
 
+/** Policy governing pip install from the codepod package registry. */
+export interface PipPolicy {
+  /** Whether pip install is enabled. Default false. */
+  enabled: boolean;
+  /** Allowed package names. If set, only these packages can be installed. */
+  allowedPackages?: string[];
+  /** Blocked package names. If set, these packages are denied. */
+  blockedPackages?: string[];
+  /** Maximum number of pip-installed packages. */
+  maxPackages?: number;
+}
+
 /** Security configuration for sandbox instances. */
 export interface SecurityOptions {
   /** Tool allowlist. If set, only these tools can be spawned. */
@@ -22,8 +34,10 @@ export interface SecurityOptions {
   onAuditEvent?: AuditEventHandler;
   /** Enable worker thread execution for hard-kill preemption. Node.js only. */
   hardKill?: boolean;
-  /** Package installation policy. */
+  /** Package installation policy (WASM binary packages via pkg install). */
   packagePolicy?: PackagePolicy;
+  /** Pip install policy (Python packages from codepod registry). */
+  pipPolicy?: PipPolicy;
 }
 
 export interface SecurityLimits {

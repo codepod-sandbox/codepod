@@ -282,6 +282,10 @@ export class Sandbox {
         const pkgPolicy = options.security?.packagePolicy ?? { enabled: false };
         vfs.writeFile('/etc/codepod/pkg-policy.json', enc.encode(JSON.stringify(pkgPolicy)));
 
+        // pip policy
+        const pipPolicy = options.security?.pipPolicy ?? { enabled: false };
+        vfs.writeFile('/etc/codepod/pip-policy.json', enc.encode(JSON.stringify(pipPolicy)));
+
         // pip registry (from PackageRegistry)
         const pkgRegistry = new PackageRegistry();
         const regData = pkgRegistry.available().map(n => {
@@ -318,6 +322,7 @@ export class Sandbox {
 
         // Lock down system config files — pip-installed.json stays 0o644 (pkg/pip update it)
         vfs.chmod('/etc/codepod/pkg-policy.json', 0o444);
+        vfs.chmod('/etc/codepod/pip-policy.json', 0o444);
         vfs.chmod('/etc/codepod/pip-registry.json', 0o444);
         vfs.chmod('/etc/codepod/extensions.json', 0o444);
       });

@@ -23,9 +23,16 @@ export interface NetworkConfig {
   block: string[];
 }
 
+export interface PipConfig {
+  enabled: boolean;
+  allow: string[];
+  block: string[];
+}
+
 export interface McpConfig {
   mounts: MountEntry[];
   network: NetworkConfig;
+  pip: PipConfig;
   timeoutMs: number;
   fsLimitBytes: number;
   wasmDir: string;
@@ -102,6 +109,9 @@ interface CliResult {
   mounts?: MountEntry[];
   networkAllow?: string[];
   networkBlock?: string[];
+  pipAllow?: string[];
+  pipBlock?: string[];
+  pipDisabled?: boolean;
   configPath?: string;
   timeoutMs?: number;
   fsLimitBytes?: number;
@@ -140,6 +150,21 @@ export function parseCli(argv: string[]): CliResult {
         blocks ??= [];
         blocks.push(next);
         i++;
+        break;
+      case '--pip-allow':
+        if (!next) throw new Error('--pip-allow requires a value');
+        result.pipAllow ??= [];
+        result.pipAllow.push(next);
+        i++;
+        break;
+      case '--pip-block':
+        if (!next) throw new Error('--pip-block requires a value');
+        result.pipBlock ??= [];
+        result.pipBlock.push(next);
+        i++;
+        break;
+      case '--no-pip':
+        result.pipDisabled = true;
         break;
       case '--config':
         if (!next) throw new Error('--config requires a value');
@@ -301,5 +326,11 @@ export function loadConfig(argv: string[], defaults: McpDefaults): McpConfig {
     ? { minSize: poolMin, maxSize: poolMax }
     : undefined;
 
-  return { mounts, network, timeoutMs, fsLimitBytes, wasmDir, shellWasm, packages, pool };
+  // --- Pip policy: CLI > defaults ---
+  const pipEnabled = cli.pipDisabled ? false : true;
+  const pipAllow = cli.pipAllow ?? [];
+  const pipBlock = cli.pipBlock ?? [];
+  const pip: PipConfig = { enabled: pipEnabled, allow: pipAllow, block: pipBlock };
+
+  return { mounts, network, pip, timeoutMs, fsLimitBytes, wasmDir, shellWasm, packages, pool };
 }

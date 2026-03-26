@@ -354,6 +354,22 @@ struct PkgPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PipPolicy {
+    enabled: bool,
+    #[serde(rename = "allowedPackages")]
+    allowed_packages: Option<Vec<String>>,
+    #[serde(rename = "blockedPackages")]
+    blocked_packages: Option<Vec<String>>,
+    #[serde(rename = "maxPackages")]
+    max_packages: Option<usize>,
+}
+
+fn read_pip_policy(host: &dyn HostInterface) -> Option<PipPolicy> {
+    let json = host.read_file("/etc/codepod/pip-policy.json").ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PkgInfo {
     name: String,
     url: String,
@@ -890,7 +906,27 @@ fn pip_install(state: &mut ShellState, host: &dyn HostInterface, args: &[String]
         return RunResult::exit(1);
     }
 
+    // Check pip policy
+    let pip_policy = read_pip_policy(host);
+    if let Some(ref policy) = pip_policy {
+        if !policy.enabled {
+            shell_eprint!("{}", "pip install: package installation is disabled by policy\n");
+            return RunResult::exit(1);
+        }
+    }
+    // If no policy file exists, allow install (backwards compat)
+
     let installed = read_pip_installed(host);
+
+    // Enforce max packages
+    if let Some(ref policy) = pip_policy {
+        if let Some(max) = policy.max_packages {
+            if installed.len() >= max {
+                shell_eprint!("pip install: maximum of {max} packages reached\n");
+                return RunResult::exit(1);
+            }
+        }
+    }
 
     // Check builtins and already-installed first
     let mut to_resolve: Vec<&str> = Vec::new();
@@ -909,6 +945,21 @@ fn pip_install(state: &mut ShellState, host: &dyn HostInterface, args: &[String]
         {
             shell_print!("Requirement already satisfied: {name}\n");
             continue;
+        }
+        // Check allow/block lists
+        if let Some(ref policy) = pip_policy {
+            if let Some(ref allowed) = policy.allowed_packages {
+                if !allowed.iter().any(|a| a.to_lowercase() == name_lower) {
+                    shell_eprint!("pip install: {name} is not in the allowed packages list\n");
+                    return RunResult::exit(1);
+                }
+            }
+            if let Some(ref blocked) = policy.blocked_packages {
+                if blocked.iter().any(|b| b.to_lowercase() == name_lower) {
+                    shell_eprint!("pip install: {name} is blocked by policy\n");
+                    return RunResult::exit(1);
+                }
+            }
         }
         to_resolve.push(name);
     }
@@ -1266,5 +1317,6 @@ fn pip_show(state: &ShellState, host: &dyn HostInterface, args: &[String]) -> Ru
     shell_eprint!("pip show: package '{name}' not found\n");
     RunResult::exit(1)
 }
+
 
 
