@@ -18,7 +18,7 @@ sklearn = ["numpy", "dep:sklearn-native"]
 sqlite3 = ["dep:sqlite3-native"]
 
 [dependencies]
-rustpython = { git = "https://github.com/RustPython/RustPython", rev = "f9ca63893", default-features = false, features = [
+rustpython = { workspace = true, default-features = false, features = [
   "freeze-stdlib",
   "importlib",
   "stdio",
@@ -30,8 +30,8 @@ rustpython = { git = "https://github.com/RustPython/RustPython", rev = "f9ca6389
 codepod-host-native = { path = "crates/codepod-host" }
 
 # Native package crates (optional, gated by features)
-numpy-rust-python = { path = "crates/numpy-rust-python", optional = true }
-pandas-native = { path = "crates/pandas", optional = true }
-pil-native = { package = "pil-rust-python", path = "crates/pil-rust-python", optional = true }
+numpy-rust-python = { path = "../numpy-rust/crates/numpy-rust-python", optional = true }
+pandas-native = { package = "pandas-rust-python", path = "../pandas-rust/crates/pandas-rust-python", optional = true }
+pil-native = { package = "pil-rust-python", path = "../pillow-rust/crates/pil-rust-python", optional = true }
 sklearn-native = { path = "crates/sklearn", optional = true }
 sqlite3-native = { path = "crates/sqlite3", optional = true }

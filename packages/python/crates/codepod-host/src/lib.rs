@@ -52,6 +52,9 @@ extern "C" {
         args_ptr: *const u8, args_len: u32,
         out_ptr: *mut u8, out_cap: u32,
     ) -> i32;
+
+    /// Run a shell command and collect output (for Python subprocess).
+    fn host_run_command(req_ptr: *const u8, req_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +495,54 @@ pub mod _codepod {
             Err(py_vm.new_exception_msg(
                 py_vm.ctx.exceptions.runtime_error.to_owned(),
                 "_codepod.native_call() is only available inside a WASM sandbox".to_owned(),
+            ))
+        }
+    }
+
+    // ----- Subprocess support -----
+
+    /// Run a shell command and capture its output.
+    ///
+    /// Usage: `_codepod.spawn(cmd, stdin='') -> dict`
+    ///
+    /// Returns a dict: `{"exit_code": int, "stdout": str, "stderr": str}`
+    ///
+    /// `cmd` is executed by the sandbox shell (same as running it in bash).
+    /// On non-WASM platforms, always raises RuntimeError.
+    #[pyfunction]
+    fn spawn(
+        cmd: vm::builtins::PyStrRef,
+        stdin: vm::function::OptionalArg<vm::builtins::PyStrRef>,
+        py_vm: &VirtualMachine,
+    ) -> PyResult<vm::PyObjectRef> {
+        let stdin_str = match stdin {
+            vm::function::OptionalArg::Present(ref s) => s.as_str().to_owned(),
+            vm::function::OptionalArg::Missing => String::new(),
+        };
+        let request_json = format!(
+            "{{\"cmd\":\"{}\",\"stdin\":\"{}\"}}",
+            json_escape(cmd.as_str()),
+            json_escape(&stdin_str),
+        );
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let response_str =
+                call_host_json(host_run_command, &request_json).map_err(|e| {
+                    py_vm.new_exception_msg(
+                        py_vm.ctx.exceptions.runtime_error.to_owned(),
+                        format!("spawn failed: {}", e),
+                    )
+                })?;
+            json_to_py(&response_str, py_vm)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = request_json;
+            Err(py_vm.new_exception_msg(
+                py_vm.ctx.exceptions.runtime_error.to_owned(),
+                "_codepod.spawn() is only available inside a WASM sandbox".to_owned(),
             ))
         }
     }

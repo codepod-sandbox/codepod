@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, relative, join } from 'node:path';
 import type { PackageMetadata } from './types';
 
@@ -22,7 +22,7 @@ function collectPyFiles(dir: string, prefix: string): Record<string, string> {
 }
 
 /** Root of the packages/ directory (two levels up from packages/orchestrator/src/packages/). */
-const PACKAGES_ROOT = resolve(import.meta.dirname, '..', '..', '..');
+const PACKAGES_ROOT = resolve(import.meta.dirname!, '..', '..', '..');
 
 const PACKAGES: PackageMetadata[] = [
   {

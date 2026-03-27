@@ -14,7 +14,7 @@ export interface StreamCallbacks {
 }
 
 export interface ShellLike {
-  run(command: string): Promise<RunResult>;
+  run(command: string, options?: { stdinData?: Uint8Array }): Promise<RunResult>;
 
   /** Set or clear streaming callbacks on pid 0 stdout/stderr buffer targets. */
   setOutputCallbacks?(callbacks: StreamCallbacks | null): void;

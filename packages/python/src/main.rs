@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     let config = config.add_native_module(numpy_def);
 
     #[cfg(feature = "pandas")]
-    let pandas_def = pandas_native::module_def(&config.ctx);
+    let pandas_def = pandas_native::pandas_module_def(&config.ctx);
     #[cfg(feature = "pandas")]
     let config = config.add_native_module(pandas_def);
 

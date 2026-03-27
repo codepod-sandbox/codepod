@@ -1,3 +1,4 @@
+/// <reference path="../jspi.d.ts" />
 /**
  * ShellInstance: instantiates and drives the Rust shell-exec WASM module.
  *
@@ -21,7 +22,7 @@ import { createShellImports } from '../host-imports/shell-imports.js';
 import { createKernelImports } from '../host-imports/kernel-imports.js';
 import { ProcessKernel, type SpawnRequest } from '../process/kernel.js';
 import { WasiHost } from '../wasi/wasi-host.js';
-import { createBufferTarget, createNullTarget, bufferToString, type FdTarget } from '../wasi/fd-target.js';
+import { createBufferTarget, createNullTarget, createStaticTarget, bufferToString, type FdTarget } from '../wasi/fd-target.js';
 
 /** Default environment variables for a new ShellInstance. */
 const DEFAULT_ENV: [string, string][] = [
@@ -136,6 +137,21 @@ export class ShellInstance implements ShellLike {
     kernel.setFdTarget(0, 1, createBufferTarget());   // stdout: captured (no limit on kernel fd)
     kernel.setFdTarget(0, 2, createBufferTarget());   // stderr: captured (no limit on kernel fd)
 
+    // Build runCommand callback for Python _codepod.spawn() / subprocess support.
+    // Each call creates a fresh ShellInstance so we don't re-enter the busy one.
+    const runCommand = async (cmd: string, stdin: string) => {
+      const sub = await ShellInstance.create(vfs, mgr, adapter, wasmPath, {
+        networkBridge: options?.networkBridge,
+        extensionRegistry: options?.extensionRegistry,
+      });
+      try {
+        const result = await sub.run(cmd, { stdinData: new TextEncoder().encode(stdin) });
+        return { exitCode: result.exitCode ?? 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+      } finally {
+        sub.destroy();
+      }
+    };
+
     // Kernel imports provide codepod-namespace syscalls (network, process mgmt)
     const kernelImports = createKernelImports({
       memory: memoryProxy,
@@ -143,11 +159,12 @@ export class ShellInstance implements ShellLike {
       kernel,
       networkBridge: options?.networkBridge,
       nativeModules: mgr.nativeModules,
+      runCommand,
       spawnProcess: (req: SpawnRequest, fdTable: Map<number, FdTarget>) => {
         if (options?.syncSpawn) {
           return spawnSyncProcess(req, fdTable, kernel, options.syncSpawn);
         }
-        return spawnAsyncProcess(req, fdTable, mgr, kernel, adapter, shellRef?.getDeadlineMs(), options?.memoryBytes, options?.networkBridge);
+        return spawnAsyncProcess(req, fdTable, mgr, kernel, adapter, shellRef?.getDeadlineMs(), options?.memoryBytes, options?.networkBridge, options?.extensionRegistry, runCommand);
       },
     });
 
@@ -179,6 +196,10 @@ export class ShellInstance implements ShellLike {
       // Register tool (async when loading native modules)
       codepodImports.host_register_tool = new WebAssembly.Suspending(
         shellImports.host_register_tool as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
+      // host_run_command: Python _codepod.spawn() / subprocess support
+      codepodImports.host_run_command = new WebAssembly.Suspending(
+        kernelImports.host_run_command as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
     }
 
@@ -540,7 +561,7 @@ export class ShellInstance implements ShellLike {
    * executes it (calling back into the host for process spawning, filesystem
    * operations, etc.), and returns a JSON-encoded RunResult.
    */
-  async run(command: string): Promise<RunResult> {
+  async run(command: string, options?: { stdinData?: Uint8Array }): Promise<RunResult> {
     // When JSPI is active, runCommandFn is wrapped with WebAssembly.promising()
     // and returns a Promise<number>. When JSPI is not active, it returns number.
     // Either way, `await` handles both correctly.
@@ -563,6 +584,13 @@ export class ShellInstance implements ShellLike {
 
     if (!alloc || !dealloc) {
       throw new Error('WASM module does not export __alloc/__dealloc');
+    }
+
+    // If stdinData is provided, install it as a static target on fd 0 for this run.
+    // After the run, restore the null target so the shell's stdin is clean again.
+    const hadStdinData = options?.stdinData && options.stdinData.byteLength > 0;
+    if (hadStdinData && this.kernel) {
+      this.kernel.setFdTarget(0, 0, createStaticTarget(options!.stdinData!));
     }
 
     // Sync env changes to the WASM module by prepending export statements
@@ -714,6 +742,11 @@ export class ShellInstance implements ShellLike {
       exitCode = 125;
     }
 
+    // Restore null stdin target after run (if we temporarily installed stdinData)
+    if (hadStdinData && this.kernel) {
+      this.kernel.setFdTarget(0, 0, createNullTarget());
+    }
+
     return {
       exitCode,
       stdout,
@@ -762,6 +795,7 @@ function spawnAsyncProcess(
   memoryBytes?: number,
   networkBridge?: NetworkBridgeLike,
   extensionRegistry?: ExtensionRegistry,
+  runCommand?: (cmd: string, stdin: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>,
 ): number {
   // Tool allowlist check
   if (!mgr.isToolAllowed(req.prog)) {
@@ -934,7 +968,8 @@ function spawnAsyncProcess(
       networkBridge,
       extensionRegistry,
       nativeModules: mgr.nativeModules,
-      spawnProcess: (req2, fdTable2) => spawnAsyncProcess(req2, fdTable2, mgr, kernel, adapter, deadlineMs, memoryBytes, networkBridge, extensionRegistry),
+      runCommand,
+      spawnProcess: (req2, fdTable2) => spawnAsyncProcess(req2, fdTable2, mgr, kernel, adapter, deadlineMs, memoryBytes, networkBridge, extensionRegistry, runCommand),
     });
     imports.codepod = childKernelImports as unknown as Record<string, WebAssembly.ImportValue>;
 
@@ -955,6 +990,10 @@ function spawnAsyncProcess(
       // Python uses host_extension_invoke for _codepod.extension_call()
       imports.codepod.host_extension_invoke = new WebAssembly.Suspending(
         childKernelImports.host_extension_invoke as (...args: number[]) => Promise<number>,
+      ) as unknown as WebAssembly.ImportValue;
+      // Python uses host_run_command for _codepod.spawn() / subprocess support
+      imports.codepod.host_run_command = new WebAssembly.Suspending(
+        childKernelImports.host_run_command as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
     }
 

@@ -19,3 +19,4 @@ __pycache__/
 packages/python-sdk/src/wasmsand/_bundled/
 packages/orchestrator/wasm/
 .build-venv/
+.DS_Store

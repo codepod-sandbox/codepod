@@ -7,3 +7,6 @@
 [submodule "packages/matplotlib-py"]
 	path = packages/matplotlib-py
 	url = git@github.com:codepod-sandbox/matplotlib-py.git
+[submodule "packages/pandas-rust"]
+	path = packages/pandas-rust
+	url = git@github.com:codepod-sandbox/pandas-rust.git
