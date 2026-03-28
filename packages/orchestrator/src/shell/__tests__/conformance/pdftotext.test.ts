@@ -125,6 +125,14 @@ describe('pdftotext conformance', () => {
       expect(r.stdout).toBe('');
     });
 
+    it('-? prints usage to stderr and exits 0', async () => {
+      // Note: shell may glob-expand -? so we quote it
+      const r = await runner.run("pdftotext '-?'");
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).toContain('pdftotext');
+      expect(r.stdout).toBe('');
+    });
+
     it('-v prints version to stderr and exits 0', async () => {
       const r = await runner.run('pdftotext -v');
       expect(r.exitCode).toBe(0);

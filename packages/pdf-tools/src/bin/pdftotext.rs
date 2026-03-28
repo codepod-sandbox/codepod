@@ -54,6 +54,7 @@ fn print_usage() {
             "-h                   : print usage information",
             "-help                : print usage information",
             "--help               : print usage information",
+            "-?                   : print usage information",
         ],
     );
 }
@@ -88,7 +89,7 @@ fn main() {
             | "-bbox" | "-bbox-layout" | "-cropbox" | "-q" | "-listenc" => {}
             // Accepted flags that take a value argument — consume and ignore
             "-enc" | "-eol" | "-opw" | "-upw" | "-r" | "-x" | "-y" | "-W" | "-H"
-            | "-zoom" | "-fixed" | "-colspacing" => {
+            | "-fixed" | "-colspacing" => {
                 let _ = args.next();
             }
             "-v" => {
@@ -96,7 +97,7 @@ fn main() {
                 print_version("pdftotext");
                 std::process::exit(EXIT_OK);
             }
-            "-h" | "-help" | "--help" => {
+            "-h" | "-help" | "--help" | "-?" => {
                 // Poppler sends help to stderr, exits 0
                 print_usage();
                 std::process::exit(EXIT_OK);
