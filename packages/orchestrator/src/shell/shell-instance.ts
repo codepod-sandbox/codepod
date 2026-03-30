@@ -18,6 +18,7 @@ import type { ExtensionRegistry } from '../extension/registry.js';
 import type { RunResult } from './shell-types.js';
 import type { HistoryEntry } from './history.js';
 import type { ShellLike, StreamCallbacks } from './shell-like.js';
+import { AsyncifyAsyncBridge } from '../async-bridge.js';
 import { createShellImports } from '../host-imports/shell-imports.js';
 import { createKernelImports } from '../host-imports/kernel-imports.js';
 import { ProcessKernel, type SpawnRequest } from '../process/kernel.js';
@@ -32,6 +33,9 @@ const DEFAULT_ENV: [string, string][] = [
   ['PATH', '/bin:/usr/bin'],
   ['PYTHONPATH', '/usr/lib/python'],
   ['SHELL', '/bin/sh'],
+  // Disable pyc bytecode caching — writing __pycache__ dirs triggers a VFS bug
+  // where subsequent path_open calls for .py files return EISDIR.
+  ['PYTHONDONTWRITEBYTECODE', '1'],
 ];
 
 export interface ShellInstanceOptions {
@@ -178,6 +182,10 @@ export class ShellInstance implements ShellLike {
     // Alias it so the import linker finds the right name.
     codepodImports.host_spawn_async = kernelImports.host_spawn as WebAssembly.ImportValue;
 
+    // Bridge for async import/export wrapping (JSPI or Asyncify).
+    // Declared here so the post-instantiation block can access it.
+    let asyncifyBridge: AsyncifyAsyncBridge | null = null;
+
     // JSPI: Wrap async imports so WASM suspends when they return a Promise.
     // WebAssembly.Suspending is available in Node 25+ (unflagged) and Chrome 137+.
     if (typeof WebAssembly.Suspending === 'function') {
@@ -201,6 +209,19 @@ export class ShellInstance implements ShellLike {
       codepodImports.host_run_command = new WebAssembly.Suspending(
         kernelImports.host_run_command as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
+    } else {
+      // Asyncify fallback: wrap async imports with the unwind/rewind bridge.
+      // The bridge is initialised after instantiation (needs the WASM exports).
+      asyncifyBridge = new AsyncifyAsyncBridge();
+      const aw = (fn: unknown) =>
+        asyncifyBridge!.wrapImport(fn as (...args: number[]) => Promise<number> | number) as WebAssembly.ImportValue;
+
+      codepodImports.host_waitpid       = aw(kernelImports.host_waitpid);
+      codepodImports.host_yield         = aw(kernelImports.host_yield);
+      codepodImports.host_network_fetch = aw(kernelImports.host_network_fetch);
+      codepodImports.host_register_tool = aw(shellImports.host_register_tool);
+      codepodImports.host_run_command   = aw(kernelImports.host_run_command);
+      // fd_read and poll_oneoff are wrapped below, after wasiImports is defined.
     }
 
     // WASI P1 stubs (minimal -- shell-exec doesn't use WASI for I/O)
@@ -420,12 +441,9 @@ export class ShellInstance implements ShellLike {
       path_readlink: () => 44,
     };
 
-    // JSPI: Wrap WASI fd_read/fd_write/poll_oneoff for pipe suspension and sleep.
-    // When a WASM process reads from an empty pipe or writes to a full pipe,
-    // the host returns a Promise that resolves when data is available.
-    // poll_oneoff also returns a Promise when sleeping (clock subscription).
-    // This requires the WASI functions to be JSPI-Suspending.
+    // Wrap WASI fd_read / fd_write / poll_oneoff for pipe suspension and sleep.
     if (typeof WebAssembly.Suspending === 'function') {
+      // JSPI: WASM suspends when an import returns a Promise.
       wasiImports.fd_read = new WebAssembly.Suspending(
         wasiImports.fd_read as (...args: number[]) => number,
       ) as unknown as WebAssembly.ImportValue;
@@ -435,6 +453,12 @@ export class ShellInstance implements ShellLike {
       wasiImports.poll_oneoff = new WebAssembly.Suspending(
         wasiImports.poll_oneoff as (...args: number[]) => Promise<number>,
       ) as unknown as WebAssembly.ImportValue;
+    } else if (asyncifyBridge) {
+      // Asyncify: wrap with unwind/rewind bridge (same bridge instance as codepod imports).
+      const aw = (fn: unknown) =>
+        asyncifyBridge!.wrapImport(fn as (...args: number[]) => Promise<number> | number) as WebAssembly.ImportValue;
+      wasiImports.fd_read     = aw(wasiImports.fd_read)     as typeof wasiImports.fd_read;
+      wasiImports.poll_oneoff = aw(wasiImports.poll_oneoff) as typeof wasiImports.poll_oneoff;
     }
 
     const imports: WebAssembly.Imports = {
@@ -465,6 +489,22 @@ export class ShellInstance implements ShellLike {
         // proc_exit(0) is expected for successful init
         if (!(e instanceof Error && e.message === 'proc_exit(0)')) throw e;
       }
+    }
+
+    // Asyncify post-init: allocate the data buffer and wire up asyncify exports.
+    // Must happen after _start() so the WASM allocator is initialised.
+    if (asyncifyBridge && rawRunCommand) {
+      const alloc = instance.exports.__alloc as ((size: number) => number) | undefined;
+      if (!alloc) throw new Error('asyncify requires __alloc export from the WASM binary');
+      // 64 KB is sufficient for the deepest Rust call stacks we see in practice.
+      const ASYNCIFY_BUF = 65536;
+      const dataAddr = alloc(ASYNCIFY_BUF);
+      // Write asyncify data buffer header: [start_ptr, end_ptr, ...data...]
+      const memView = new DataView(memoryRef!.buffer);
+      memView.setUint32(dataAddr,     dataAddr + 8,          true); // start of save area
+      memView.setUint32(dataAddr + 4, dataAddr + ASYNCIFY_BUF, true); // end of save area
+      asyncifyBridge.initFromInstance(instance, dataAddr);
+      wrappedRunCommand = asyncifyBridge.wrapExport(rawRunCommand as (...args: number[]) => number);
     }
 
     const shell = new ShellInstance(instance);

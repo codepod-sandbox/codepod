@@ -54,6 +54,13 @@ jobs:
       - name: Run Python tests
         run: cd packages/python-sdk && python -m pytest tests/ -v
 
+      - name: Run browser tests (Chromium + WebKit)
+        run: |
+          cd packages/orchestrator/browser-tests
+          npm ci
+          npx playwright install --with-deps chromium webkit
+          node_modules/.bin/playwright test --reporter=line
+
       - name: Build MCP server
         run: ./scripts/build-mcp.sh
 

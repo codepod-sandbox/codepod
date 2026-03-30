@@ -84,6 +84,14 @@ export interface SandboxOptions {
   tools?: string[];
   /** Callbacks for offloading sandbox state to external storage. */
   storage?: StorageCallbacks;
+  /**
+   * Pre-seed the pip registry cache with a custom index JSON string.
+   * The shell reads this as `/etc/codepod/registry-index.json` on first pip install,
+   * bypassing the remote CODEPOD_REGISTRY fetch. Useful for tests that need a
+   * custom registry without running a local HTTP server (which would be blocked
+   * by Atomics.wait on the main thread when JSPI is active).
+   */
+  _pipRegistryIndex?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -203,7 +211,12 @@ export class Sandbox {
       }
     }
 
-    const shellExecWasmPath = options.shellExecWasmPath ?? `${options.wasmDir}/codepod-shell-exec.wasm`;
+    // Select the shell binary based on available async mechanism:
+    //   JSPI (Chrome 137+, Node 25+, Deno 1.40+) → standard binary
+    //   Asyncify fallback (Safari, older browsers)  → -asyncify binary
+    const shellBinarySuffix = typeof WebAssembly.Suspending === 'function' ? '' : '-asyncify';
+    const shellExecWasmPath = options.shellExecWasmPath ??
+      `${options.wasmDir}/codepod-shell-exec${shellBinarySuffix}.wasm`;
 
     // Pre-load all tool modules so spawnSync can use them synchronously
     await mgr.preloadModules();
@@ -351,13 +364,11 @@ export class Sandbox {
         const pipPolicy = options.security?.pipPolicy ?? { enabled: false };
         vfs.writeFile('/etc/codepod/pip-policy.json', enc.encode(JSON.stringify(pipPolicy)));
 
-        // pip registry (from PackageRegistry)
-        const pkgRegistry = new PackageRegistry();
-        const regData = pkgRegistry.available().map(n => {
-          const m = pkgRegistry.get(n)!;
-          return { name: m.name, version: m.version, summary: m.summary, dependencies: m.dependencies, files: m.pythonFiles };
-        });
-        vfs.writeFile('/etc/codepod/pip-registry.json', enc.encode(JSON.stringify(regData)));
+        // pip local registry — intentionally empty; the pip command fetches from
+        // the remote codepod-packages registry (CODEPOD_REGISTRY URL) at install
+        // time. Extension packages are pre-installed at startup and don't need
+        // runtime lookup here.
+        vfs.writeFile('/etc/codepod/pip-registry.json', enc.encode('[]'));
 
         // pip installed state (include pre-installed packages from options.packages)
         const preInstalled: { name: string; version: string }[] = [];
@@ -384,6 +395,11 @@ export class Sandbox {
             : null,
         }));
         vfs.writeFile('/etc/codepod/extensions.json', enc.encode(JSON.stringify(extMeta)));
+
+        // Optional custom registry index cache (for testing / offline use).
+        if (options._pipRegistryIndex) {
+          vfs.writeFile('/etc/codepod/registry-index.json', enc.encode(options._pipRegistryIndex));
+        }
 
         // Lock down system config files — pip-installed.json stays 0o644 (pkg/pip update it)
         vfs.chmod('/etc/codepod/pkg-policy.json', 0o444);

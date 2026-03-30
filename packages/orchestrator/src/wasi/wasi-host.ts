@@ -520,9 +520,14 @@ export class WasiHost {
     let totalRead = 0;
     const target = this.ioFds.get(fd);
 
-    // If the target is a pipe_read, use the async path (JSPI suspends WASM).
+    // If the target is a pipe_read:
+    //   JSPI path — return a Promise; WASM suspends until data arrives.
+    //   Non-JSPI — read synchronously from buffered data; plain WASM can't await.
     if (target && target.type === 'pipe_read') {
-      return this.fdReadPipe(target, iovecs, nreadPtr);
+      if (typeof WebAssembly.Suspending === 'function') {
+        return this.fdReadPipe(target, iovecs, nreadPtr);
+      }
+      return this.fdReadPipeSync(target, iovecs, nreadPtr);
     }
 
     for (const iov of iovecs) {
@@ -580,6 +585,35 @@ export class WasiHost {
       }
     }
 
+    const viewAfter = this.getView();
+    viewAfter.setUint32(nreadPtr, totalRead, true);
+    return WASI_ESUCCESS;
+  }
+
+  /**
+   * Synchronous pipe read — for non-JSPI environments (Safari, Bun, older browsers).
+   * Reads whatever is already buffered in the pipe.  Returns WASI_ESUCCESS with
+   * totalRead=0 when the buffer is empty (write end closed or not yet written).
+   * For typical pipelines the upstream stage writes all its output before the
+   * downstream reader executes, so the buffer is full by the time this is called.
+   */
+  private fdReadPipeSync(
+    target: Extract<import('./fd-target.js').FdTarget, { type: 'pipe_read' }>,
+    iovecs: Array<{ buf: number; len: number }>,
+    nreadPtr: number,
+  ): number {
+    let totalRead = 0;
+    for (const iov of iovecs) {
+      if (iov.len === 0) continue;
+      const readBuf = new Uint8Array(iov.len);
+      const n = target.pipe.readSync(readBuf);
+      if (n > 0) {
+        const bytes = this.getBytes();
+        bytes.set(readBuf.subarray(0, n), iov.buf);
+        totalRead += n;
+      }
+      if (n < iov.len) break; // EOF or no more data available
+    }
     const viewAfter = this.getView();
     viewAfter.setUint32(nreadPtr, totalRead, true);
     return WASI_ESUCCESS;

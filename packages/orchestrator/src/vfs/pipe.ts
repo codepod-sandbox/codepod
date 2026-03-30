@@ -114,6 +114,14 @@ const DEFAULT_PIPE_CAPACITY = 65536; // 64KB, matches Linux PIPE_BUF
 export interface AsyncPipeReadEnd {
   /** Read up to buf.length bytes. Returns 0 on EOF. Suspends if empty. */
   read(buf: Uint8Array): Promise<number>;
+  /**
+   * Synchronous read — for non-JSPI environments where WASM cannot await.
+   * Reads available buffered data (up to buf.length bytes) and returns the
+   * number of bytes read, or 0 for EOF (write end closed, no data).
+   * If no data is available but the write end is still open, returns 0 as well
+   * (caller treats it as EOF — acceptable for pre-filled pipeline buffers).
+   */
+  readSync(buf: Uint8Array): number;
   /** Drain all currently buffered data synchronously. Does NOT wait for more data. */
   drainSync(): Uint8Array;
   close(): void;
@@ -246,6 +254,16 @@ export function createAsyncPipe(
         shared.pendingReader = resolve;
         shared.pendingReaderBuf = buf;
       });
+    },
+
+    readSync(buf: Uint8Array): number {
+      if (shared.totalBytes > 0) {
+        const n = drainChunks(buf);
+        tryFlushPendingWriter();
+        return n;
+      }
+      // No data: return 0 (EOF) for both closed and open write end.
+      return 0;
     },
 
     drainSync(): Uint8Array {

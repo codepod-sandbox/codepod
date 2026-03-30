@@ -1,0 +1,17 @@
+{
+  "name": "@codepod/browser-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node_modules/.bin/playwright test --config playwright.config.ts",
+    "test:chromium": "node_modules/.bin/playwright test --config playwright.config.ts --project=chromium",
+    "test:webkit": "node_modules/.bin/playwright test --config playwright.config.ts --project=webkit",
+    "test:ui": "node_modules/.bin/playwright test --config playwright.config.ts --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.7",
+    "vite": "^6.0"
+  }
+}

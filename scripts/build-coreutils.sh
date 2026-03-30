@@ -39,5 +39,27 @@ if [[ "${1:-}" == "--copy-fixtures" ]]; then
   cp "$TARGET_DIR/false-cmd-wasm.wasm" "$FIXTURES_DIR/false-cmd.wasm"
   cp "$TARGET_DIR/codepod-shell-exec.wasm" "$REPO_ROOT/packages/orchestrator/src/shell/__tests__/fixtures/codepod-shell-exec.wasm"
 
+  # Build asyncify variant for non-JSPI environments (Safari, Bun, older browsers).
+  # Requires wasm-opt (Binaryen) — skipped if not available.
+  if command -v wasm-opt &>/dev/null; then
+    echo ""
+    echo "Building codepod-shell-exec-asyncify.wasm via wasm-opt --asyncify..."
+    wasm-opt "$TARGET_DIR/codepod-shell-exec.wasm" \
+      --asyncify \
+      --enable-bulk-memory \
+      --enable-nontrapping-float-to-int \
+      --enable-sign-ext \
+      --enable-mutable-globals \
+      --pass-arg=asyncify-imports@codepod.host_waitpid,codepod.host_yield,codepod.host_network_fetch,codepod.host_register_tool,codepod.host_run_command,wasi_snapshot_preview1.fd_read,wasi_snapshot_preview1.poll_oneoff \
+      -O1 \
+      -o "$FIXTURES_DIR/codepod-shell-exec-asyncify.wasm"
+    cp "$FIXTURES_DIR/codepod-shell-exec-asyncify.wasm" \
+       "$REPO_ROOT/packages/orchestrator/src/shell/__tests__/fixtures/codepod-shell-exec-asyncify.wasm"
+    echo "  codepod-shell-exec-asyncify.wasm built."
+  else
+    echo "WARNING: wasm-opt not found — skipping asyncify build."
+    echo "         Install Binaryen (brew install binaryen) and re-run to build the asyncify variant."
+  fi
+
   echo "Done."
 fi
