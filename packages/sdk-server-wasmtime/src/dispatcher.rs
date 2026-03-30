@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::rpc::{codes, RequestId, Response};
 use crate::sandbox::SandboxManager;
+use crate::vfs::VfsError;
 
 /// All methods that will eventually be implemented, listed so the dispatcher
 /// returns the right error code (INTERNAL_ERROR vs METHOD_NOT_FOUND).
@@ -40,9 +41,40 @@ const KNOWN_METHODS: &[&str] = &[
     "rehydrate",
 ];
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    B64.decode(s).map_err(|e| format!("base64 decode: {e}"))
+}
+
+fn b64_encode(b: &[u8]) -> String {
+    B64.encode(b)
+}
+
+fn vfs_err(id: Option<RequestId>, e: VfsError) -> Response {
+    Response::err(id, 1, e.to_string())
+}
+
+fn require_str<'a>(
+    id: &Option<RequestId>,
+    params: &'a Value,
+    key: &str,
+) -> Result<&'a str, Response> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Response::err(id.clone(), codes::INVALID_PARAMS, format!("missing: {key}")))
+}
+
+fn sandbox_id(params: &Value) -> Option<&str> {
+    params.get("sandboxId").and_then(|v| v.as_str())
+}
+
+// ── Dispatcher ───────────────────────────────────────────────────────────────
+
 pub struct Dispatcher {
     initialized: bool,
-    manager: SandboxManager,
+    pub manager: SandboxManager,
     #[allow(dead_code)]
     stdout_tx: mpsc::Sender<String>,
     #[allow(dead_code)]
@@ -93,7 +125,11 @@ impl Dispatcher {
         let wasm_path = match params.get("shellWasmPath").and_then(|v| v.as_str()) {
             Some(p) => p.to_owned(),
             None => {
-                return Response::err(id, codes::INVALID_PARAMS, "missing required param: shellWasmPath");
+                return Response::err(
+                    id,
+                    codes::INVALID_PARAMS,
+                    "missing required param: shellWasmPath",
+                );
             }
         };
 
@@ -117,7 +153,11 @@ impl Dispatcher {
         let timeout_ms = params.get("timeoutMs").and_then(|v| v.as_u64());
 
         // Create the root sandbox.
-        if let Err(e) = self.manager.create(wasm_bytes, fs_limit_bytes, timeout_ms, None).await {
+        if let Err(e) = self
+            .manager
+            .create(wasm_bytes, fs_limit_bytes, timeout_ms, None)
+            .await
+        {
             return Response::err(id, codes::INTERNAL_ERROR, format!("create failed: {e}"));
         }
 
@@ -126,7 +166,11 @@ impl Dispatcher {
             let sandbox = match self.manager.root.as_mut() {
                 Some(s) => s,
                 None => {
-                    return Response::err(id, codes::INTERNAL_ERROR, "root sandbox missing after create");
+                    return Response::err(
+                        id,
+                        codes::INTERNAL_ERROR,
+                        "root sandbox missing after create",
+                    );
                 }
             };
             for mount in mounts {
@@ -160,7 +204,9 @@ impl Dispatcher {
                                 let _ = sandbox.shell.vfs_mut().mkdirp(&parent_str);
                             }
                         }
-                        if let Err(e) = sandbox.shell.vfs_mut().write_file(&full_path, &data, false) {
+                        if let Err(e) =
+                            sandbox.shell.vfs_mut().write_file(&full_path, &data, false)
+                        {
                             return Response::err(
                                 id,
                                 codes::INTERNAL_ERROR,
@@ -182,18 +228,196 @@ impl Dispatcher {
         Response::ok(id, json!({ "ok": true }))
     }
 
-    // ── Initialized methods (Phase 2+) ──────────────────────────────────────
+    // ── Initialized methods ──────────────────────────────────────────────────
 
     async fn dispatch_initialized(
-        &self,
+        &mut self,
         id: Option<RequestId>,
         method: &str,
-        _params: Value,
+        params: Value,
     ) -> Response {
-        if KNOWN_METHODS.contains(&method) {
-            Response::not_implemented(id, method)
-        } else {
-            Response::method_not_found(id, method)
+        let sid = sandbox_id(&params).map(str::to_owned);
+        match method {
+            "run" => self.handle_run(id, params).await,
+            "files.read" => self.handle_files_read(id, &params, sid.as_deref()),
+            "files.write" => self.handle_files_write(id, &params, sid.as_deref()),
+            "files.list" => self.handle_files_list(id, &params, sid.as_deref()),
+            "files.mkdir" => self.handle_files_mkdir(id, &params, sid.as_deref()),
+            "files.rm" => self.handle_files_rm(id, &params, sid.as_deref()),
+            "files.stat" => self.handle_files_stat(id, &params, sid.as_deref()),
+            // remaining methods still not_implemented (done in later tasks)
+            _ if KNOWN_METHODS.contains(&method) => Response::not_implemented(id, method),
+            _ => Response::method_not_found(id, method),
+        }
+    }
+
+    // ── run stub (Task 3) ─────────────────────────────────────────────────────
+
+    async fn handle_run(&mut self, id: Option<RequestId>, _params: Value) -> Response {
+        Response::not_implemented(id, "run")
+    }
+
+    // ── File operations ───────────────────────────────────────────────────────
+
+    fn handle_files_read(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        match sb.shell.vfs().read_file(&path) {
+            Ok(bytes) => Response::ok(id, json!({"data": b64_encode(&bytes)})),
+            Err(e) => vfs_err(id, e),
+        }
+    }
+
+    fn handle_files_write(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let data_b64 = match require_str(&id, params, "data") {
+            Ok(d) => d.to_owned(),
+            Err(r) => return r,
+        };
+        let bytes = match b64_decode(&data_b64) {
+            Ok(b) => b,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e),
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        // Ensure parent directory exists.
+        if let Some(parent) =
+            std::path::Path::new(&path).parent().and_then(|p| p.to_str())
+        {
+            if !parent.is_empty() && parent != "/" {
+                let _ = sb.shell.vfs_mut().mkdirp(parent);
+            }
+        }
+        match sb.shell.vfs_mut().write_file(&path, &bytes, false) {
+            Ok(_) => Response::ok(id, json!({"ok": true})),
+            Err(e) => vfs_err(id, e),
+        }
+    }
+
+    fn handle_files_list(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        match sb.shell.vfs().readdir(&path) {
+            Ok(entries) => {
+                let enriched: Vec<_> = entries
+                    .iter()
+                    .map(|e| {
+                        let full =
+                            format!("{}/{}", path.trim_end_matches('/'), e.name);
+                        let size =
+                            sb.shell.vfs().stat(&full).map(|s| s.size).unwrap_or(0);
+                        let kind = if e.is_dir { "dir" } else { "file" };
+                        json!({"name": e.name, "type": kind, "size": size})
+                    })
+                    .collect();
+                Response::ok(id, json!({"entries": enriched}))
+            }
+            Err(e) => vfs_err(id, e),
+        }
+    }
+
+    fn handle_files_mkdir(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        match sb.shell.vfs_mut().mkdir(&path) {
+            Ok(_) => Response::ok(id, json!({"ok": true})),
+            Err(e) => vfs_err(id, e),
+        }
+    }
+
+    fn handle_files_rm(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        let vfs = sb.shell.vfs_mut();
+        // Try stat to decide whether to unlink or remove_recursive.
+        let result = match vfs.stat(&path) {
+            Ok(st) if st.is_dir => vfs.remove_recursive(&path),
+            _ => vfs.unlink(&path),
+        };
+        match result {
+            Ok(_) => Response::ok(id, json!({"ok": true})),
+            Err(e) => vfs_err(id, e),
+        }
+    }
+
+    fn handle_files_stat(
+        &mut self,
+        id: Option<RequestId>,
+        params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let path = match require_str(&id, params, "path") {
+            Ok(p) => p.to_owned(),
+            Err(r) => return r,
+        };
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, 1, e.to_string()),
+        };
+        match sb.shell.vfs().stat(&path) {
+            Ok(st) => {
+                let kind = if st.is_dir { "dir" } else { "file" };
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&path);
+                Response::ok(id, json!({"name": name, "type": kind, "size": st.size}))
+            }
+            Err(e) => vfs_err(id, e),
         }
     }
 }
