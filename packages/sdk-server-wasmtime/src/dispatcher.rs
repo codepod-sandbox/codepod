@@ -276,12 +276,55 @@ impl Dispatcher {
             Ok(c) => c.to_owned(),
             Err(r) => return r,
         };
+        let stream = params.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
             Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         match sb.run(&cmd).await {
-            Ok(result) => Response::ok(id, result),
+            Ok(result) => {
+                if stream {
+                    if let Some(ref req_id) = id {
+                        let req_id_val = match req_id {
+                            RequestId::Num(n) => serde_json::json!(n),
+                            RequestId::Str(s) => serde_json::json!(s),
+                        };
+                        let stdout = result["stdout"].as_str().unwrap_or("").to_string();
+                        let stderr = result["stderr"].as_str().unwrap_or("").to_string();
+                        if !stdout.is_empty() {
+                            let notif = serde_json::to_string(&json!({
+                                "jsonrpc": "2.0",
+                                "method": "output",
+                                "params": {
+                                    "request_id": req_id_val,
+                                    "stream": "stdout",
+                                    "data": stdout,
+                                }
+                            })).unwrap_or_default();
+                            let _ = self.stdout_tx.send(notif).await;
+                        }
+                        if !stderr.is_empty() {
+                            let notif = serde_json::to_string(&json!({
+                                "jsonrpc": "2.0",
+                                "method": "output",
+                                "params": {
+                                    "request_id": req_id_val,
+                                    "stream": "stderr",
+                                    "data": stderr,
+                                }
+                            })).unwrap_or_default();
+                            let _ = self.stdout_tx.send(notif).await;
+                        }
+                        return Response::ok(id, json!({
+                            "exitCode": result["exitCode"],
+                            "stdout": "",
+                            "stderr": "",
+                            "executionTimeMs": result["executionTimeMs"],
+                        }));
+                    }
+                }
+                Response::ok(id, result)
+            }
             Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
         }
     }

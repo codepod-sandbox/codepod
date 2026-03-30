@@ -868,3 +868,50 @@ async fn test_offload_rehydrate() {
     let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64).unwrap();
     assert_eq!(data, b"stateful", "expected 'stateful' in file after rehydrate");
 }
+
+#[tokio::test]
+async fn test_streaming_run() {
+    use sdk_server_wasmtime::dispatcher::Dispatcher;
+    use tokio::sync::mpsc;
+
+    let (tx, mut rx) = mpsc::channel::<String>(64);
+    let (_cb_tx, cb_rx) = mpsc::channel::<String>(4);
+    let mut d = Dispatcher::new(tx, cb_rx);
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm");
+    d.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(1)),
+        "create",
+        serde_json::json!({"shellWasmPath": wasm_path.to_str().unwrap()}),
+    ).await;
+    // drain create response
+    while rx.try_recv().is_ok() {}
+
+    // Run with stream: true
+    let (resp, _) = d.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(42)),
+        "run",
+        serde_json::json!({"command": "echo streaming_output", "stream": true}),
+    ).await;
+    assert!(resp.error.is_none(), "run failed: {:?}", resp.error);
+
+    // The final response should have empty stdout (it was streamed)
+    let result = resp.result.unwrap();
+    assert_eq!(result["stdout"].as_str().unwrap_or("nope"), "");
+    assert_eq!(result["exitCode"].as_i64().unwrap(), 0);
+
+    // The output notification should be in rx
+    let mut found_notification = false;
+    while let Ok(msg) = rx.try_recv() {
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        if v.get("method").and_then(|m| m.as_str()) == Some("output") {
+            let params = &v["params"];
+            assert_eq!(params["request_id"], serde_json::json!(42));
+            assert_eq!(params["stream"].as_str().unwrap(), "stdout");
+            assert!(params["data"].as_str().unwrap().contains("streaming_output"));
+            found_notification = true;
+        }
+    }
+    assert!(found_notification, "expected output notification in channel");
+}
