@@ -51,6 +51,8 @@ fn b64_encode(b: &[u8]) -> String {
     B64.encode(b)
 }
 
+/// Application-level error code (mirrors TypeScript dispatcher's `rpcError(1, ...)`).
+/// Used for VFS/filesystem errors.
 fn vfs_err(id: Option<RequestId>, e: VfsError) -> Response {
     Response::err(id, 1, e.to_string())
 }
@@ -271,7 +273,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         match sb.shell.vfs().read_file(&path) {
             Ok(bytes) => Response::ok(id, json!({"data": b64_encode(&bytes)})),
@@ -299,7 +301,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         // Ensure parent directory exists.
         if let Some(parent) =
@@ -327,7 +329,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         match sb.shell.vfs().readdir(&path) {
             Ok(entries) => {
@@ -360,7 +362,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         match sb.shell.vfs_mut().mkdir(&path) {
             Ok(_) => Response::ok(id, json!({"ok": true})),
@@ -380,7 +382,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         let vfs = sb.shell.vfs_mut();
         // Try stat to decide whether to unlink or remove_recursive.
@@ -406,7 +408,7 @@ impl Dispatcher {
         };
         let sb = match self.manager.resolve(sid) {
             Ok(s) => s,
-            Err(e) => return Response::err(id, 1, e.to_string()),
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         };
         match sb.shell.vfs().stat(&path) {
             Ok(st) => {
