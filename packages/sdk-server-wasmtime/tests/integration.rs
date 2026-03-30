@@ -693,3 +693,178 @@ async fn test_sandbox_create_list_remove_rpc() {
     let list = r.result.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn test_history() {
+    let wasm = wasm_bytes();
+    let mut mgr = SandboxManager::new();
+    mgr.create(wasm, None, None, None).await.unwrap();
+
+    mgr.root_run("echo first").await.unwrap();
+    mgr.root_run("echo second").await.unwrap();
+
+    let sb = mgr.root.as_mut().unwrap();
+    let result = sb.run("history").await.unwrap();
+    let stdout = result["stdout"].as_str().unwrap();
+    // history output should contain the commands we ran
+    assert!(stdout.contains("echo first"), "expected 'echo first' in history: {stdout}");
+    assert!(stdout.contains("echo second"), "expected 'echo second' in history: {stdout}");
+}
+
+#[tokio::test]
+async fn test_history_list_handler() {
+    use sdk_server_wasmtime::dispatcher::Dispatcher;
+    use tokio::sync::mpsc;
+
+    let (tx, _rx) = mpsc::channel::<String>(16);
+    let (_cb_tx, cb_rx) = mpsc::channel::<String>(4);
+    let mut disp = Dispatcher::new(tx, cb_rx);
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm");
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(1)),
+        "create",
+        serde_json::json!({"shellWasmPath": wasm_path.to_str().unwrap()}),
+    ).await;
+
+    // Run some commands to populate history
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(2)),
+        "run",
+        serde_json::json!({"command": "echo hello"}),
+    ).await;
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(3)),
+        "run",
+        serde_json::json!({"command": "echo world"}),
+    ).await;
+
+    // shell.history.list
+    let (r, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(4)),
+        "shell.history.list",
+        serde_json::json!({}),
+    ).await;
+    assert!(r.error.is_none(), "shell.history.list failed: {:?}", r.error);
+    let entries = r.result.unwrap();
+    let arr = entries["entries"].as_array().unwrap();
+    assert!(!arr.is_empty(), "history entries should not be empty");
+    // commands should be present
+    let cmds: Vec<&str> = arr.iter()
+        .map(|e| e["command"].as_str().unwrap_or(""))
+        .collect();
+    assert!(cmds.iter().any(|c| c.contains("echo hello")), "missing 'echo hello' in {cmds:?}");
+    assert!(cmds.iter().any(|c| c.contains("echo world")), "missing 'echo world' in {cmds:?}");
+
+    // shell.history.clear
+    let (r, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(5)),
+        "shell.history.clear",
+        serde_json::json!({}),
+    ).await;
+    assert!(r.error.is_none(), "shell.history.clear failed: {:?}", r.error);
+
+    // After clear, history should contain at most 1 entry (the `history` command
+    // run by shell.history.list itself gets added before the listing executes).
+    let (r, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(6)),
+        "shell.history.list",
+        serde_json::json!({}),
+    ).await;
+    assert!(r.error.is_none());
+    let entries = r.result.unwrap();
+    let arr = entries["entries"].as_array().unwrap();
+    // Should not still contain the commands from before the clear
+    let cmds_after: Vec<&str> = arr.iter()
+        .map(|e| e["command"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        !cmds_after.iter().any(|c| c.contains("echo hello") || c.contains("echo world")),
+        "history should not contain pre-clear commands, got {arr:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_offload_rehydrate() {
+    use sdk_server_wasmtime::dispatcher::Dispatcher;
+    use tokio::sync::mpsc;
+
+    let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(16);
+    let (cb_tx, cb_rx) = mpsc::channel::<String>(4);
+    let mut disp = Dispatcher::new(stdout_tx, cb_rx);
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm");
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(1)),
+        "create",
+        serde_json::json!({"shellWasmPath": wasm_path.to_str().unwrap()}),
+    ).await;
+
+    // Write a file via files.write so it goes directly into the VFS
+    let content_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"stateful");
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(2)),
+        "files.write",
+        serde_json::json!({"path": "/stateful.txt", "data": content_b64}),
+    ).await;
+
+    // --- Offload ---
+    // offload sends a storage.save callback to stdout and waits for a response
+    // on cb_rx. We drive both sides concurrently.
+    let (offload_resp, saved_state) = tokio::join!(
+        disp.dispatch(
+            Some(sdk_server_wasmtime::rpc::RequestId::Int(3)),
+            "offload",
+            serde_json::json!({}),
+        ),
+        async {
+            let raw = stdout_rx.recv().await.expect("storage.save callback");
+            let cb_req: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(cb_req["method"].as_str().unwrap(), "storage.save");
+            let cb_id = cb_req["id"].as_str().unwrap().to_string();
+            let saved = cb_req["params"]["state"].as_str().unwrap().to_string();
+            cb_tx.send(serde_json::to_string(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": cb_id,
+                "result": "ok"
+            })).unwrap()).await.unwrap();
+            saved
+        }
+    );
+    assert!(offload_resp.0.error.is_none(), "offload failed: {:?}", offload_resp.0.error);
+
+    // --- Rehydrate ---
+    // rehydrate sends a storage.load callback and expects the saved blob back
+    let (rehydrate_resp, ()) = tokio::join!(
+        disp.dispatch(
+            Some(sdk_server_wasmtime::rpc::RequestId::Int(4)),
+            "rehydrate",
+            serde_json::json!({}),
+        ),
+        async {
+            let raw = stdout_rx.recv().await.expect("storage.load callback");
+            let cb_req: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(cb_req["method"].as_str().unwrap(), "storage.load");
+            let cb_id = cb_req["id"].as_str().unwrap().to_string();
+            cb_tx.send(serde_json::to_string(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": cb_id,
+                "result": saved_state
+            })).unwrap()).await.unwrap();
+        }
+    );
+    assert!(rehydrate_resp.0.error.is_none(), "rehydrate failed: {:?}", rehydrate_resp.0.error);
+
+    // Verify the file is accessible after rehydrate via files.read
+    let (r, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(5)),
+        "files.read",
+        serde_json::json!({"path": "/stateful.txt"}),
+    ).await;
+    assert!(r.error.is_none(), "files.read after rehydrate failed: {:?}", r.error);
+    let data_b64 = r.result.unwrap()["data"].as_str().unwrap().to_string();
+    let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data_b64).unwrap();
+    assert_eq!(data, b"stateful", "expected 'stateful' in file after rehydrate");
+}

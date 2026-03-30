@@ -203,13 +203,13 @@ async fn run_child(
     dealloc.call_async(&mut store, (cmd_ptr, cmd_bytes.len() as u32)).await?;
 
     // Flush captured stdio into the parent's pipe buffers.
-    let stdout_bytes = child_stdout_pipe.contents();
+    let stdout_bytes = child_stdout_pipe.take();
     if let Some(pipe) = stdout_pipe {
         if !stdout_bytes.is_empty() {
             pipe.lock().unwrap().extend_from_slice(&stdout_bytes);
         }
     }
-    let stderr_bytes = child_stderr_pipe.contents();
+    let stderr_bytes = child_stderr_pipe.take();
     if let Some(pipe) = stderr_pipe {
         if !stderr_bytes.is_empty() {
             pipe.lock().unwrap().extend_from_slice(&stderr_bytes);

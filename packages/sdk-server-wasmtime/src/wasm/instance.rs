@@ -173,11 +173,11 @@ impl ShellInstance {
 
     /// Take the captured stdout bytes (drains the pipe).
     pub fn take_stdout(&mut self) -> bytes::Bytes {
-        self.store.data_mut().stdout_pipe.contents()
+        self.store.data().stdout_pipe.take()
     }
 
     /// Take the captured stderr bytes (drains the pipe).
     pub fn take_stderr(&mut self) -> bytes::Bytes {
-        self.store.data_mut().stderr_pipe.contents()
+        self.store.data().stderr_pipe.take()
     }
 }

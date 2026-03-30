@@ -20,19 +20,76 @@ pub mod spawn;
 #[allow(unused_imports)]
 pub use instance::ShellInstance;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use bytes::Bytes;
 use serde_json::json;
 use wasmtime::{Caller, Config, Engine, Linker};
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{async_trait, ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{HostOutputStream, StreamError, StdoutStream, Subscribe};
 use wasmtime_wasi::preview1::WasiP1Ctx;
 
 use kernel::{ChildState, ProcessKernel};
 use spawn::{SpawnContext, SpawnRequest};
 
 use crate::vfs::{MemVfs, VfsError};
+
+// ── DrainablePipe ─────────────────────────────────────────────────────────────
+
+/// An output pipe whose contents can be atomically taken (drained).
+///
+/// This is an alternative to `MemoryOutputPipe::contents()` which only clones
+/// the buffer. `DrainablePipe::take()` returns the accumulated bytes and clears
+/// the internal buffer, so subsequent calls return only new output.
+#[derive(Clone)]
+pub struct DrainablePipe {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl DrainablePipe {
+    pub fn new() -> Self {
+        Self { buf: Arc::new(Mutex::new(Vec::new())) }
+    }
+
+    /// Return and clear all bytes written since the last `take()` call.
+    pub fn take(&self) -> Bytes {
+        let mut guard = self.buf.lock().unwrap();
+        let out = Bytes::copy_from_slice(&guard);
+        guard.clear();
+        out
+    }
+}
+
+impl HostOutputStream for DrainablePipe {
+    fn write(&mut self, bytes: Bytes) -> Result<(), StreamError> {
+        self.buf.lock().unwrap().extend_from_slice(&bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), StreamError> {
+        Ok(())
+    }
+
+    fn check_write(&mut self) -> Result<usize, StreamError> {
+        Ok(usize::MAX) // unbounded
+    }
+}
+
+#[async_trait]
+impl Subscribe for DrainablePipe {
+    async fn ready(&mut self) {}
+}
+
+impl StdoutStream for DrainablePipe {
+    fn stream(&self) -> Box<dyn HostOutputStream> {
+        Box::new(self.clone())
+    }
+
+    fn isatty(&self) -> bool {
+        false
+    }
+}
 
 // ── StoreData ─────────────────────────────────────────────────────────────────
 
@@ -42,10 +99,10 @@ pub struct StoreData {
     p1_ctx: WasiP1Ctx,
     /// The sandbox's virtual filesystem.
     pub vfs: MemVfs,
-    /// Captured stdout output (available after a command completes).
-    pub stdout_pipe: wasmtime_wasi::pipe::MemoryOutputPipe,
-    /// Captured stderr output.
-    pub stderr_pipe: wasmtime_wasi::pipe::MemoryOutputPipe,
+    /// Captured stdout output (drainable: each `take()` clears the buffer).
+    pub stdout_pipe: DrainablePipe,
+    /// Captured stderr output (drainable).
+    pub stderr_pipe: DrainablePipe,
     /// Buffer written by the guest via `host_write_result`.
     pub last_result: Vec<u8>,
     /// Command to be returned by the next `host_read_command` call.
@@ -78,8 +135,8 @@ impl StoreData {
         env: &[(String, String)],
         spawn_ctx: Option<Arc<SpawnContext>>,
     ) -> anyhow::Result<Self> {
-        let stdout_pipe = wasmtime_wasi::pipe::MemoryOutputPipe::new(16 * 1024 * 1024);
-        let stderr_pipe = wasmtime_wasi::pipe::MemoryOutputPipe::new(4 * 1024 * 1024);
+        let stdout_pipe = DrainablePipe::new();
+        let stderr_pipe = DrainablePipe::new();
 
         let mut builder = WasiCtxBuilder::new();
         builder.stdin(wasmtime_wasi::pipe::MemoryInputPipe::new(Bytes::copy_from_slice(stdin)));

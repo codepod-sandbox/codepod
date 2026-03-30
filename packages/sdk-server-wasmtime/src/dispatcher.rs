@@ -77,10 +77,9 @@ fn sandbox_id(params: &Value) -> Option<&str> {
 pub struct Dispatcher {
     initialized: bool,
     pub manager: SandboxManager,
-    #[allow(dead_code)]
     stdout_tx: mpsc::Sender<String>,
-    #[allow(dead_code)]
     cb_rx: mpsc::Receiver<String>,
+    next_cb_id: u64,
 }
 
 impl Dispatcher {
@@ -90,6 +89,7 @@ impl Dispatcher {
             manager: SandboxManager::new(),
             stdout_tx,
             cb_rx,
+            next_cb_id: 0,
         }
     }
 
@@ -259,6 +259,10 @@ impl Dispatcher {
             "sandbox.create" => self.handle_sandbox_create(id, &params).await,
             "sandbox.list" => self.handle_sandbox_list(id),
             "sandbox.remove" => self.handle_sandbox_remove(id, &params),
+            "shell.history.list" => self.handle_history_list(id, &params, sid.as_deref()).await,
+            "shell.history.clear" => self.handle_history_clear(id, &params, sid.as_deref()).await,
+            "offload" => self.handle_offload(id, &params, sid.as_deref()).await,
+            "rehydrate" => self.handle_rehydrate(id, &params, sid.as_deref()).await,
             // remaining methods still not_implemented (done in later tasks)
             _ if KNOWN_METHODS.contains(&method) => Response::not_implemented(id, method),
             _ => Response::method_not_found(id, method),
@@ -675,6 +679,168 @@ impl Dispatcher {
             );
         }
         Response::ok(id, json!({"ok": true}))
+    }
+
+    // ── Shell history ─────────────────────────────────────────────────────────
+
+    async fn handle_history_list(
+        &mut self,
+        id: Option<RequestId>,
+        _params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+        };
+        match sb.run("history").await {
+            Ok(result) => {
+                let stdout = result["stdout"].as_str().unwrap_or("").to_string();
+                // Parse lines like "  1  command"
+                let entries: Vec<_> = stdout
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .enumerate()
+                    .map(|(i, line)| {
+                        // Strip leading digits + whitespace (e.g. "  1  cmd" → "cmd")
+                        let cmd = line
+                            .trim_start()
+                            .trim_start_matches(|c: char| c.is_ascii_digit())
+                            .trim_start();
+                        json!({"index": i + 1, "command": cmd, "timestamp": 0})
+                    })
+                    .collect();
+                Response::ok(id, json!({"entries": entries}))
+            }
+            Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    async fn handle_history_clear(
+        &mut self,
+        id: Option<RequestId>,
+        _params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+        };
+        match sb.run("history clear").await {
+            Ok(_) => Response::ok(id, json!({"ok": true})),
+            Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    // ── Callback protocol ─────────────────────────────────────────────────────
+
+    /// Send a JSON-RPC callback request to the client (via stdout) and wait for
+    /// the response on the cb_rx channel.  The caller (Python SDK) is expected
+    /// to handle the request and reply with a matching id.
+    async fn send_callback(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let cb_id = format!("cb_{}", self.next_cb_id);
+        self.next_cb_id += 1;
+        let req = serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": cb_id,
+            "method": method,
+            "params": params,
+        }))?;
+        self.stdout_tx.send(req).await?;
+        let resp_line = self
+            .cb_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("callback channel closed"))?;
+        let resp: serde_json::Value = serde_json::from_str(&resp_line)?;
+        if let Some(err) = resp.get("error") {
+            anyhow::bail!("callback error: {err}");
+        }
+        Ok(resp["result"].clone())
+    }
+
+    // ── Offload / rehydrate ───────────────────────────────────────────────────
+
+    async fn handle_offload(
+        &mut self,
+        id: Option<RequestId>,
+        _params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        // Use None to resolve the root sandbox; use the label only for the callback.
+        let cb_sandbox_id = sid.unwrap_or("root").to_string();
+        // Resolve using the original sid (None → root).
+        let resolve_sid = if sid == Some("root") { None } else { sid };
+        let blob = {
+            let sb = match self.manager.resolve(resolve_sid) {
+                Ok(s) => s,
+                Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+            };
+            match sb.shell.vfs().export_bytes() {
+                Ok(b) => b,
+                Err(e) => return Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
+            }
+        };
+        if let Err(e) = self
+            .send_callback(
+                "storage.save",
+                json!({
+                    "sandbox_id": cb_sandbox_id,
+                    "state": b64_encode(&blob),
+                }),
+            )
+            .await
+        {
+            return Response::err(id, codes::INTERNAL_ERROR, e.to_string());
+        }
+        Response::ok(id, json!({"ok": true}))
+    }
+
+    async fn handle_rehydrate(
+        &mut self,
+        id: Option<RequestId>,
+        _params: &Value,
+        sid: Option<&str>,
+    ) -> Response {
+        let cb_sandbox_id = sid.unwrap_or("root").to_string();
+        let result = match self
+            .send_callback("storage.load", json!({"sandbox_id": cb_sandbox_id}))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => return Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
+        };
+        let b64 = match result.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                return Response::err(
+                    id,
+                    codes::INTERNAL_ERROR,
+                    "expected base64 string from storage.load",
+                )
+            }
+        };
+        let blob = match b64_decode(&b64) {
+            Ok(b) => b,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e),
+        };
+        // Resolve using None for root (same as offload).
+        let resolve_sid = if sid == Some("root") { None } else { sid };
+        let sb = match self.manager.resolve(resolve_sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+        };
+        match crate::vfs::MemVfs::import_bytes(&blob) {
+            Ok(new_vfs) => {
+                *sb.shell.vfs_mut() = new_vfs;
+                Response::ok(id, json!({"ok": true}))
+            }
+            Err(e) => Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
+        }
     }
 
     // ── Mount ─────────────────────────────────────────────────────────────────
