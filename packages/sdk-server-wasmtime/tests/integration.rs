@@ -416,6 +416,13 @@ async fn test_persistence() {
     let vfs2 = sdk_server_wasmtime::vfs::MemVfs::import_bytes(&blob).unwrap();
     let content = vfs2.read_file("/tmp/persist.txt").unwrap();
     assert_eq!(content, b"persistent data");
+
+    // Accounting must reflect the actual imported tree, not init_layout defaults
+    let total = vfs2.total_bytes();
+    assert!(
+        total >= b"persistent data".len(),
+        "expected total_bytes >= 15 after import, got {total}"
+    );
 }
 
 #[tokio::test]

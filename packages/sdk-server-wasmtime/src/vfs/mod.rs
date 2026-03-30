@@ -286,13 +286,27 @@ impl MemVfs {
 
     /// Deserialize a filesystem from a blob returned by `export_bytes`.
     pub fn import_bytes(blob: &[u8]) -> anyhow::Result<Self> {
+        Self::import_bytes_with_limits(blob, None, None)
+    }
+
+    /// Deserialize a filesystem from a blob, applying optional storage limits.
+    pub fn import_bytes_with_limits(
+        blob: &[u8],
+        fs_limit_bytes: Option<usize>,
+        file_count_limit: Option<usize>,
+    ) -> anyhow::Result<Self> {
         #[derive(Deserialize)]
         struct VfsSnapshot {
             root: Inode,
         }
         let snap: VfsSnapshot = bincode::deserialize(blob)?;
-        let mut vfs = MemVfs::new(None, None);
+        let mut vfs = MemVfs::new(fs_limit_bytes, file_count_limit);
         vfs.root = snap.root;
+        // Recompute accounting from the imported tree (init_layout values are
+        // now stale since we replaced vfs.root entirely).
+        let (bytes, count) = count_subtree(&vfs.root);
+        vfs.total_bytes = bytes;
+        vfs.file_count = count;
         Ok(vfs)
     }
 
