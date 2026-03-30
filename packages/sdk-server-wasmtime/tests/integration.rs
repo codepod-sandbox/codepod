@@ -346,3 +346,56 @@ async fn test_mount_rpc() {
     // drain any pending notifications
     while rx.try_recv().is_ok() {}
 }
+
+#[tokio::test]
+async fn test_snapshot_restore_invalid_id() {
+    use tokio::sync::mpsc;
+
+    let (tx, _rx) = mpsc::channel::<String>(16);
+    let (_cb_tx, cb_rx) = mpsc::channel::<String>(4);
+    let mut disp = sdk_server_wasmtime::dispatcher::Dispatcher::new(tx, cb_rx);
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm");
+
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(1)),
+        "create",
+        serde_json::json!({"shellWasmPath": wasm_path.to_str().unwrap()}),
+    ).await;
+
+    let (resp, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(2)),
+        "snapshot.restore",
+        serde_json::json!({"id": "nonexistent-snap-id"}),
+    ).await;
+
+    assert!(resp.error.is_some(), "expected an error response");
+    assert_eq!(resp.error.unwrap().code, -32602); // INVALID_PARAMS
+}
+
+#[tokio::test]
+async fn test_mount_no_files() {
+    use tokio::sync::mpsc;
+
+    let (tx, _rx) = mpsc::channel::<String>(16);
+    let (_cb_tx, cb_rx) = mpsc::channel::<String>(4);
+    let mut disp = sdk_server_wasmtime::dispatcher::Dispatcher::new(tx, cb_rx);
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/orchestrator/src/platform/__tests__/fixtures/codepod-shell-exec.wasm");
+
+    disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(1)),
+        "create",
+        serde_json::json!({"shellWasmPath": wasm_path.to_str().unwrap()}),
+    ).await;
+
+    // mount with no files key — should succeed (just create the dir)
+    let (resp, _) = disp.dispatch(
+        Some(sdk_server_wasmtime::rpc::RequestId::Int(2)),
+        "mount",
+        serde_json::json!({"path": "/mnt/empty"}),
+    ).await;
+    assert!(resp.error.is_none(), "mount with no files should succeed: {:?}", resp.error);
+}

@@ -528,7 +528,7 @@ impl Dispatcher {
         };
         match sb.shell.vfs_mut().restore(&snap_id) {
             Ok(_) => Response::ok(id, json!({"ok": true})),
-            Err(e) => vfs_err(id, e),
+            Err(e) => Response::err(id, codes::INVALID_PARAMS, e.to_string()),
         }
     }
 
@@ -545,9 +545,11 @@ impl Dispatcher {
             Err(r) => return r,
         };
         // Collect files before taking mutable borrow on manager.
-        let files_vec: Vec<(String, Vec<u8>)> = match params.get("files").and_then(|v| v.as_object()) {
-            Some(files_obj) => {
-                let mut out = Vec::new();
+        // A missing `files` key is treated as an empty map (just create the directory).
+        let files_vec: Vec<(String, Vec<u8>)> = {
+            let files_obj = params.get("files").and_then(|v| v.as_object());
+            let mut out = Vec::new();
+            if let Some(files_obj) = files_obj {
                 for (rel, val) in files_obj {
                     let b64 = match val.as_str() {
                         Some(s) => s,
@@ -565,11 +567,8 @@ impl Dispatcher {
                     };
                     out.push((rel.clone(), bytes));
                 }
-                out
             }
-            None => {
-                return Response::err(id, codes::INVALID_PARAMS, "missing: files");
-            }
+            out
         };
 
         let sb = match self.manager.resolve(sid) {
