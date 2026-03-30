@@ -586,6 +586,8 @@ impl Dispatcher {
 
     // ── Sandbox management ───────────────────────────────────────────────────
 
+    // Always forks the root sandbox. sandboxId is intentionally ignored — forking
+    // a named or already-forked sandbox is not supported.
     async fn handle_sandbox_fork(
         &mut self,
         id: Option<RequestId>,
