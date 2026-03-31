@@ -423,7 +423,25 @@ path = "src/bin/dd.rs"
 name = "tsort"
 path = "src/bin/tsort.rs"
 
+[[bin]]
+name = "zcat"
+path = "src/bin/zcat.rs"
+
+[[bin]]
+name = "iconv"
+path = "src/bin/iconv.rs"
+
+[[bin]]
+name = "cal"
+path = "src/bin/cal.rs"
+
+[[bin]]
+name = "hexdump"
+path = "src/bin/hexdump.rs"
+
 [dependencies]
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 tar = "0.4"
+codepod-process = { path = "../codepod-process" }
+encoding_rs = "0.8"

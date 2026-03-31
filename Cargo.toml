@@ -26,6 +26,8 @@ members = [
   "packages/sdk-server-wasmtime",
   # Rust MCP server (wasmtime backend)
   "packages/mcp-server-rust",
+  # Process-spawning helpers for coreutils (host_spawn_async/host_waitpid ABI)
+  "packages/codepod-process",
 ]
 exclude = [
   "packages/sips",

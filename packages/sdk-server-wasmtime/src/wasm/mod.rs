@@ -59,6 +59,12 @@ impl DrainablePipe {
         guard.clear();
         out
     }
+
+    /// Return the inner `Arc<Mutex<Vec<u8>>>` so it can be used as a `PipeBuf`
+    /// target for child-process stdout/stderr forwarding.
+    pub fn as_pipe_buf(&self) -> kernel::PipeBuf {
+        self.buf.clone()
+    }
 }
 
 impl HostOutputStream for DrainablePipe {
@@ -646,15 +652,18 @@ fn add_process_imports(linker: &mut Linker<StoreData>) -> anyhow::Result<()> {
             };
 
             // Get pipe buffers for stdout/stderr redirection.
-            let stdout_pipe = if req.stdout_fd >= 3 {
-                c.data().kernel.pipe_buf(req.stdout_fd)
-            } else {
-                None
+            // fd=1/2: forward into parent's own stdout/stderr pipe (inherit).
+            // fd>=3: use a kernel pipe fd.
+            // anything else: discard.
+            let stdout_pipe = match req.stdout_fd {
+                1 => Some(c.data().stdout_pipe.as_pipe_buf()),
+                fd if fd >= 3 => c.data().kernel.pipe_buf(fd),
+                _ => None,
             };
-            let stderr_pipe = if req.stderr_fd >= 3 {
-                c.data().kernel.pipe_buf(req.stderr_fd)
-            } else {
-                None
+            let stderr_pipe = match req.stderr_fd {
+                2 => Some(c.data().stderr_pipe.as_pipe_buf()),
+                fd if fd >= 3 => c.data().kernel.pipe_buf(fd),
+                _ => None,
             };
 
             let parent_vfs = c.data().vfs.cow_clone();

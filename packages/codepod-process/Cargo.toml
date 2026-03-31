@@ -1,0 +1,7 @@
+[package]
+name = "codepod-process"
+version = "0.1.0"
+edition = "2021"
+description = "Process-spawning helpers for codepod coreutils (wraps host_spawn_async / host_waitpid)"
+
+[dependencies]

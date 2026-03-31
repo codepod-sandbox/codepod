@@ -1,27 +1,37 @@
 //! nice - run a program with modified scheduling priority
 //!
-//! In this sandbox environment the epoch-based nice value is set at sandbox
-//! creation time, so this command simply executes the specified program
-//! (ignoring the -n adjustment, which has no OS effect inside WASM).
+//! Usage: nice [-n N] command [args...]
+//!
+//! The -n adjustment value (0–19) is forwarded to the host scheduler so the
+//! child process runs at the requested epoch quantum. Unlike OS nice(), the
+//! value is not additive — it sets the absolute priority directly.
+//!
+//! Without a command, prints the current niceness (always 0 in WASM, because
+//! priority is set at sandbox-creation time by the host).
 
 use std::env;
-use std::process;
+use codepod_process::Command;
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
-        // No command: print current niceness (always 0 in WASM).
         println!("0");
         return;
     }
 
-    // Parse and skip -n <value> / -n<value> / --adjustment=<value>
+    // Parse -n <value> / -n<value> / --adjustment=<value>
+    let mut nice: u8 = 0;
     let mut i = 0;
     while i < args.len() {
         if (args[i] == "-n" || args[i] == "--adjustment") && i + 1 < args.len() {
+            nice = args[i + 1].parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
             i += 2;
-        } else if args[i].starts_with("-n") || args[i].starts_with("--adjustment=") {
+        } else if let Some(val) = args[i].strip_prefix("-n") {
+            nice = val.parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
+            i += 1;
+        } else if let Some(val) = args[i].strip_prefix("--adjustment=") {
+            nice = val.parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
             i += 1;
         } else {
             break;
@@ -29,20 +39,18 @@ fn main() {
     }
 
     if i >= args.len() {
-        // Flags only, no command.
         println!("0");
         return;
     }
 
-    // Execute the command with remaining args.
-    let cmd = &args[i];
-    let cmd_args = &args[i + 1..];
-    let status = process::Command::new(cmd)
-        .args(cmd_args)
+    let status = Command::new(&args[i])
+        .args(&args[i + 1..])
+        .nice(nice)
         .status()
         .unwrap_or_else(|e| {
-            eprintln!("nice: {cmd}: {e}");
-            process::exit(127);
+            eprintln!("nice: {}: {e}", args[i]);
+            std::process::exit(127);
         });
-    process::exit(status.code().unwrap_or(1));
+
+    std::process::exit(status.code().unwrap_or(1));
 }
