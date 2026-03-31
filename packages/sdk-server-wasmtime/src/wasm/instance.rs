@@ -42,6 +42,9 @@ impl ShellInstance {
 
         // Add fuel so the engine can interrupt runaway guests (Phase 6+ will tune this).
         store.set_fuel(u64::MAX / 2)?;
+        // Set epoch deadline far in the future so the ticker doesn't interrupt until
+        // a per-command limit is configured (Phase 6+ will tune this per command).
+        store.set_epoch_deadline(u64::MAX / 2);
 
         let instance = engine
             .linker

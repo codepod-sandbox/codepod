@@ -154,6 +154,8 @@ async fn run_child(
 
     let mut store = Store::new(&ctx.engine, data);
     store.set_fuel(u64::MAX / 4)?;
+    // Set epoch deadline far in the future (per-command limits configured in Phase 6+).
+    store.set_epoch_deadline(u64::MAX / 2);
 
     let instance = ctx
         .linker

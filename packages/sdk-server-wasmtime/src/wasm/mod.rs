@@ -177,8 +177,22 @@ impl WasmEngine {
         config.async_support(true);
         // Fuel-based CPU budgeting (used in Phase 6+ for per-command limits).
         config.consume_fuel(true);
+        // Epoch-based interruption (used for CPU time limits and nice-level yields).
+        config.epoch_interruption(true);
 
         let engine = Engine::new(&config)?;
+
+        // Ticker: increment epoch every 1ms so epoch-based yields and limits work.
+        let ticker_engine = engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                ticker_engine.increment_epoch();
+            }
+        });
+
         let mut linker: Linker<StoreData> = Linker::new(&engine);
 
         // Add all ~40 WASI preview1 functions (fd_read, fd_write, path_open, …)
@@ -254,6 +268,18 @@ fn vfs_rc(e: &VfsError) -> i32 {
         VfsError::PermissionDenied | VfsError::ReadOnly => -2,
         _ => -3,
     }
+}
+
+// ── CPU scheduling helpers ────────────────────────────────────────────────────
+
+/// Convert a POSIX nice value (0–19) to an epoch quantum (epochs between yields).
+///
+/// nice=0  → 10 epochs (10ms, default)
+/// nice=10 → 5 epochs (5ms)
+/// nice=19 → 1 epoch  (1ms, lowest priority)
+pub fn nice_to_quantum(nice: u8) -> u64 {
+    let n = nice.min(19) as u64;
+    (10 - n / 2).max(1)
 }
 
 // ── Filesystem host imports ───────────────────────────────────────────────────
