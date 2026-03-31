@@ -43,7 +43,7 @@ bash scripts/build-wheel.sh
 The sandbox server ships two engines:
 
 - **wasmtime** (default, production): `dist/codepod-server` — Rust binary using wasmtime. No Deno dependency. Build: `bash scripts/build-sdk-server.sh`
-- **deno** (dev/debug): `deno run packages/sdk-server/src/server.ts` — TypeScript server. Build: `bash scripts/build-sdk-server.sh --engine deno`
+- **deno** (dev/debug): `dist/codepod-server-deno` — TypeScript server via Deno. Build: `bash scripts/build-sdk-server.sh --engine deno`
 
 The Python SDK auto-detects the engine: uses `codepod-server` if found on PATH or adjacent to the wheel, otherwise falls back to Deno. Explicit: `Sandbox(engine='wasmtime')` or `Sandbox(engine='deno')`.
 

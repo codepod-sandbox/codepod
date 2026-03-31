@@ -34,7 +34,7 @@ sb = codepod.Sandbox(engine='wasmtime') # explicit wasmtime
 sb = codepod.Sandbox(engine='deno')     # explicit Deno (dev/debug)
 ```
 
-Install `codepod-server` by building from source:
+To install `codepod-server` (requires the source repo, Rust, and Deno):
 ```bash
 bash scripts/build-sdk-server.sh
 cp dist/codepod-server ~/.local/bin/
