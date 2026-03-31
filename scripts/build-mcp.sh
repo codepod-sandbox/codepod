@@ -30,14 +30,26 @@ OUT_DIR="${OUT_DIR:-dist}"
 TARGET_FLAG=""
 REBUILD_PYTHON=false
 PYTHON_FEATURES="${PYTHON_FEATURES:-numpy,pil}"
+ENGINE="deno"
 
 for arg in "$@"; do
   case "$arg" in
+    --engine=*) ENGINE="${arg#--engine=}" ;;
+    --engine)   shift; ENGINE="$1" ;;
     --target=*) TARGET_FLAG="--target ${arg#--target=}" ;;
     --target)   shift; TARGET_FLAG="--target $1" ;;
     --rebuild-python) REBUILD_PYTHON=true ;;
   esac
 done
+
+if [ "$ENGINE" = "wasmtime" ]; then
+  echo "==> Note: wasmtime MCP server (mcp-server-rust crate) is planned for Task 11." >&2
+  echo "==> Falling back to deno engine for codepod-mcp build." >&2
+  ENGINE="deno"
+elif [ "$ENGINE" != "deno" ]; then
+  echo "Error: unknown engine '$ENGINE'. Use deno or wasmtime." >&2
+  exit 1
+fi
 
 # Build python3.wasm with native packages if needed
 WASM_FIXTURES="packages/orchestrator/src/platform/__tests__/fixtures"
@@ -139,6 +151,7 @@ echo "==> Built: $OUT_DIR/codepod-mcp ($SIZE)"
 
 # Generate .mcp.json in this project directory (where Claude Code reads it)
 CODEPOD_ROOT="$(pwd)"
+REPO_PARENT="$(dirname "$CODEPOD_ROOT")"
 WASM_DIR="$CODEPOD_ROOT/packages/orchestrator/src/platform/__tests__/fixtures"
 MCP_JSON="$CODEPOD_ROOT/.mcp.json"
 
@@ -151,7 +164,7 @@ cat > "$MCP_JSON" <<MCPEOF
         "--wasm-dir", "$WASM_DIR",
         "--shell-wasm", "$WASM_DIR/codepod-shell-exec.wasm",
         "--packages", "$PYTHON_FEATURES",
-        "--mount", "$CODEPOD_ROOT:/mnt/src:ro",
+        "--mount", "$REPO_PARENT:/mnt/codepod:ro",
         "--network-allow", "*"
       ]
     }

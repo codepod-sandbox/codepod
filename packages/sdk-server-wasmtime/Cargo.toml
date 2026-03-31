@@ -5,7 +5,7 @@ edition = "2021"
 description = "Wasmtime-based codepod sandbox server (JSON-RPC 2.0 over stdio)"
 
 [[bin]]
-name = "codepod-server-wasmtime"
+name = "codepod-server"
 path = "src/main.rs"
 
 [lib]
