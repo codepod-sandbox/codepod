@@ -39,6 +39,8 @@ const KNOWN_METHODS: &[&str] = &[
     "shell.history.clear",
     "offload",
     "rehydrate",
+    "sandbox.suspend",
+    "sandbox.resume",
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -264,6 +266,8 @@ impl Dispatcher {
             "sandbox.create" => self.handle_sandbox_create(id, &params).await,
             "sandbox.list" => self.handle_sandbox_list(id),
             "sandbox.remove" => self.handle_sandbox_remove(id, &params),
+            "sandbox.suspend" => self.handle_sandbox_suspend(id, &params),
+            "sandbox.resume" => self.handle_sandbox_resume(id, &params),
             "shell.history.list" => self.handle_history_list(id, &params, sid.as_deref()).await,
             "shell.history.clear" => self.handle_history_clear(id, &params, sid.as_deref()).await,
             "offload" => self.handle_offload(id, &params, sid.as_deref()).await,
@@ -737,6 +741,27 @@ impl Dispatcher {
             );
         }
         Response::ok(id, json!({"ok": true}))
+    }
+
+    fn handle_sandbox_suspend(&mut self, id: Option<RequestId>, params: &Value) -> Response {
+        let sid = sandbox_id(params);
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+        };
+        sb.paused.store(true, std::sync::atomic::Ordering::Release);
+        Response::ok(id, json!({ "ok": true }))
+    }
+
+    fn handle_sandbox_resume(&mut self, id: Option<RequestId>, params: &Value) -> Response {
+        let sid = sandbox_id(params);
+        let sb = match self.manager.resolve(sid) {
+            Ok(s) => s,
+            Err(e) => return Response::err(id, codes::INVALID_PARAMS, e.to_string()),
+        };
+        sb.paused.store(false, std::sync::atomic::Ordering::Release);
+        sb.resume_notify.notify_waiters();
+        Response::ok(id, json!({ "ok": true }))
     }
 
     // ── Shell history ─────────────────────────────────────────────────────────
