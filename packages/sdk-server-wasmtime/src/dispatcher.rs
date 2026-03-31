@@ -687,7 +687,7 @@ impl Dispatcher {
     async fn handle_sandbox_create(
         &mut self,
         id: Option<RequestId>,
-        _params: &Value,
+        params: &Value,
     ) -> Response {
         if self.manager.named.len() >= 64 {
             return Response::err(id, codes::INVALID_PARAMS, "max sandboxes reached");
@@ -704,13 +704,19 @@ impl Dispatcher {
             Ok(s) => s,
             Err(e) => return Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
         };
+        let nice = params
+            .get("nice")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.min(19) as u8)
+            .unwrap_or(0);
+        let timeout_ms = params.get("timeoutMs").and_then(|v| v.as_u64());
         let sb = crate::sandbox::SandboxState {
             engine,
             wasm_bytes,
             shell,
             env: Default::default(),
-            nice: 0,
-            timeout_ms: None,
+            nice,
+            timeout_ms,
             poisoned: false,
             paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             resume_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
