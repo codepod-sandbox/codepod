@@ -2,7 +2,11 @@
 //! WasmEngine + ShellInstance.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::Notify;
 
 use anyhow::{bail, Result};
 use serde_json::Value;
@@ -19,6 +23,15 @@ pub struct SandboxState {
     pub shell: ShellInstance,
     /// Env table — synced from `__run_command` output after each call.
     pub env: HashMap<String, String>,
+    /// Scheduling priority 0–19. 0 = default (10ms quantum), 19 = lowest (1ms).
+    pub nice: u8,
+    /// Per-command wall-clock kill timeout in ms. None = no limit.
+    pub timeout_ms: Option<u64>,
+    /// Set to true after a command times out. Subsequent run() calls error immediately.
+    pub poisoned: bool,
+    /// When true, run() waits before executing the next command.
+    pub paused: Arc<AtomicBool>,
+    pub resume_notify: Arc<Notify>,
 }
 
 impl SandboxState {
@@ -27,18 +40,56 @@ impl SandboxState {
         wasm_bytes: Arc<Vec<u8>>,
         fs_limit_bytes: Option<usize>,
         initial_env: Vec<(String, String)>,
+        nice: u8,
+        timeout_ms: Option<u64>,
     ) -> Result<Self> {
         let vfs = MemVfs::new(fs_limit_bytes, None);
-        let shell = ShellInstance::new(&engine, &wasm_bytes, vfs, &initial_env, 0).await?;
+        let shell = ShellInstance::new(&engine, &wasm_bytes, vfs, &initial_env, nice).await?;
         let env: HashMap<_, _> = initial_env.into_iter().collect();
-        Ok(Self { engine, wasm_bytes, shell, env })
+        Ok(Self {
+            engine,
+            wasm_bytes,
+            shell,
+            env,
+            nice,
+            timeout_ms,
+            poisoned: false,
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_notify: Arc::new(Notify::new()),
+        })
     }
 
     /// Run a shell command; sync env from the WASM output.
     pub async fn run(&mut self, cmd: &str) -> Result<Value> {
-        let result = self.shell.run_command(cmd).await?;
-        // Sync env returned by the WASM shell.
-        if let Some(env_map) = result.get("env").and_then(|v| v.as_object()) {
+        if self.poisoned {
+            anyhow::bail!("sandbox poisoned: previous command timed out");
+        }
+        // Wait while pre-paused (set externally before this run was called).
+        while self.paused.load(Ordering::Acquire) {
+            self.resume_notify.notified().await;
+        }
+
+        let run_fut = self.shell.run_command(cmd);
+        let raw = match self.timeout_ms {
+            Some(ms) => {
+                match tokio::time::timeout(std::time::Duration::from_millis(ms), run_fut).await {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_elapsed) => {
+                        self.poisoned = true;
+                        return Ok(serde_json::json!({
+                            "exitCode": 124,
+                            "stdout": "",
+                            "stderr": "timeout\n",
+                            "executionTimeMs": ms,
+                        }));
+                    }
+                }
+            }
+            None => run_fut.await?,
+        };
+
+        if let Some(env_map) = raw.get("env").and_then(|v| v.as_object()) {
             self.env.clear();
             for (k, v) in env_map {
                 if let Some(s) = v.as_str() {
@@ -46,14 +97,13 @@ impl SandboxState {
                 }
             }
         }
-        // Collect stdout/stderr from the pipe captures.
         let stdout = String::from_utf8_lossy(&self.shell.take_stdout()).into_owned();
         let stderr = String::from_utf8_lossy(&self.shell.take_stderr()).into_owned();
         Ok(serde_json::json!({
-            "exitCode": result["exit_code"].as_i64().unwrap_or(1),
+            "exitCode": raw["exit_code"].as_i64().unwrap_or(1),
             "stdout": stdout,
             "stderr": stderr,
-            "executionTimeMs": result["execution_time_ms"].as_u64().unwrap_or(0),
+            "executionTimeMs": raw["execution_time_ms"].as_u64().unwrap_or(0),
         }))
     }
 
@@ -62,12 +112,18 @@ impl SandboxState {
         let forked_vfs = self.shell.vfs().cow_clone();
         let env_vec: Vec<_> = self.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let shell =
-            ShellInstance::new(&self.engine, &self.wasm_bytes, forked_vfs, &env_vec, 0).await?;
+            ShellInstance::new(&self.engine, &self.wasm_bytes, forked_vfs, &env_vec, self.nice)
+                .await?;
         Ok(Self {
             engine: self.engine.clone(),
             wasm_bytes: self.wasm_bytes.clone(),
             shell,
             env: self.env.clone(),
+            nice: self.nice,
+            timeout_ms: self.timeout_ms,
+            poisoned: false,
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_notify: Arc::new(Notify::new()),
         })
     }
 }
@@ -101,13 +157,14 @@ impl SandboxManager {
         wasm_bytes: Vec<u8>,
         fs_limit_bytes: Option<usize>,
         timeout_ms: Option<u64>,
+        nice: u8,
         initial_env: Option<Vec<(String, String)>>,
     ) -> Result<()> {
-        let _ = timeout_ms; // Phase 6: fuel limits
         let engine = Arc::new(WasmEngine::new()?);
         let wasm = Arc::new(wasm_bytes);
         let env = initial_env.unwrap_or_default();
-        self.root = Some(SandboxState::new(engine, wasm, fs_limit_bytes, env).await?);
+        self.root =
+            Some(SandboxState::new(engine, wasm, fs_limit_bytes, env, nice, timeout_ms).await?);
         Ok(())
     }
 

@@ -153,11 +153,16 @@ impl Dispatcher {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
         let timeout_ms = params.get("timeoutMs").and_then(|v| v.as_u64());
+        let nice = params
+            .get("nice")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.min(19) as u8)
+            .unwrap_or(0);
 
         // Create the root sandbox.
         if let Err(e) = self
             .manager
-            .create(wasm_bytes, fs_limit_bytes, timeout_ms, None)
+            .create(wasm_bytes, fs_limit_bytes, timeout_ms, nice, None)
             .await
         {
             return Response::err(id, codes::INTERNAL_ERROR, format!("create failed: {e}"));
@@ -695,7 +700,17 @@ impl Dispatcher {
             Ok(s) => s,
             Err(e) => return Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
         };
-        let sb = crate::sandbox::SandboxState { engine, wasm_bytes, shell, env: Default::default() };
+        let sb = crate::sandbox::SandboxState {
+            engine,
+            wasm_bytes,
+            shell,
+            env: Default::default(),
+            nice: 0,
+            timeout_ms: None,
+            poisoned: false,
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        };
         let sid = self.manager.next_named_id.to_string();
         self.manager.next_named_id += 1;
         self.manager.named.insert(sid.clone(), sb);

@@ -13,7 +13,7 @@ fn wasm_bytes() -> Vec<u8> {
 async fn test_create_and_run() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
     let result = mgr.root_run("echo hello").await.unwrap();
     assert_eq!(result["exitCode"].as_i64().unwrap(), 0);
     assert!(result["stdout"].as_str().unwrap().contains("hello"));
@@ -23,7 +23,7 @@ async fn test_create_and_run() {
 async fn test_file_ops() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     let sb = mgr.root.as_mut().unwrap();
 
@@ -203,7 +203,7 @@ async fn test_run_and_env() {
 async fn test_snapshot() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     let sb = mgr.root.as_mut().unwrap();
     sb.shell.vfs_mut().write_file("/tmp/before.txt", b"before", false).unwrap();
@@ -221,7 +221,7 @@ async fn test_snapshot() {
 async fn test_mount() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     let sb = mgr.root.as_mut().unwrap();
     sb.shell.vfs_mut().mkdirp("/mnt/tools").unwrap();
@@ -404,7 +404,7 @@ async fn test_mount_no_files() {
 async fn test_persistence() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     let sb = mgr.root.as_mut().unwrap();
     sb.shell.vfs_mut().write_file("/tmp/persist.txt", b"persistent data", false).unwrap();
@@ -496,7 +496,7 @@ async fn test_persistence_rpc() {
 async fn test_fork() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     let sb = mgr.root.as_mut().unwrap();
     sb.shell.vfs_mut().write_file("/tmp/shared.txt", b"shared", false).unwrap();
@@ -698,7 +698,7 @@ async fn test_sandbox_create_list_remove_rpc() {
 async fn test_history() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();
-    mgr.create(wasm, None, None, None).await.unwrap();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
 
     mgr.root_run("echo first").await.unwrap();
     mgr.root_run("echo second").await.unwrap();
