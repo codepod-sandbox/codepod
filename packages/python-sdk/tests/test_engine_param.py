@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from codepod.sandbox import Sandbox, _find_codepod_server, _find_deno
+from codepod.sandbox import Sandbox, _find_codepod_server, _find_deno  # type: ignore[reportAttributeAccessIssue]
 
 
 def test_find_deno_returns_path_or_none():
