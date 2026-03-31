@@ -153,6 +153,7 @@ pub mod mock {
             stdin_fd: i32,
             stdout_fd: i32,
             _stderr_fd: i32,
+            _nice: u8,
         ) -> Result<i32, HostError> {
             // In streaming pipeline mode, stdin comes from a pipe fd, not the
             // stdin_data string. Read from stdin_fd if stdin_data is empty.

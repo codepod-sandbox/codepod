@@ -99,6 +99,7 @@ pub fn try_builtin(
         "kill" => Some(builtin_kill(state, host, args)),
         "alias" => Some(builtin_alias(state, args)),
         "unalias" => Some(builtin_unalias(state, args)),
+        "nice" => Some(builtin_nice(state, host, args)),
         _ => None,
     };
 
@@ -159,6 +160,7 @@ pub fn is_builtin(cmd_name: &str) -> bool {
             | "kill"
             | "alias"
             | "unalias"
+            | "nice"
     )
 }
 
@@ -2375,6 +2377,61 @@ fn builtin_unalias(state: &mut ShellState, args: &[String]) -> BuiltinResult {
         }
     }
     BuiltinResult::Result(code)
+}
+
+// -- nice -----------------------------------------------------------------
+
+/// `nice [-n N] command [args...]`
+///
+/// Runs a command with a modified scheduling priority.  With no arguments,
+/// prints the current niceness (always 0 since priority is set at sandbox
+/// creation time by the host).  With a command, spawns it via the host ABI
+/// with the requested epoch quantum so the child runs at the right priority.
+fn builtin_nice(state: &mut ShellState, host: &dyn HostInterface, args: &[String]) -> BuiltinResult {
+    let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    // Parse -n N / -nN / --adjustment=N
+    let mut nice: u8 = 0;
+    let mut i = 0;
+    while i < args.len() {
+        if (args[i] == "-n" || args[i] == "--adjustment") && i + 1 < args.len() {
+            nice = args[i + 1].parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
+            i += 2;
+        } else if let Some(val) = args[i].strip_prefix("-n") {
+            if !val.is_empty() {
+                nice = val.parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
+                i += 1;
+            } else {
+                break;
+            }
+        } else if let Some(val) = args[i].strip_prefix("--adjustment=") {
+            nice = val.parse::<i32>().unwrap_or(0).clamp(0, 19) as u8;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+
+    if i >= args.len() {
+        shell_println!("0");
+        return BuiltinResult::Result(0);
+    }
+
+    let prog = args[i];
+    let spawn_args: Vec<&str> = args[i + 1..].to_vec();
+    let env_pairs: Vec<(&str, &str)> =
+        state.env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    match host.spawn(prog, &spawn_args, &env_pairs, &state.cwd, "", state.stdin_fd, state.stdout_fd, 2, nice) {
+        Ok(pid) => match host.waitpid(pid) {
+            Ok(result) => BuiltinResult::Result(result.exit_code),
+            Err(_) => BuiltinResult::Result(1),
+        },
+        Err(e) => {
+            shell_eprintln!("nice: {prog}: {e}");
+            BuiltinResult::Result(127)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -293,6 +293,7 @@ fn exec_path(
                     state.stdin_fd,
                     state.stdout_fd,
                     2,
+                    0,
                 )
                 .map_err(|e| ShellError::HostError(e.to_string()))?;
             let spawn_result = host
@@ -1099,6 +1100,7 @@ pub fn exec_command(
                     state.stdin_fd,
                     spawn_stdout_fd,
                     stderr_fd,
+                    0,
                 )
                 .map_err(|e| ShellError::HostError(e.to_string()))?;
             let spawn_result = host
@@ -1406,6 +1408,7 @@ pub fn exec_command(
                                             state.stdin_fd,
                                             state.stdout_fd,
                                             2,
+                                            0,
                                         )
                                         .and_then(|pid| host.waitpid(pid))
                                     {
@@ -1718,6 +1721,7 @@ pub fn exec_command(
                                                 stage_stdin_fd,
                                                 stage_stdout_fd,
                                                 2, // stderr_fd — dup2'd to stdout by stage setup if 2>&1
+                                                0,
                                             ) {
                                                 Ok(pid) => {
                                                     pids.push((pid, i));

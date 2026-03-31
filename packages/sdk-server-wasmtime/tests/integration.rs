@@ -957,6 +957,31 @@ async fn test_nice_doesnt_break_execution() {
 }
 
 #[tokio::test]
+async fn test_nice_command_forwards_stdout() {
+    // `nice echo hello` must produce stdout "hello\n" (regression: was empty
+    // because run_child always wrapped commands through __run_command, causing
+    // infinite recursion for non-builtin programs like `nice`).
+    let wasm = wasm_bytes();
+    let mut mgr = SandboxManager::new();
+    mgr.create(wasm, None, None, 0, None).await.unwrap();
+
+    // `nice` with no args → should print "0"
+    let r = mgr.root_run("nice").await.unwrap();
+    assert_eq!(r["exitCode"].as_i64().unwrap(), 0);
+    assert_eq!(r["stdout"].as_str().unwrap().trim(), "0");
+
+    // `nice echo hello` → should print "hello"
+    let r = mgr.root_run("nice echo hello").await.unwrap();
+    assert_eq!(r["exitCode"].as_i64().unwrap(), 0);
+    assert_eq!(r["stdout"].as_str().unwrap().trim(), "hello");
+
+    // `nice -n 10 echo world` → should print "world"
+    let r = mgr.root_run("nice -n 10 echo world").await.unwrap();
+    assert_eq!(r["exitCode"].as_i64().unwrap(), 0);
+    assert_eq!(r["stdout"].as_str().unwrap().trim(), "world");
+}
+
+#[tokio::test]
 async fn test_suspend_resume() {
     let wasm = wasm_bytes();
     let mut mgr = SandboxManager::new();

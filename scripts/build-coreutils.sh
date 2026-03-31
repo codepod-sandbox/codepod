@@ -38,6 +38,7 @@ if [[ "${1:-}" == "--copy-fixtures" ]]; then
   cp "$TARGET_DIR/true-cmd-wasm.wasm" "$FIXTURES_DIR/true-cmd.wasm"
   cp "$TARGET_DIR/false-cmd-wasm.wasm" "$FIXTURES_DIR/false-cmd.wasm"
   cp "$TARGET_DIR/codepod-shell-exec.wasm" "$REPO_ROOT/packages/orchestrator/src/shell/__tests__/fixtures/codepod-shell-exec.wasm"
+  cp "$TARGET_DIR/codepod-shell-exec.wasm" "$FIXTURES_DIR/codepod-shell-exec.wasm"
 
   # Build asyncify variant for non-JSPI environments (Safari, Bun, older browsers).
   # Requires wasm-opt (Binaryen) — skipped if not available.

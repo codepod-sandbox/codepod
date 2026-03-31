@@ -104,6 +104,7 @@ pub trait HostInterface {
         stdin_fd: i32,
         stdout_fd: i32,
         stderr_fd: i32,
+        nice: u8,
     ) -> Result<i32, HostError>;
 
     fn has_tool(&self, name: &str) -> bool;
@@ -444,6 +445,7 @@ impl HostInterface for WasmHost {
         stdin_fd: i32,
         stdout_fd: i32,
         stderr_fd: i32,
+        nice: u8,
     ) -> Result<i32, HostError> {
         let mut req = serde_json::json!({
             "prog": program,
@@ -453,6 +455,7 @@ impl HostInterface for WasmHost {
             "stdin_fd": stdin_fd,
             "stdout_fd": stdout_fd,
             "stderr_fd": stderr_fd,
+            "nice": nice,
         });
         if !stdin_data.is_empty() {
             req["stdin_data"] = serde_json::Value::String(stdin_data.to_string());
