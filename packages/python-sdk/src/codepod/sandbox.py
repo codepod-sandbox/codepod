@@ -127,6 +127,7 @@ class Sandbox:
         *,
         engine: str = 'auto',
         timeout_ms: int = 30_000,
+        nice: int = 0,
         fs_limit_bytes: int = 256 * 1024 * 1024,
         mounts: list[tuple[str, MountSpec | VirtualFileSystem]] | None = None,
         python_path: list[str] | None = None,
@@ -145,6 +146,7 @@ class Sandbox:
             return
 
         runtime, server_args, wasm_dir, shell_wasm = _resolve_runtime(engine)
+        self._engine = 'wasmtime' if _find_codepod_server() is not None and (engine == 'auto' or engine == 'wasmtime') else 'deno'
 
         self._client = RpcClient(runtime, server_args)
         self._client.start()
@@ -216,6 +218,9 @@ class Sandbox:
 
             create_params["extensions"] = ext_specs
 
+        if self._engine == 'wasmtime' and nice != 0:
+            create_params["nice"] = max(0, min(19, nice))
+
         self._client.call("create", create_params)
 
         self.commands = Commands(self._client)
@@ -249,6 +254,32 @@ class Sandbox:
         flat = _extract_flat_files(files)
         encoded = _encode_files_for_rpc(flat)
         self._client.call("mount", self._with_id({"path": path, "files": encoded}))
+
+    def suspend(self) -> None:
+        """Pause the sandbox before the next run() call (wasmtime only).
+
+        Raises:
+            NotImplementedError: When the sandbox is not using the wasmtime engine.
+        """
+        if self._engine != 'wasmtime':
+            raise NotImplementedError(
+                "suspend() is only available with the wasmtime engine. "
+                "Current engine: " + self._engine
+            )
+        self._client.call("sandbox.suspend", self._with_id({}))
+
+    def resume(self) -> None:
+        """Resume a previously suspended sandbox (wasmtime only).
+
+        Raises:
+            NotImplementedError: When the sandbox is not using the wasmtime engine.
+        """
+        if self._engine != 'wasmtime':
+            raise NotImplementedError(
+                "resume() is only available with the wasmtime engine. "
+                "Current engine: " + self._engine
+            )
+        self._client.call("sandbox.resume", self._with_id({}))
 
     def snapshot(self) -> str:
         """Save current VFS + env state. Returns snapshot ID."""
