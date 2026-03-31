@@ -6,7 +6,7 @@
 pip install codepod
 ```
 
-The Python wheel is self-contained — it bundles the Bun runtime, the RPC server, and all WASM binaries. No extra dependencies needed.
+The Python wheel is self-contained — it bundles the RPC server and all WASM binaries. No extra dependencies needed.
 
 ## Quick start
 
@@ -20,6 +20,24 @@ with Sandbox() as sb:
     sb.files.write("/home/user/data.csv", b"name,score\nalice,95\nbob,87\n")
     result = sb.commands.run("cat /home/user/data.csv | sort -t, -k2 -rn")
     print(result.stdout)
+```
+
+## Engine selection
+
+By default, the Python SDK uses `codepod-server` (wasmtime) if found on PATH,
+otherwise falls back to Deno.
+
+```python
+import codepod
+sb = codepod.Sandbox()                   # auto (wasmtime preferred)
+sb = codepod.Sandbox(engine='wasmtime') # explicit wasmtime
+sb = codepod.Sandbox(engine='deno')     # explicit Deno (dev/debug)
+```
+
+Install `codepod-server` by building from source:
+```bash
+bash scripts/build-sdk-server.sh
+cp dist/codepod-server ~/.local/bin/
 ```
 
 ## Constructor options
@@ -197,7 +215,7 @@ The shell runner stays alive — only file content is freed. Any method call whi
 
 | Method / Property | Description |
 |---|---|
-| `Sandbox(*, timeout_ms, fs_limit_bytes, mounts, python_path, extensions)` | Create a new sandbox. Use as a context manager. |
+| `Sandbox(*, timeout_ms, fs_limit_bytes, mounts, python_path, extensions, engine)` | Create a new sandbox. Use as a context manager. `engine` is `'auto'` (default), `'wasmtime'`, or `'deno'`. |
 | `sb.commands.run(command, *, stream=False, on_stdout=None, on_stderr=None) -> CommandResult` | Execute a shell command. Set `stream=True` with callbacks for streaming output. |
 | `sb.files.read(path) -> bytes` | Read file contents. |
 | `sb.files.write(path, data)` | Write `bytes` or `str` to a file. |

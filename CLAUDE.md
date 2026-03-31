@@ -38,10 +38,22 @@ bash scripts/build-wheel.sh
 - **`packages/sdk-server/`** — JSON-RPC server for Python SDK
 - **`packages/python-sdk/`** — Python client (`codepod` package)
 
+## Backend Engines
+
+The sandbox server ships two engines:
+
+- **wasmtime** (default, production): `dist/codepod-server` — Rust binary using wasmtime. No Deno dependency. Build: `bash scripts/build-sdk-server.sh`
+- **deno** (dev/debug): `deno run packages/sdk-server/src/server.ts` — TypeScript server. Build: `bash scripts/build-sdk-server.sh --engine deno`
+
+The Python SDK auto-detects the engine: uses `codepod-server` if found on PATH or adjacent to the wheel, otherwise falls back to Deno. Explicit: `Sandbox(engine='wasmtime')` or `Sandbox(engine='deno')`.
+
 ## WASM Binaries
 
-- `codepod-shell-exec.wasm` (1.3MB) — Full shell executor with `__alloc`/`__dealloc`/`__run_command` exports.
+- `codepod-shell-exec.wasm` — plain WASM32-WASI binary (for wasmtime + Deno/JSPI)
+- `codepod-shell-exec-asyncify.wasm` — asyncified variant (for Safari/WebKit, built via `wasm-opt --asyncify`)
 - `packages/shell/` is the parser library (Rust crate `codepod_shell`) used by `codepod-shell-exec`. It has no standalone binary.
+
+Browser sandbox auto-selects: JSPI binary on Chromium, asyncify binary on Safari.
 
 Test fixtures live at `packages/orchestrator/src/platform/__tests__/fixtures/`.
 
