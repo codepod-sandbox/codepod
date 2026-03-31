@@ -20,6 +20,62 @@ def _is_bundled() -> bool:
     return os.path.isdir(_BUNDLED_DIR)
 
 
+def _find_codepod_server() -> str | None:
+    """Find codepod-server binary: adjacent to wheel, then on PATH."""
+    adjacent = os.path.join(_PKG_DIR, "codepod-server")
+    if os.path.isfile(adjacent) and os.access(adjacent, os.X_OK):
+        return adjacent
+    return shutil.which("codepod-server")
+
+
+def _find_deno() -> str | None:
+    """Find the deno binary."""
+    if _is_bundled():
+        p = os.path.join(_BUNDLED_DIR, "deno")
+        if os.path.isfile(p):
+            return p
+    found = shutil.which("deno")
+    if found:
+        return found
+    deno_home = os.path.expanduser("~/.deno/bin/deno")
+    if os.path.isfile(deno_home):
+        return deno_home
+    return None
+
+
+def _resolve_runtime(engine: str) -> tuple[str, list[str], str | None, str | None]:
+    """Return (runtime, server_args, wasm_dir, shell_wasm) for the chosen engine.
+
+    wasm_dir and shell_wasm are None for wasmtime (the binary finds them itself).
+    """
+    if engine == 'wasmtime' or (engine == 'auto' and _find_codepod_server() is not None):
+        binary = _find_codepod_server()
+        if binary is None:
+            raise RuntimeError(
+                "codepod-server not found. Install it or use engine='deno'."
+            )
+        return binary, [], None, None
+
+    # Deno path (engine='deno' or auto-fallback)
+    deno = _find_deno()
+    if deno is None:
+        raise RuntimeError("Neither codepod-server nor deno found on PATH.")
+    if _is_bundled():
+        server = os.path.join(_BUNDLED_DIR, "server.js")
+        wasm_dir = os.path.join(_BUNDLED_DIR, "wasm")
+        shell_wasm = os.path.join(wasm_dir, "codepod-shell-exec.wasm")
+        return deno, [server], wasm_dir, shell_wasm
+    else:
+        repo_root = os.path.abspath(os.path.join(_PKG_DIR, "..", "..", "..", ".."))
+        server = os.path.join(repo_root, "packages", "sdk-server", "src", "server.ts")
+        server_args = ["run", "-A", "--no-check", "--unstable-sloppy-imports", server]
+        wasm_dir = os.path.join(
+            repo_root, "packages", "orchestrator", "src", "platform", "__tests__", "fixtures"
+        )
+        shell_wasm = os.path.join(wasm_dir, "codepod-shell-exec.wasm")
+        return deno, server_args, wasm_dir, shell_wasm
+
+
 def _bundled_paths() -> tuple[str, list[str], str, str]:
     """Return (runtime, server_args, wasm_dir, shell_wasm) for installed mode."""
     runtime = os.path.join(_BUNDLED_DIR, "deno")
@@ -69,6 +125,7 @@ class Sandbox:
     def __init__(
         self,
         *,
+        engine: str = 'auto',
         timeout_ms: int = 30_000,
         fs_limit_bytes: int = 256 * 1024 * 1024,
         mounts: list[tuple[str, MountSpec | VirtualFileSystem]] | None = None,
@@ -87,10 +144,7 @@ class Sandbox:
             self.sandboxes = SandboxManager(self._client)
             return
 
-        if _is_bundled():
-            runtime, server_args, wasm_dir, shell_wasm = _bundled_paths()
-        else:
-            runtime, server_args, wasm_dir, shell_wasm = _dev_paths()
+        runtime, server_args, wasm_dir, shell_wasm = _resolve_runtime(engine)
 
         self._client = RpcClient(runtime, server_args)
         self._client.start()
@@ -103,11 +157,13 @@ class Sandbox:
             )
 
         create_params: dict = {
-            "wasmDir": wasm_dir,
-            "shellWasmPath": shell_wasm,
             "timeoutMs": timeout_ms,
             "fsLimitBytes": fs_limit_bytes,
         }
+        if wasm_dir is not None:
+            create_params["wasmDir"] = wasm_dir
+        if shell_wasm is not None:
+            create_params["shellWasmPath"] = shell_wasm
 
         # Encode mounts for create-time mounting
         if mounts:

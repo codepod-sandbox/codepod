@@ -13,9 +13,10 @@ class TestSandbox:
             assert result.exit_code == 0
 
     def test_missing_deno_raises(self, monkeypatch):
-        monkeypatch.setattr("shutil.which", lambda _: None)
+        monkeypatch.setattr("codepod.sandbox._find_codepod_server", lambda: None)
+        monkeypatch.setattr("codepod.sandbox._find_deno", lambda: None)
         monkeypatch.setattr("codepod.sandbox._is_bundled", lambda: False)
-        with pytest.raises(RuntimeError, match="Deno not found"):
+        with pytest.raises(RuntimeError, match="found on PATH"):
             Sandbox()
 
 
