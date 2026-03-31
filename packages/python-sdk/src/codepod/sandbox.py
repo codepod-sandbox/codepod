@@ -120,6 +120,8 @@ class Sandbox:
             :class:`~codepod.vfs.VirtualFileSystem` instance.
         python_path: Directories to add to PYTHONPATH (in addition to /usr/lib/python).
         extensions: List of :class:`~codepod.Extension` instances to register.
+        nice: CPU scheduling priority, 0–19. 0 = default (10ms quantum),
+            19 = lowest priority (1ms quantum). Wasmtime only; ignored on deno.
     """
 
     def __init__(
@@ -147,7 +149,7 @@ class Sandbox:
             return
 
         runtime, server_args, wasm_dir, shell_wasm = _resolve_runtime(engine)
-        self._engine = 'wasmtime' if _find_codepod_server() is not None and (engine == 'auto' or engine == 'wasmtime') else 'deno'
+        self._engine = 'wasmtime' if wasm_dir is None else 'deno'
 
         self._client = RpcClient(runtime, server_args)
         self._client.start()

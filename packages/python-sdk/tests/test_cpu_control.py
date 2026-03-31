@@ -92,13 +92,15 @@ class TestSuspendResume:
 
     def test_suspend_calls_rpc_on_wasmtime(self):
         sb, client = self._make_wasmtime_sandbox()
+        client.reset_mock()
         sb.suspend()
-        client.call.assert_called_with("sandbox.suspend", {})
+        client.call.assert_called_once_with("sandbox.suspend", {})
 
     def test_resume_calls_rpc_on_wasmtime(self):
         sb, client = self._make_wasmtime_sandbox()
+        client.reset_mock()
         sb.resume()
-        client.call.assert_called_with("sandbox.resume", {})
+        client.call.assert_called_once_with("sandbox.resume", {})
 
     def test_suspend_raises_on_deno(self):
         sb, _ = self._make_deno_sandbox()
