@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: recursive
 
       - uses: denoland/setup-deno@v2
         with:
@@ -118,6 +118,6 @@ jobs:
 
       - name: Run integration tests (deno sdk-server)
         run: |
-          SERVER_BINARY="$HOME/.deno/bin/deno" \
+          SERVER_BINARY="$(which deno)" \
           SERVER_ARGS="run -A --no-check --unstable-sloppy-imports packages/sdk-server/src/server.ts" \
           deno test -A --no-check packages/integration-tests/tests/
