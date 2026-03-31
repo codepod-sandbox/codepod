@@ -11,7 +11,6 @@ members = [
   "packages/test-fixtures/wc-bytes",
   "packages/test-fixtures/true-cmd",
   "packages/test-fixtures/false-cmd",
-  "packages/python",
   # Host binary: Wasmtime-based sandbox server (Option 2 backend)
   "packages/sdk-server-wasmtime",
   # Rust MCP server (wasmtime backend)
