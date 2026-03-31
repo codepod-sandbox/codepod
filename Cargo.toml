@@ -12,16 +12,6 @@ members = [
   "packages/test-fixtures/true-cmd",
   "packages/test-fixtures/false-cmd",
   "packages/python",
-  # Sub-repository crates (numpy-rust, pillow-rust, matplotlib-py, pandas-rust)
-  "packages/numpy-rust/crates/numpy-rust-core",
-  "packages/numpy-rust/crates/numpy-rust-python",
-  "packages/numpy-rust/crates/numpy-rust-wasm",
-  "packages/pillow-rust/crates/pil-rust-core",
-  "packages/pillow-rust/crates/pil-rust-python",
-  "packages/matplotlib-py/crates/matplotlib-python",
-  "packages/pandas-rust/crates/pandas-rust-core",
-  "packages/pandas-rust/crates/pandas-rust-python",
-  "packages/pandas-rust/crates/pandas-rust-wasm",
   # Host binary: Wasmtime-based sandbox server (Option 2 backend)
   "packages/sdk-server-wasmtime",
   # Rust MCP server (wasmtime backend)
@@ -31,9 +21,6 @@ members = [
 ]
 exclude = [
   "packages/sips",
-  # pandas-rust embeds numpy-rust as a nested submodule; exclude to avoid
-  # duplicate package names when the workspace also has packages/numpy-rust.
-  "packages/pandas-rust/packages/numpy-rust",
 ]
 resolver = "2"
 

@@ -631,6 +631,7 @@ dependencies = [
 name = "codepod-coreutils"
 version = "0.1.0"
 dependencies = [
+ "codepod-process",
  "encoding_rs",
  "flate2",
  "regex",
@@ -651,6 +652,10 @@ version = "0.1.0"
 dependencies = [
  "lopdf",
 ]
+
+[[package]]
+name = "codepod-process"
+version = "0.1.0"
 
 [[package]]
 name = "codepod-python"
@@ -2435,15 +2440,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
 
 [[package]]
-name = "matplotlib-python"
-version = "0.1.0"
-dependencies = [
- "numpy-rust-python",
- "pil-rust-python",
- "rustpython",
-]
-
-[[package]]
 name = "matrixmultiply"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2759,15 +2755,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numpy-rust-wasm"
-version = "0.1.0"
-dependencies = [
- "numpy-rust-python",
- "rustpython",
- "rustpython-vm",
-]
-
-[[package]]
 name = "object"
 version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2851,16 +2838,6 @@ dependencies = [
  "numpy-rust-python",
  "pandas-rust-core",
  "rustpython-derive",
- "rustpython-vm",
-]
-
-[[package]]
-name = "pandas-rust-wasm"
-version = "0.1.0"
-dependencies = [
- "numpy-rust-python",
- "pandas-rust-python",
- "rustpython",
  "rustpython-vm",
 ]
 
@@ -3806,7 +3783,6 @@ dependencies = [
  "nix 0.30.1",
  "num-complex",
  "num-traits",
- "parking_lot",
  "radium",
  "rustpython-literal",
  "rustpython-wtf8",
