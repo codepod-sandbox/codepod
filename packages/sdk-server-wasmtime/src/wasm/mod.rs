@@ -169,6 +169,8 @@ impl StoreData {
 pub struct WasmEngine {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<StoreData>>,
+    /// Background epoch ticker task. Aborted when this WasmEngine is dropped.
+    ticker: tokio::task::JoinHandle<()>,
 }
 
 impl WasmEngine {
@@ -184,7 +186,7 @@ impl WasmEngine {
 
         // Ticker: increment epoch every 1ms so epoch-based yields and limits work.
         let ticker_engine = engine.clone();
-        tokio::spawn(async move {
+        let ticker = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(1));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -209,7 +211,14 @@ impl WasmEngine {
         Ok(Self {
             engine: Arc::new(engine),
             linker: Arc::new(linker),
+            ticker,
         })
+    }
+}
+
+impl Drop for WasmEngine {
+    fn drop(&mut self) {
+        self.ticker.abort();
     }
 }
 
