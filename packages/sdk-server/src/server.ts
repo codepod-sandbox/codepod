@@ -156,15 +156,19 @@ async function main(): Promise<void> {
           storage?: boolean;
         };
 
-        if (!wasmDir || typeof wasmDir !== 'string') {
+        // Validate wasmDir — if not provided, derive from shellWasmPath's directory
+        const { resolve: resolvePath, normalize: normalizePath, dirname } = await import('node:path');
+        let resolvedWasmDir = wasmDir;
+        if (!resolvedWasmDir && shellWasmPath && typeof shellWasmPath === 'string') {
+          resolvedWasmDir = dirname(resolvePath(shellWasmPath));
+        }
+        if (!resolvedWasmDir || typeof resolvedWasmDir !== 'string') {
           respond(errorResponse(id, -32602, 'Missing required param: wasmDir'));
           return;
         }
 
-        // Validate wasmDir is an absolute path and doesn't contain traversal
-        const { resolve: resolvePath, normalize: normalizePath } = await import('node:path');
-        const normalizedWasmDir = normalizePath(resolvePath(wasmDir));
-        if (normalizedWasmDir !== wasmDir && normalizedWasmDir !== resolvePath(wasmDir)) {
+        const normalizedWasmDir = normalizePath(resolvePath(resolvedWasmDir));
+        if (normalizedWasmDir !== resolvedWasmDir && normalizedWasmDir !== resolvePath(resolvedWasmDir)) {
           respond(errorResponse(id, -32602, 'wasmDir contains path traversal'));
           return;
         }

@@ -31,6 +31,9 @@ members = [
 ]
 exclude = [
   "packages/sips",
+  # pandas-rust embeds numpy-rust as a nested submodule; exclude to avoid
+  # duplicate package names when the workspace also has packages/numpy-rust.
+  "packages/pandas-rust/packages/numpy-rust",
 ]
 resolver = "2"
 
