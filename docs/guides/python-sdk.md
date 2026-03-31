@@ -49,6 +49,7 @@ sb = Sandbox(
     mounts=[("/mnt/data", {"f.txt": b"hello"})],
     python_path=["/mnt/libs"],
     extensions=[Extension(name="mytool", command=my_handler)],
+    nice=10,                          # CPU priority 0–19 (wasmtime only, default 0)
 )
 ```
 
@@ -188,6 +189,49 @@ When mounted, the VFS is walked and serialized to the sandbox. Files are snapsho
 
 See [Mounting Files](mounting-files.md) for detailed examples and patterns.
 
+## CPU control (wasmtime only)
+
+These features are available when using the wasmtime engine.
+
+### Scheduling priority (`nice`)
+
+Set the sandbox's CPU scheduling priority at creation time. Higher values yield more often, giving other sandboxes more CPU time:
+
+```python
+# Default priority (10ms quantum)
+sb = Sandbox()
+
+# Background sandbox — yields frequently, low impact on other work
+sb = Sandbox(nice=10)   # ~5ms quantum
+sb = Sandbox(nice=19)   # ~1ms quantum (lowest priority)
+```
+
+`nice` maps to the epoch quantum: `quantum = max(1, 10 - nice // 2)` ms. It is set once at creation and applies to all commands run in that sandbox.
+
+### Suspend and resume
+
+Pause a sandbox before a `run()` call, then resume it from another thread or coroutine:
+
+```python
+import threading
+from codepod import Sandbox
+
+sb = Sandbox(engine='wasmtime')
+
+def resume_after_delay():
+    import time
+    time.sleep(2)
+    sb.resume()
+
+threading.Thread(target=resume_after_delay).start()
+sb.suspend()
+result = sb.commands.run("echo hello")  # waits until resume() is called
+```
+
+`suspend()` takes effect before the next `run()` call — it does not interrupt an in-progress command. `resume()` unblocks the pending run.
+
+Both methods raise `NotImplementedError` on the deno engine.
+
 ## Offloading to external storage
 
 For applications managing many sandboxes, offload inactive ones to free memory:
@@ -215,7 +259,7 @@ The shell runner stays alive — only file content is freed. Any method call whi
 
 | Method / Property | Description |
 |---|---|
-| `Sandbox(*, timeout_ms, fs_limit_bytes, mounts, python_path, extensions, engine)` | Create a new sandbox. Use as a context manager. `engine` is `'auto'` (default), `'wasmtime'`, or `'deno'`. |
+| `Sandbox(*, timeout_ms, fs_limit_bytes, mounts, python_path, extensions, engine, nice)` | Create a new sandbox. Use as a context manager. `engine` is `'auto'` (default), `'wasmtime'`, or `'deno'`. `nice` sets CPU scheduling priority 0–19 (wasmtime only). |
 | `sb.commands.run(command, *, stream=False, on_stdout=None, on_stderr=None) -> CommandResult` | Execute a shell command. Set `stream=True` with callbacks for streaming output. |
 | `sb.files.read(path) -> bytes` | Read file contents. |
 | `sb.files.write(path, data)` | Write `bytes` or `str` to a file. |
@@ -233,6 +277,8 @@ The shell runner stays alive — only file content is freed. Any method call whi
 | `sb.fork() -> Sandbox` | Create an independent forked sandbox. |
 | `sb.destroy()` | Destroy a forked sandbox. |
 | `sb.kill()` | Shut down the RPC server (root sandbox only). |
+| `sb.suspend()` | Pause the sandbox before the next `run()` call (wasmtime only). |
+| `sb.resume()` | Resume a suspended sandbox (wasmtime only). |
 
 ### Data types
 
