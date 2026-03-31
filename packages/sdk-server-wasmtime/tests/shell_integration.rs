@@ -12,7 +12,7 @@ static WASM_BYTES: &[u8] = include_bytes!(concat!(
 async fn make_instance() -> anyhow::Result<ShellInstance> {
     let engine = WasmEngine::new()?;
     let vfs = MemVfs::new(None, None);
-    ShellInstance::new(&engine, WASM_BYTES, vfs, &[]).await
+    ShellInstance::new(&engine, WASM_BYTES, vfs, &[], 0).await
 }
 
 #[tokio::test]

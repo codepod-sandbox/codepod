@@ -29,7 +29,7 @@ impl SandboxState {
         initial_env: Vec<(String, String)>,
     ) -> Result<Self> {
         let vfs = MemVfs::new(fs_limit_bytes, None);
-        let shell = ShellInstance::new(&engine, &wasm_bytes, vfs, &initial_env).await?;
+        let shell = ShellInstance::new(&engine, &wasm_bytes, vfs, &initial_env, 0).await?;
         let env: HashMap<_, _> = initial_env.into_iter().collect();
         Ok(Self { engine, wasm_bytes, shell, env })
     }
@@ -62,7 +62,7 @@ impl SandboxState {
         let forked_vfs = self.shell.vfs().cow_clone();
         let env_vec: Vec<_> = self.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let shell =
-            ShellInstance::new(&self.engine, &self.wasm_bytes, forked_vfs, &env_vec).await?;
+            ShellInstance::new(&self.engine, &self.wasm_bytes, forked_vfs, &env_vec, 0).await?;
         Ok(Self {
             engine: self.engine.clone(),
             wasm_bytes: self.wasm_bytes.clone(),

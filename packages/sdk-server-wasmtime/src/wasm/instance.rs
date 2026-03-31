@@ -32,6 +32,7 @@ impl ShellInstance {
         wasm_bytes: &[u8],
         vfs: MemVfs,
         env: &[(String, String)],
+        nice: u8,
     ) -> anyhow::Result<Self> {
         let module = Arc::new(Module::new(&engine.engine, wasm_bytes).context("compiling WASM module")?);
 
@@ -42,9 +43,10 @@ impl ShellInstance {
 
         // Add fuel so the engine can interrupt runaway guests (Phase 6+ will tune this).
         store.set_fuel(u64::MAX / 2)?;
-        // Set epoch deadline far in the future so the ticker doesn't interrupt until
-        // a per-command limit is configured (Phase 6+ will tune this per command).
-        store.set_epoch_deadline(u64::MAX / 2);
+        // Yield to the tokio executor every `quantum` epochs (1ms each).
+        // Low nice = fewer yields (higher priority); high nice = more yields (lower priority).
+        let quantum = crate::wasm::nice_to_quantum(nice);
+        store.epoch_deadline_async_yield_and_update(quantum);
 
         let instance = engine
             .linker

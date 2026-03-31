@@ -691,7 +691,7 @@ impl Dispatcher {
             (root.engine.clone(), root.wasm_bytes.clone())
         };
         let vfs = crate::vfs::MemVfs::new(None, None);
-        let shell = match crate::wasm::ShellInstance::new(&engine, &wasm_bytes, vfs, &[]).await {
+        let shell = match crate::wasm::ShellInstance::new(&engine, &wasm_bytes, vfs, &[], 0).await {
             Ok(s) => s,
             Err(e) => return Response::err(id, codes::INTERNAL_ERROR, e.to_string()),
         };
